@@ -1,0 +1,50 @@
+{
+  "cl": "Node.Config",
+  "name": "www",
+  "domain": "domain.ext",
+  "protocol": "https",
+  "serverType": "self",
+  "portHttp": 8081,
+  "portHttps": 8082,
+  "SSLCABundles": [],
+  "directory": "C:/Prj",
+  "consoleURL": "",
+  "configS3": {
+    "accessKeyId": "",
+    "secretAccessKey": "",
+    "region": ""
+  },
+  "configGCloudStorage": {
+    "keyFilename": "",
+    "projectId": ""
+  },
+  "bucketGCloud": "",
+  "storage": "gcloud",
+  "dbPort": "5432",
+  "dbAddress": "localhost",
+  "dbUser": "dbuser",
+  "dbPassword": "dbpass",
+  "timerSession": 6000,
+  "handleException": true,
+  "minify": true,
+  "timeBackup": 15,
+  "daysBackups": 30,
+  "numMinBackups": 5,
+  "appDirectory": "C:/IDCloud/IDC/AppDirectory",
+  "users": [
+    {
+      "cl": "Node.User",
+      "userName": "manager",
+      "projects": [],
+      "databases": [],
+      "apps": [
+        {
+          "cl": "Node.App",
+          "name": "AppNAme",
+          "date": "2016-09-16T08:20:16.166Z",
+          "stopped": false
+        }
+      ]
+    }
+  ]
+}

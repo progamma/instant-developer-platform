@@ -137,15 +137,29 @@ Node.Worker.prototype.createChild = function ()
   this.child.on("disconnect", function () {
     pthis.log("DEBUG", "Worker child disconnected", "Worker.createChild");
     //
+    // Now the child is dead
+    delete pthis.child;
+    //
     // Child has died. If I was installing the child crashed during install
     if (pthis.installCallback) {
       var err = (runErrors.length > 0 ? runErrors.join("\n") : "Unknown error");
       pthis.installCallback({err: "Installation failed: " + err});
       delete pthis.installCallback;
     }
-    //
-    // Now the child is dead
-    delete pthis.child;
+    else if (pthis.app.workers.indexOf(pthis) !== -1) {
+      // If I'm still inside my app's worker list it means I've crashed...
+      // (see app::deleteWorker: first the worker is removed then the worker's child is disconnected)
+      pthis.log("WARN", "Worker is still inside app's list (maybe it crashed?) -> Delete worker all its sessions", "Worker.createChild", {numsession: pthis.sessions.length});
+      //
+      // Remove all worker's sessions from global map (don't use the worker::deleteSession...
+      // it does too many things)
+      for (var i = 0; i < pthis.sessions.length; i++)
+        delete pthis.server.appSessions[pthis.sessions[i].id];
+      //
+      // Now remove this worker from app's list (don't use the app::deleteWorker...
+      // it does too many things... I'm crashed... I'll be dead in a second...)
+      pthis.app.workers.splice(pthis.app.workers.indexOf(pthis), 1);
+    }
   });
 };
 
@@ -379,7 +393,7 @@ Node.Worker.prototype.deleteSession = function (session)
 
 
 /**
- * Delete the session
+ * Terminate the worker
  * @param {object} options ({force, timeout, msg})
  */
 Node.Worker.prototype.terminate = function (options)
@@ -391,7 +405,10 @@ Node.Worker.prototype.terminate = function (options)
 };
 
 
-
+/**
+ * Send a message to worker's child
+ * @param {object} msg - message to send
+ */
 Node.Worker.prototype.sendToChild = function (msg)
 {
   if (this.child)

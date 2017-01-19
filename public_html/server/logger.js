@@ -208,7 +208,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
         console.error(s);
       else
         console.log(s);
-      return;
+//      return;
     }
     //
     // Error goes to console.error and continue with log file

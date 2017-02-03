@@ -1283,7 +1283,8 @@ Node.Branch.prototype.getConflicts = function (callback)
       // 3) if the object moved (i.e. object's parent property) is not the new value (the target of the conflict) the conflict is gone
       if (!ti.obj || // The object is not in the document
               (ti.prop && (ti.obj[ti.prop] || "") !== (ti.new || "")) || // The object is not in conflict
-              (ti.np && ti.obj.parent !== ti.np)) {      // The object is not in conflict
+              (ti.np && ti.obj.parent !== ti.np) || // The object is not in conflict
+              (!ti.ac && ti.ac_id)) {   // The object was added but it does not exist anymore and it can't be deleted if the conflict is refused
         // Log conflict removal
         twManager.logger.log("DEBUG", "Removed conflict (auto-resolved?)", "Branch.getConflicts", {idx: i, n: pthis.conflictTrans.transItems.length});
         pthis.conflictTrans.transItems.splice(i--, 1);

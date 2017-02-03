@@ -312,30 +312,40 @@ Node.Project.prototype.editProject = function (params, callback)
   // First try to see if there is an open session for this project...
   var session = this.server.getOpenSession(this);
   //
-  // If there is already a dying session
-  if (session && session.killSessionTimer) {
-    // Note: I want to handle REFRESH (F5) but I don't want the user to use this dying session if it has been disconnected too long ago
+  // If there is already a session
+  if (session) {
+    this.log("DEBUG", "Found old open session", "Project.editProject", {sid: session.id});
     //
-    // If this session has been killed more than 3 seconds ago
-    if ((new Date() - session.killSessionTimer.start) > 3000) {
-      this.log("WARN", "Found session scheduled to die too long ago... dont use it", "Project.editProject",
-              {deathDelta: (new Date() - session.killSessionTimer.start)});
+    // If the session is dying
+    if (session.killSessionTimer) {
+      // Note: I want to handle REFRESH (F5) but I don't want the user to use this dying session if it has been disconnected too long ago
       //
-      // Let the session die... I'll create a new one
-      session = undefined;
-    }
-    else { // The session has been killed less than 3 seconds ago. Use it
-      this.log("INFO", "Found session scheduled to die... use it", "Project.editProject",
-              {deathDelta: (new Date() - session.killSessionTimer.start)});
-      //
-      // Restart kill timer... otherwise this session will be dead soon!
-      session.startAutoKillTimer(60000);
+      // If this session has been killed more than 3 seconds ago
+      if ((new Date() - session.killSessionTimer.start) > 3000) {
+        this.log("WARN", "Previous session scheduled to die MORE than 3 seconds ago... replace it with a new one", "Project.editProject",
+                {sid: session.id, deathDelta: (new Date() - session.killSessionTimer.start)});
+        //
+        // I can't leave this session alive and create a new one... there would be two sessions
+        // and if the "old" (dying) session gets back I'll get in trouble!!!
+        // Kill the dying session NOW so that I can replace it with a new one...
+        session.closeAllConnections();
+        session = undefined;
+      }
+      else { // The session has been killed less than 3 seconds ago. Use it
+        this.log("DEBUG", "Previous session scheduled to die LESS than 3 seconds ago... stop death and use it", "Project.editProject",
+                {sid: session.id, deathDelta: (new Date() - session.killSessionTimer.start)});
+        //
+        // Restart kill timer... otherwise this session will be dead soon!
+        session.startAutoKillTimer(60000);
+      }
     }
   }
   //
   // If not found, create a new session for this project
-  if (!session)
+  if (!session) {
+    this.log("DEBUG", "Create a new IDE session", "Project.editProject");
     session = this.server.createSession(this);
+  }
   //
   // Redirect to the MAIN page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);

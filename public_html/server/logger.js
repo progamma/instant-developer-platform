@@ -202,7 +202,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
     }
     //
     // Debug goes only to console.log
-    if (level === "DEBUG") {
+    if (level === "DEBUG" && this.config && this.config.local) {
       // For APPS use always ERROR console (otherwise it sends this message to "app-dtt-console")
       if (this.parentType === "IDEAPP")
         console.error(s);
@@ -212,7 +212,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
     }
     //
     // Error goes to console.error and continue with log file
-    if (level === "ERROR")
+    if (level === "ERROR" && this.config && this.config.local)
       console.error(s);
   }
   //

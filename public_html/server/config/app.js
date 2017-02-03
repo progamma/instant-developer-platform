@@ -181,19 +181,21 @@ Node.App.prototype.deleteWorker = function (worker)
   var pthis = this;
   //
   var idx = this.workers.indexOf(worker);
+  if (idx === -1)
+    return this.log("WARN", "Worker not found", "App.deleteWorker");
+  //
   this.workers.splice(idx, 1);
   //
   // If the worker has a child, kill him
   if (worker.child) {
-    // Send a "disconnect" message
-    worker.child.disconnect();
-    delete worker.child;
+    // Kill the child
+    worker.killChild();
     //
     // If the child does not end normally, I'll (forcedly) kill him in 3 seconds
     setTimeout(function () {
       if (worker.child && worker.child.connected) {
         pthis.log("WARN", "Worker did not quit in 3 seconds -> killing him", "App.deleteWorker", {workerIdx: idx});
-        worker.child.kill("SIGKILL");
+        worker.killChild(true);
       }
     }, 3000);
     //
@@ -275,15 +277,36 @@ Node.App.prototype.sendSessions = function (params, callback)
 {
   // Reply:
   //  sessions: {total number of sessions}
-  //  workers: [{sessions per worker 1}, {sessions per worker 2}, ...]}
+  //  workers: [{worker 1 details}, {worker 2  details}, ...]}  (see worker::getStatus)
   var sessions = {sessions: 0, workers: []};
+  //
+  // If there are no workers I've done
+  if (this.workers.length === 0)
+    return callback({msg: JSON.stringify(sessions)});
+  //
+  // Add worker's details
+  var nwrk = 0;
   for (var i = 0; i < this.workers.length; i++) {
     var wrk = this.workers[i];
-    sessions.workers.push(wrk.sessions.length);
+    //
+    // Compute total app sessions (by adding worker's count)
     sessions.sessions += wrk.sessions.length;
+    //
+    // Add worker status
+    wrk.getStatus(function (result, err) {
+      if (err) {
+        this.log("ERROR", "Error getting worker's status: " + err, "App.sendSessions");
+        return callback("Error getting worker's status: " + err);
+      }
+      //
+      // Add worker's status
+      sessions.workers.push(result);
+      //
+      // If that's the last one, I can reply
+      if (++nwrk === this.workers.length)
+        callback({msg: JSON.stringify(sessions)});
+    }.bind(this));    // jshint ignore:line
   }
-  //
-  callback({msg: JSON.stringify(sessions)});
 };
 
 

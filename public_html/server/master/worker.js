@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2016
  * All rights reserved
  */
-/* global require, module */
+/* global require, module, process */
 
 var Node = Node || {};
 
@@ -33,6 +33,8 @@ Node.Worker.msgTypeMap = {
   terminate: "terminate",
   deleteSession: "delses",
   sendRestResponse: "rest",
+  watchdogRequest: "wdreq",
+  watchdogResponse: "wdres",
   connectionDB: "conDB",
   sync: "sync",
   syncBroad: "syncBroad",
@@ -87,6 +89,8 @@ Node.Worker.prototype.log = function (level, message, sender, data)
   data = (data ? JSON.parse(JSON.stringify(data)) : {});
   data.app = this.app.name;
   data.user = this.user.userName;
+  data.workerIdx = this.app.workers.indexOf(this);
+  data.totalWorkers = this.app.workers.length;
   //
   this.logger.log(level, message, sender, data);
 };
@@ -149,20 +153,63 @@ Node.Worker.prototype.createChild = function ()
     else if (pthis.app.workers.indexOf(pthis) !== -1) {
       // If I'm still inside my app's worker list it means I've crashed...
       // (see app::deleteWorker: first the worker is removed then the worker's child is disconnected)
-      pthis.log("WARN", "Worker is still inside app's list (maybe it crashed?) -> Delete worker all its sessions", "Worker.createChild", {numsession: pthis.sessions.length});
+      pthis.log("WARN", "Worker is still inside app's list (maybe it crashed?) -> Delete worker all its sessions", "Worker.createChild",
+              {numsession: pthis.sessions.length});
       //
-      // Remove all worker's sessions from global map (don't use the worker::deleteSession...
-      // it does too many things)
-      for (var i = 0; i < pthis.sessions.length; i++)
-        delete pthis.server.appSessions[pthis.sessions[i].id];
+      // Terminate and delete all worker's sessions
+      while (pthis.sessions.length) {
+        pthis.sessions[0].terminate();
+        pthis.deleteSession(pthis.sessions[0]);
+      }
       //
-      // Now remove this worker from app's list (don't use the app::deleteWorker...
-      // it does too many things... I'm crashed... I'll be dead in a second...)
-      pthis.app.workers.splice(pthis.app.workers.indexOf(pthis), 1);
+      // Now, deleting all sessions should have programmed my death (see Worker::deleteSession).
+      // I don't need to die... I just need a new child...
+      if (pthis.killWorkerTimer) {
+        clearTimeout(pthis.killWorkerTimer);
+        delete pthis.killWorkerTimer;
+      }
+      //
+      pthis.log("INFO", "Crashed worker restored", "Worker.createChild");
     }
   });
+  //
+  // Start the child process watchdog
+  this.startWatchDog();
 };
 
+
+/**
+ * Kill the child process
+ * @param {boolean} force - if true sends a SIGKILL message
+ */
+Node.Worker.prototype.killChild = function (force)
+{
+  // If dead, do nothing
+  if (!this.child)
+    return;
+  //
+  // If there was a kill timer, stop it
+  if (this.killWorkerTimer) {
+    clearTimeout(this.killWorkerTimer);
+    delete this.killWorkerTimer;
+  }
+  //
+  // Stop watchDog... I'll be dead soon!
+  this.stopWatchDog();
+  //
+  // If requested use brute force
+  if (force) {
+    this.log("WARN", "Forcedly kill worker child", "Worker.killChild");
+    this.child.kill("SIGKILL");
+    //
+    // Now the child should be dead
+    delete this.child;
+  }
+  else {
+    this.log("DEBUG", "Disconnects worker child", "Worker.killChild");
+    this.child.disconnect();
+  }
+};
 
 
 /**
@@ -196,8 +243,6 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       appsess = this.server.appSessions[msg.sid];
       if (appsess)
         appsess.terminate();
-      else
-        this.log("WARN", "Can't delete session: session not found", "Worker.handleAppChildMessage", msg);
       break;
 
     case Node.Worker.msgTypeMap.sendRestResponse:
@@ -210,6 +255,11 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       }
       else
         this.log("WARN", "Can't send REST response: session not found", "Worker.handleAppChildMessage", msg);
+      break;
+
+    case Node.Worker.msgTypeMap.watchdogResponse:
+      if (this.watchdog)
+        this.watchdog.lastTick = new Date();
       break;
 
     case Node.Worker.msgTypeMap.sync:
@@ -326,6 +376,55 @@ Node.Worker.prototype.handleCreateDBMsg = function (msg)
 
 
 /**
+ * Starts the watchdog that checks if the child process is up and running properly
+ */
+Node.Worker.prototype.startWatchDog = function ()
+{
+  // If there was a previous watchdog, kill it
+  this.stopWatchDog();
+  //
+  // Check process every 5 seconds... If it does not reply for more than 30 seconds, kill it
+  this.watchdog = {};
+  this.watchdog.lastTick = new Date();
+  this.watchdog.intervalID = setInterval(function () {
+    // If I'm already dying, do nothing
+    if (this.killWorkerTimer)
+      return;
+    //
+    // If the elapsed time exceeded
+    var dt = (new Date() - this.watchdog.lastTick);
+    if (dt > 30000) {
+      this.log("WARN", "Child did not answer for 30sec -> killing it", "Worker.startWatchDog");
+      //
+      // Kill the child (brute force)
+      this.killChild(true);
+      //
+      // Stop the watchdog
+      this.stopWatchDog();
+      return;
+    }
+    //
+    // If the child is still here, check if is alive and kicking
+    if (this.child)
+      this.sendToChild({type: Node.Worker.msgTypeMap.watchdogRequest});
+  }.bind(this), 5000);
+};
+
+
+/**
+ * Stops the watchdog that checks if the child process is up and running properly
+ */
+Node.Worker.prototype.stopWatchDog = function ()
+{
+  // If the watchdog was enabled stop its interval
+  if (this.watchdog && this.watchdog.intervalID)
+    clearInterval(this.watchdog.intervalID);
+  //
+  delete this.watchdog;
+};
+
+
+/**
  * Get the number of sessions for this worker
  */
 Node.Worker.prototype.getLoad = function ()
@@ -415,6 +514,40 @@ Node.Worker.prototype.sendToChild = function (msg)
     this.child.send(msg);
   else
     this.log("WARN", "Can't send message: worker's child is gone", "Worker.sendToChild", msg);
+};
+
+
+/**
+ * Returns the worker's status
+ * @param {function} callback - function(result, err)
+ */
+Node.Worker.prototype.getStatus = function (callback)
+{
+  var stat = {sessions: this.sessions.length};
+  //
+  // If I've no child, I've nothing more to say
+  if (!this.child)
+    return callback(stat);
+  //
+  // Add child's PID
+  stat.pid = this.child.pid;
+  //
+  // On Windows there is nothing I can add
+  if (/^win/.test(process.platform))   // windows
+    return callback(stat);
+  //
+  // Add more info (per-process CPU load)
+  this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
+    if (err) {
+      this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
+      return callback(null, "Error getting the CPU load: " + (stderr || err));
+    }
+    //
+    stdout = stdout.split("\n")[1];   // Remove headers
+    stat.cpuLoad = parseFloat(stdout);
+    //
+    callback(stat);
+  }.bind(this));
 };
 
 

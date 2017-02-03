@@ -70,10 +70,9 @@ Node.IDEAppClient.prototype.log = function (level, message, sender, data)
 {
   // Add "local" info
   data = (data ? JSON.parse(JSON.stringify(data)) : {});
-  data.sid = this.session.id;
   data.cid = this.id;
   //
-  this.logger.log(level, message, sender, data);
+  this.session.log(level, message, sender, data);
 };
 
 

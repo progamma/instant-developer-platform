@@ -603,7 +603,7 @@ Node.Config.prototype.processRun = function (req, res)
     // If a SID was provided on the query string, check for it
     sid = req.query.sid;
     cid = req.query.cid;
-    if (sid && (cid || req.query.mode === "rest")) {
+    if (sid) {
       // Search if a session for this SID exists
       session = this.server.appSessions[sid];
       if (!session) {
@@ -611,13 +611,25 @@ Node.Config.prototype.processRun = function (req, res)
         return res.status(500).send("Invalid session");
       }
       //
-      // Session exists. Now, if the request is not REST, check client
-      if (req.query.mode !== "rest") {
+      // Session exists. Now, if given, check client
+      if (cid) {
         var client = session.getAppClientById(cid);
         if (!client) {
           this.logger.log("WARN", "Sesion client not found", "Config.startApp", {sid: sid, cid: cid});
           return res.status(500).send("Invalid client");
         }
+      }
+      else if (req.query.mode !== "rest" && session.masterAppClient) {
+        // - SID was provided and is valid and is connected with a master client
+        // - Session is not REST
+        // - CID was not provided
+        // That's telecollaboration!!!
+        // Create a new ID for the new client that will be created soon (client will be created
+        // inside the session::createAppClient called below)
+        cid = Node.Utils.generateUID36();
+        session.newCid = cid;
+        //
+        this.logger.log("DEBUG", "No CID provided for MASTER session -> grant for telecollaboration", "Config.startApp", {sid: sid, cid: cid});
       }
     }
     else {
@@ -635,7 +647,7 @@ Node.Config.prototype.processRun = function (req, res)
       // Create a new ID for the new client that will be created soon (client will be created
       // inside the session::createAppClient called below)
       cid = Node.Utils.generateUID36();
-      session.newMasterCid = cid;
+      session.newCid = cid;
       //
       this.logger.log("DEBUG", "Created new app session", "Config.processRun",
               {user: app.user.userName, app: appName, sid: sid, cid: cid, url: req.originalUrl});
@@ -745,7 +757,7 @@ Node.Config.prototype.processRun = function (req, res)
                 });
               }
               else
-                postfiles.push({path: "uploaded/" + id + ext, type: undefined, publicUrl: serverPath});
+                postfiles.push({path: "uploaded/" + id + ext, type: undefined, originalName: f.originalFilename, publicUrl: serverPath});
               //
               // Log operation
               pthis.logger.log("INFO", "Received file via REST request", "Config.processRun",
@@ -838,7 +850,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
       result.serverInfo.disk.capacity = Math.ceil(result.serverInfo.disk.available * 100 / result.serverInfo.disk.size) + "%";
     }
     //
-    // On linux add NTP info
+    // On linux add NTP info and CPU load
     if (!/^win/.test(process.platform)) {   // linux
       this.server.execFileAsRoot("/usr/bin/ntpq", ["-p"], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
@@ -851,7 +863,23 @@ Node.Config.prototype.sendStatus = function (params, callback)
         //
         result.serverInfo.time = {synch: (stdout[0][0] === "*" ? "on" : "off"), date: new Date(), offset: stdout[8]};
         //
-        callback({msg: JSON.stringify(result)});
+        // Add more info (per-process CPU load)
+        this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", process.pid], function (err, stdout, stderr) {   // jshint ignore:line
+          if (err) {
+            this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
+            return callback(null, "Error getting the CPU load: " + (stderr || err));
+          }
+          //
+          stdout = stdout.split("\n")[1];   // Remove headers
+          result.serverInfo.cpuLoad = parseFloat(stdout);
+          //
+          // Finally, get CPU load
+          Node.Utils.getCPUload(function (cpuLoad) {
+            result.serverInfo.globalCpuLoad = cpuLoad;
+            //
+            callback({msg: JSON.stringify(result)});
+          });
+        }.bind(this));
       }.bind(this));
     }
     else
@@ -1008,17 +1036,15 @@ Node.Config.prototype.sendUsersList = function (params, callback)
  */
 Node.Config.prototype.sendSessionsList = function (params, callback)
 {
-  var sessions = this.server.getOnlineSessions();
-  for (var i = 0; i < sessions.length; i++) {
-    var sess = sessions[i];
-    sessions[i] = {user: sess.project.user.userName, project: sess.project.name, nClients: sess.countClients()};
+  var sessions = [];
+  var onlineSessions = this.server.getOnlineSessions();
+  for (var i = 0; i < onlineSessions.length; i++) {
+    var sess = onlineSessions[i];
     //
-    // If requested add more info
-    if (params.req.query.full) {
-      sessions[i].id = sess.id;
-      sessions[i].type = sess.options.type;
-    }
+    sessions.push({id: sess.id, type: sess.options.type, readOnly: sess.options.readOnly,
+      user: sess.project.user.userName, project: sess.project.name, nClients: sess.countClients()});
   }
+  //
   callback({msg: JSON.stringify(sessions)});
 };
 

@@ -133,10 +133,8 @@ Node.IDESession.prototype.log = function (level, message, sender, data)
   // Add "local" info
   data = (data ? JSON.parse(JSON.stringify(data)) : {});
   data.sid = this.id;
-  data.project = this.project.name;
-  data.user = this.project.user.userName;
   //
-  this.logger.log(level, message, sender, data);
+  this.project.log(level, message, sender, data);
 };
 
 
@@ -278,7 +276,7 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
     //
     // If the user has an image, use it for profile
     if (this.project.user.IID)
-      profile.img = "/" + this.project.user.userName + "/picture";
+      profile.img = "/" + this.project.user.userName + "/picture" + (this.config.auth ? "?autk=" + this.config.autk : "");
   }
   //
   // If not reconnected

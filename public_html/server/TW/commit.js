@@ -145,6 +145,7 @@ Node.Commit.prototype.undo = function (checkConflicts)
  */
 Node.Commit.prototype.redo = function (checkConflicts)
 {
+  // jshint maxdepth:10
   var twManager = this.parent.parent;
   var reSaveCommit;
   //
@@ -178,6 +179,7 @@ Node.Commit.prototype.redo = function (checkConflicts)
         // Check if there are conflicts for objects that have desapeared... If so, remove the conflict
         // Don't remove conflicts that have to do with objects that would have been inserted by the conflict!
         var ACconfl = {};
+        var k;
         for (var j = 0; j < conflictItems.length; j++) {
           var confl = conflictItems[j];
           if (confl.obj && !twManager.doc.getObjectById(confl.obj.id) && !ACconfl[confl.obj.id]) {
@@ -194,7 +196,7 @@ Node.Commit.prototype.redo = function (checkConflicts)
             // This object was added and now has been deleted... forget about it
             // Remove all items that have something to do with this object
             var oToDel = confl.rc.id;
-            for (var k = 0; k <= j; k++) {      // Stop at me (RC)
+            for (k = 0; k <= j; k++) {      // Stop at me (RC)
               var confl1 = conflictItems[k];
               if ((confl1.obj && confl1.obj.id === oToDel) || (confl1.ac && confl1.ac.id === oToDel) || (confl1.rc && confl.rc.id === oToDel)) {
                 conflictItems.splice(k--, 1);
@@ -220,7 +222,7 @@ Node.Commit.prototype.redo = function (checkConflicts)
         // if I'll undo this transaction my object will resurrect and not the FORKED one
         // Check if the commit contains an RC
         var hasRC = false;
-        for (var k = 0; k < tr.transItems.length && !hasRC; k++)
+        for (k = 0; k < tr.transItems.length && !hasRC; k++)
           if (tr.transItems[k].rc || tr.transItems[k].rc_id)    // Either true or missing obj
             hasRC = true;
         //

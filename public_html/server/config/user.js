@@ -1043,28 +1043,39 @@ Node.User.prototype.sendAppSessions = function (params, callback)
   //  sessions: {total number of sessions for all apps}
   //  app1: {
   //    sessions: {total number of sessions for the app1}
-  //    workers: [{sessions per worker 1 of the app1}, {sessions per worker 2 of the app1}, ...]}
+  //    workers: [{app1.worker 1 details}, {app1.worker 2 details}, ...]}  (see worker::getStatus)
   //  },
   //  app2: {
   //    sessions: {total number of sessions for the app2}
-  //    workers: [{sessions per worker 1 of the app2}, {sessions per worker 2 of the app2}, ...]}
+  //    workers: [{app2.worker 1 details}, {app2.worker 2 details}, ...]}  (see worker::getStatus)
   //  }, ...
   var appsess = {sessions: 0};
+  //
+  // If there are no apps I've done
+  if (this.apps.length === 0)
+    return callback({msg: JSON.stringify(appsess)});
+  //
+  // Add app's details
+  var napp = 0;
   for (var i = 0; i < this.apps.length; i++) {
     var app = this.apps[i];
     //
-    var appdata = {sessions: 0, workers: []};
-    for (var j = 0; j < app.workers.length; j++) {
-      var wrk = app.workers[j];
-      appdata.workers.push(wrk.sessions.length);
-      appdata.sessions += wrk.sessions.length;
-    }
-    //
-    appsess[app.name] = appdata;
-    appsess.sessions += appdata.sessions;
+    app.sendSessions(undefined, function (app, result) {
+      if (result && !result.msg) {
+        this.log("ERROR", (result.err || result), "User.sendAppSessions");
+        return callback(result.err || result);
+      }
+      //
+      // Add app's sessions
+      var appdata = JSON.parse(result.msg);
+      appsess[app.name] = appdata;
+      appsess.sessions += appdata.sessions;
+      //
+      // If that's the last one, I can reply
+      if (++napp === this.apps.length)
+        callback({msg: JSON.stringify(appsess)});
+    }.bind(this, app));    // jshint ignore:line
   }
-  //
-  callback({msg: JSON.stringify(appsess)});
 };
 
 

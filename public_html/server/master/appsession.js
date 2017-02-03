@@ -73,11 +73,9 @@ Node.AppSession.prototype.log = function (level, message, sender, data)
 {
   // Add "local" info
   data = (data ? JSON.parse(JSON.stringify(data)) : {});
-  data.app = this.app.name;
-  data.user = this.app.user.userName;
   data.sid = this.id;
   //
-  this.logger.log(level, message, sender, data);
+  this.app.log(level, message, sender, data);
 };
 
 
@@ -184,9 +182,9 @@ Node.AppSession.prototype.createAppClient = function (req, res)
   var appClient = new Node.AppClient(this);
   //
   // If the CID of the new client has been already computed, use it here (see Config::processRun)
-  if (this.newMasterCid) {
-    appClient.id = this.newMasterCid;
-    delete this.newMasterCid;
+  if (this.newCid) {
+    appClient.id = this.newCid;
+    delete this.newCid;
   }
   //
   // Add it to the app clients array

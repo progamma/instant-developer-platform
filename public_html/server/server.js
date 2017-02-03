@@ -626,6 +626,13 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       return;
     }
     //
+    // If the app client is already connected with someone else, refuse connection
+    if (appcli.socket) {
+      this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", {sid: msg.sid, cid: msg.cid});
+      socket.emit(Node.Server.msgTypeMap.redirect, this.config.getUrl() + "/" + msg.appname);
+      return;
+    }
+    //
     // If there is a session but the socket message comes from a different app redirect to right app
     // (this could happen if the user uses the same TAB switching between two different apps;
     // due to the sessionStorage we receive a SID and CID from the "old" app)
@@ -742,6 +749,8 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
         return this.logger.log("WARN", "Sync connect not handled: app not found", "Server.handleSyncMessage", msg);
       }
       //
+      this.logger.log("DEBUG", "A new sync session begins", "Server.handleSyncMessage", msg);
+      //
       // Ask the app to create a new AppSession
       session = app.createNewSession();
       //
@@ -751,6 +760,8 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
       //
       // Insert the new session id into the message so that the sync object can store it somewhere
       msg.sid.sidsrv = session.id;
+      //
+      this.logger.log("DEBUG", "Created new sync session", "Server.handleSyncMessage", msg);
     }
     else if (session.syncSocket && session.syncSocket !== socket) {
       // This session had a socket: client had gone offline and returned online;
@@ -880,9 +891,8 @@ Node.Server.prototype.closeSession = function (session)
 
 
 /**
- * Finds if there exist a open session given a project (used in the method getSessionByProject)
+ * Returns an open session for the given project
  * @param {Node.Project} project
- * @returns {Array} array of Node.IDESession
  */
 Node.Server.prototype.getOpenSession = function (project)
 {

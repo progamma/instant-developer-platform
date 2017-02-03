@@ -67,12 +67,9 @@ Node.AppClient.prototype.log = function (level, message, sender, data)
 {
   // Add "local" info
   data = (data ? JSON.parse(JSON.stringify(data)) : {});
-  data.app = this.app.name;
-  data.user = this.app.user.userName;
-  data.sid = this.session.id;
   data.cid = this.id;
   //
-  this.logger.log(level, message, sender, data);
+  this.session.log(level, message, sender, data);
 };
 
 
@@ -118,17 +115,17 @@ Node.AppClient.prototype.openConnection = function (socket)
   //
   // Stop killClient timer (see AppClient::init)
   if (this.killClient) {
-    this.log("DEBUG", "This client was scheduled to die -> stop death", "AppClient.openConnection");
-    //
     clearTimeout(this.killClient);
     delete this.killClient;
   }
   //
   // If the session has no client master, I'm the client master
-  if (!this.session.masterAppClient) {
-    this.log("DEBUG", "A new client is app master for session", "AppClient.openConnection");
+  if (!this.session.masterAppClient || this.session.masterAppClient === this) {
+    this.log("DEBUG", "A new client is MASTER for session", "AppClient.openConnection");
     this.session.masterAppClient = this;
   }
+  else
+    this.log("DEBUG", "A new client is SLAVE for session", "AppClient.openConnection");
   //
   // Listen for "appmsg" (sent by client app.js)
   socket.on("appmsg", function (msg) {
@@ -144,7 +141,11 @@ Node.AppClient.prototype.openConnection = function (socket)
   // Listen for disconnect
   socket.on("disconnect", function () {
     // Log disconnection
-    pthis.log("DEBUG", "Received disconnect from client socket", "AppClient.openConnection");
+    pthis.log("DEBUG", "Received disconnect from " +
+            (pthis.session.masterAppClient === pthis ? "MASTER" : "SLAVE") + " client socket", "AppClient.openConnection");
+    //
+    // Socket is not connected anymore
+    delete pthis.socket;
     //
     var testAuto = pthis.app.getTestById(pthis.session.testAutoId);
     if (testAuto)
@@ -152,7 +153,7 @@ Node.AppClient.prototype.openConnection = function (socket)
     //
     // If the disconnected client was the session master, the session looses the master
     if (pthis.session.masterAppClient === pthis)
-      delete this.masterAppClient;
+      delete pthis.session.masterAppClient;
     //
     // Ask my parent to delete me
     // Wait 1 minute (or more/less if app changed session parameter) before actually deleting this session

@@ -12,6 +12,7 @@ Node.fs = require("fs");
 Node.rimraf = require("rimraf");
 Node.targz = require("tar.gz");
 Node.multiparty = require("multiparty");
+Node.os = require("os");
 
 /**
  * Utils object class
@@ -332,6 +333,39 @@ Node.Utils.handleFileSystem = function (options, callback)
       }
     }.bind(this));
   }.bind(this));
+};
+
+
+/**
+ * Returns CPU load
+ * @param {function} callback (result)
+ */
+Node.Utils.getCPUload = function (callback)
+{
+  var cpuAverage = function () {
+    var totalIdle = 0, totalTick = 0;
+    //
+    var cpus = Node.os.cpus();
+    for (var i = 0; i < cpus.length; i++) {
+      var cpu = cpus[i];
+      for (var type in cpu.times)   // jshint ignore:line
+        totalTick += cpu.times[type];
+      totalIdle += cpu.times.idle;
+    }
+    return {idle: totalIdle / cpus.length, total: totalTick / cpus.length};
+  };
+  //
+  var startMeasure = cpuAverage();
+  setTimeout(function () {
+    var endMeasure = cpuAverage();
+    var idleDifference = endMeasure.idle - startMeasure.idle;
+    var totalDifference = endMeasure.total - startMeasure.total;
+    var percentageCPU = 100 - (100 * idleDifference / totalDifference);
+    //
+    percentageCPU = Math.round(percentageCPU * 100) / 100;    // 2 dec digits
+    //
+    callback(percentageCPU);
+  }, 200);    // Wait 200ms and measure again
 };
 
 

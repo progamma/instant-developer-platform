@@ -33,6 +33,7 @@ Node.child = require("child_process");
 Node.rimraf = require("rimraf");
 Node.BodyParser = require("body-parser");
 Node.errorHandler = require("errorhandler");
+Node.constants = require("constants");
 
 
 /**
@@ -54,6 +55,7 @@ Node.Server = function ()
 
 Node.Server.msgTypeMap = {
   pid: "pid",
+  log: "log",
   sessionid: "sid",
   disconnectChild: "dc",
   asid: "asid",
@@ -123,28 +125,41 @@ Node.Server.prototype.initServer = function ()
       key: Node.fs.readFileSync(this.config.SSLKey, "utf8"),
       cert: Node.fs.readFileSync(this.config.SSLCert, "utf8"),
       ca: ca,
+      secureProtocol: "SSLv23_method",
+      secureOptions: Node.constants.SSL_OP_NO_SSLv3 | Node.constants.SSL_OP_NO_SSLv2,
       ciphers: [
-        "ECDHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-ECDSA-AES128-GCM-SHA256",
         "ECDHE-RSA-AES256-GCM-SHA384",
-        "ECDHE-ECDSA-AES256-GCM-SHA384",
-        "DHE-RSA-AES128-GCM-SHA256",
-        "ECDHE-RSA-AES128-SHA256",
-        "DHE-RSA-AES128-SHA256",
+        "ECDHE-RSA-AES128-GCM-SHA256",
         "ECDHE-RSA-AES256-SHA384",
-        "DHE-RSA-AES256-SHA384",
-        "ECDHE-RSA-AES256-SHA256",
-        "DHE-RSA-AES256-SHA256",
+        "ECDHE-RSA-AES128-SHA256",
+        "ECDHE-RSA-AES256-SHA",
+        "ECDHE-RSA-AES128-SHA",
+        "ECDHE-RSA-DES-CBC3-SHA",
+        "EDH-RSA-DES-CBC3-SHA",
+        "AES256-GCM-SHA384",
+        "AES128-GCM-SHA256",
+        "AES256-SHA256",
+        "AES128-SHA256",
+        "AES256-SHA",
+        "AES128-SHA",
+        "DES-CBC3-SHA",
         "HIGH",
+        "!DHE-RSA-AES256-GCM-SHA384",
+        "!DHE-RSA-AES128-GCM-SHA256",
         "!aNULL",
         "!eNULL",
         "!EXPORT",
         "!DES",
-        "!RC4",
         "!MD5",
         "!PSK",
-        "!SRP",
-        "!CAMELLIA"
+        "!RC4",
+        "!DHE-RSA-DES-CBC3-SHA",
+        "!DHE-RSA-CAMELLIA256-SHA",
+        "!DHE-RSA-CAMELLIA128-SHA",
+        "!DHE-RSA-AES256-SHA256",
+        "!DHE-RSA-AES128-SHA256",
+        "!DHE-RSA-AES256-SHA",
+        "!DHE-RSA-AES128-SHA"
       ].join(":")
     };
     //
@@ -161,7 +176,10 @@ Node.Server.prototype.initServer = function ()
         var certToUse, i;
         for (i = 0; i < this.config.customSSLCerts.length && !certToUse; i++) {
           var cert = this.config.customSSLCerts[i];
-          if (cert.SSLDomain === domain)
+          //
+          // If the certificate is a multi-domain certificate check only sub-domain part otherwise check full domain
+          if ((cert.SSLDomain[0] === "*" && cert.SSLDomain.split(".").slice(1).join(".") === domain.split(".").slice(1).join(".")) ||
+                  (cert.SSLDomain[0] !== "*" && cert.SSLDomain === domain))
             certToUse = cert;
         }
         //
@@ -209,11 +227,11 @@ Node.Server.prototype.start = function ()
 {
   var pthis = this;
   //
-  // Create a new Logger
-  this.logger = new Node.Logger(this, "SERVER");
-  //
   // Create the childer
   this.createChilder();
+  //
+  // Create a new Logger
+  this.logger = new Node.Logger(this, "SERVER");
   //
   // Create a request object (used for communicating with other servers and with the console)
   this.request = new Node.Request(this.config, this.logger);
@@ -241,6 +259,9 @@ Node.Server.prototype.start = function ()
   // Adds some small XSS protections
   Node.app.use(Node.helmet.xssFilter());
   //
+  // Sets "Strict-Transport-Security: max-age=5184000000; includeSubDomains".
+  Node.app.use(Node.helmet.hsts({maxAge: 5184000000}));     // 60 days
+  //
   // Enable gzip compression
   Node.app.use(Node.compress());
   //
@@ -248,16 +269,16 @@ Node.Server.prototype.start = function ()
   Node.app.use(Node.cookieParser());
   //
   // Application/x-www-form-urlencoded post requests
-  Node.app.use(Node.BodyParser.urlencoded({extended: true}));
+  Node.app.use(Node.BodyParser.urlencoded({extended: true, limit: "5mb"}));
   //
   // Parse various different custom JSON types as JSON
-  Node.app.use(Node.BodyParser.json({type: "application/*+json"}));
+  Node.app.use(Node.BodyParser.json({type: "application/*+json", limit: "5mb"}));
   //
   // Parse various different custom JSON types as JSON
-  Node.app.use(Node.BodyParser.text({type: "text/*"}));
+  Node.app.use(Node.BodyParser.text({type: "text/*", limit: "5mb"}));
   //
   // Parse various different custom JSON types as JSON
-  Node.app.use(Node.BodyParser.raw()); // it will only parse application/octet-stream, could do application/*
+  Node.app.use(Node.BodyParser.raw({limit: "5mb"})); // it will only parse application/octet-stream, could do application/*
   //
   // App cache manifest
   this.createManifest();
@@ -269,7 +290,7 @@ Node.Server.prototype.start = function ()
   });
   //
   // Inizialize static file management for express with maxAge=5min (not for local servers)
-  var expOpts = (this.config.local ? undefined : {index: false, maxAge: 300000});
+  var expOpts = (this.config.local ? undefined : {index: false, redirect: false, maxAge: 300000});
   var idePath = Node.path.resolve(__dirname + "/../ide");
   if (Node.fs.existsSync(idePath)) { // IDE
     this.logger.log("INFO", "Start EXPRESS for IDE", "Server.start", {path: idePath});
@@ -333,24 +354,9 @@ Node.Server.prototype.start = function ()
     var httpRouter = Node.express.Router();
     httpApp.use("*", httpRouter);
     //
-    // For any get request
+    // For any get request, redirect to same HTTPS request
     httpRouter.get("*", function (req, res) {
-      // I need the HOST to create the redirect
-      var host = req.get("Host");
-      if (!host) {
-        pthis.logger.log("WARN", "Host not received during an HTTP request. Can't route to HTTPS", "Server.start", {url: req.originalUrl});
-        res.status(404).end();
-        return;
-      }
-      //
-      // Replace the port in the host with the HTTPS port
-      host = host.replace(/:\d+$/, ":" + pthis.config.portHttps);
-      //
-      // Compute the final redirect destination
-      var destination = ["https://", host, req.originalUrl].join("");
-      //
-      // Redirect
-      return res.redirect(destination);
+      return res.redirect(pthis.config.getUrl() + req.originalUrl);
     });
     //
     // Create the http server
@@ -406,6 +412,10 @@ Node.Server.prototype.handleChilderMessage = function (msg)
   var pthis = this;
   //
   switch (msg.type) {
+    case Node.Server.msgTypeMap.log:    // LOG message received by childer (either childer or child log message)
+      this.logger.log(msg.level, msg.message, msg.sender, msg.data);
+      break;
+
     case Node.Server.msgTypeMap.execCmdResponse:  // If this message is a response to an EXECUTE command
       // Report to callee
       if (!this.execCallback[msg.cmdid])
@@ -775,6 +785,11 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
     // Open the sync connection (if not already connected)
     if (!session.syncSocket)
       session.openSyncConnection(socket, msg);
+    //
+    // Add useful info (see App.handleSync)
+    msg.request = msg.request || {};
+    if (socket.handshake && socket.handshake.address)
+      msg.request.remoteAddress = socket.handshake.address.replace(/^.*:/, '');
   }
   //
   // If I don't have a session I can't continue

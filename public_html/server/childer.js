@@ -26,6 +26,7 @@ Node.Childer = function ()
 
 Node.Childer.msgTypeMap = {
   pid: "pid",
+  log: "log",
   createChild: "cc",
   forwardToChild: "fc",
   disconnectChild: "dc",
@@ -144,6 +145,10 @@ Node.Childer.prototype.createChild = function (m)
   //
   // Handle child messages
   child.on("message", function (m) {
+    // Route LOG messages to my owner's process
+    if (m.type === Node.Childer.msgTypeMap.log)
+      return process.send(m);
+    //
     // Send any messge (coming from the child) to the server process
     process.send({id: ide_session, cnt: m});
   });

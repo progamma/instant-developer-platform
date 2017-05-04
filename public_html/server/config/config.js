@@ -186,6 +186,7 @@ Node.Config.prototype.saveProperties = function ()
   // Add usefull properties
   r.url = this.getUrl();
   r.local = this.local;
+  r.version = this.server.version;
   //
   return r;
 };
@@ -239,7 +240,7 @@ Node.Config.prototype.saveConfig = function ()
       }
       //
       // Write the config file
-      Node.fs.writeFile(configFile, docjson, function (err) {
+      Node.fs.writeFile(configFile, docjson, {mode: 0600}, function (err) {     // Owner RW only
         if (err) {
           delete pthis.savingConf;  // End save
           return pthis.logger.log("ERROR", "Error saving the CONFIG file " + configFile + ": " + err, "Config.saveConfig");
@@ -515,6 +516,13 @@ Node.Config.prototype.processRun = function (req, res)
   //
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
+  // Handle only GET or POST
+  if (req.method !== "POST" && req.method !== "GET") {
+    this.logger.log("WARN", "Request not GET nor POST", "Config.processRun",
+            {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
+    return res.status(405).end("HTTP method not supported");
+  }
+  //
   if (isIDE) {     // IDE
     sid = req.params.sid;
     session = this.server.IDESessions[sid];
@@ -534,7 +542,12 @@ Node.Config.prototype.processRun = function (req, res)
       // Redirect to default app
       this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
               {defaultApp: this.defaultApp, url: req.originalUrl});
-      res.redirect(this.getUrl() + "/" + this.defaultApp);
+      //
+      // Don't use
+      //     this.getUrl() + "/" + this.defaultApp
+      // because I want to reply using the domain used in the request (that is not always equal to the server url
+      // if DNS or custom certificates defines several domains)
+      res.redirect(this.defaultApp);
       return;
     }
     else if (urlParts.length === 1) { // [app] and [app]?sid={SID}
@@ -663,6 +676,8 @@ Node.Config.prototype.processRun = function (req, res)
   var newAppReq = function (req, res, session, params) {
     var oldreq = session.request;
     session.request = {query: req.query, body: req.body};
+    if (req.connection && req.connection.remoteAddress)
+      session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, '');
     session.cookies = req.cookies;
     //
     if (params) {
@@ -1191,7 +1206,12 @@ Node.Config.prototype.sendMessage = function (params, callback)
     if (params.req.query.sid && sess.id !== params.req.query.sid)
       continue;
     //
-    sess.sendToChild({type: Node.Config.msgTypeMap.notify, cnt: {text: txt, style: (params.req.query.style || "alert")}});
+    var message = {type: params.req.query.type, text: txt, style: (params.req.query.style || "alert")};
+    if (message.type === "telecollaboration") {
+      message.acceptLink = params.req.query.acceptLink;
+      message.refuseLink = params.req.query.refuseLink;
+    }
+    sess.sendToChild({type: Node.Config.msgTypeMap.notify, cnt: message});
     tot++;
   }
   //
@@ -1387,9 +1407,9 @@ Node.Config.prototype.configureCert = function (params, callback)
       break;
 
     case "add":
-      if (!cert.SSLCert || !cert.SSLKey || !cert.SSLCABundles) {
-        this.logger.log("WARN", "Invalid cert format (missing SSLCert or SSLKey or SSLCABundles)", "Config.configureCert", cert);
-        return callback("Invalid cert format (missing SSLCert or SSLKey or SSLCABundles)");
+      if (!cert.SSLDomain || !cert.SSLCert || !cert.SSLKey || !cert.SSLCABundles) {
+        this.logger.log("WARN", "Invalid cert format (missing SSLDomain, SSLCert, SSLKey or SSLCABundles)", "Config.configureCert", cert);
+        return callback("Invalid cert format (missing SSLDomain, SSLCert, SSLKey or SSLCABundles)");
       }
       //
       this.customSSLCerts = this.customSSLCerts || [];
@@ -1503,11 +1523,11 @@ Node.Config.prototype.processCommand = function (req, res)
   if (req.method !== "POST" && req.method !== "GET") {
     this.logger.log("WARN", "Request not GET nor POST", "Config.processCommand",
             {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
-    return res.status(500).end("HTTP method not supported");
+    return res.status(405).end("HTTP method not supported");
   }
   //
   // Log the operation
-  this.logger.log("INFO", "Processing operation", "Config.processCommand", {url: req.originalUrl, host: req.connection.remoteAddress});
+  this.logger.log("DEBUG", "Processing operation", "Config.processCommand", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
   // Function for response
   var sendResponse = function (result) {
@@ -1534,7 +1554,7 @@ Node.Config.prototype.processCommand = function (req, res)
       res.answered = true;
     }
     //
-    pthis.logger.log("INFO", "Operation completed", "Config.processCommand",
+    pthis.logger.log("DEBUG", "Operation completed", "Config.processCommand",
             {result: result, url: req.originalUrl, host: req.connection.remoteAddress});
   };
   //

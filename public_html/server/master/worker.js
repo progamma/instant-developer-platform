@@ -42,7 +42,8 @@ Node.Worker.msgTypeMap = {
   install: "inst",
   installResult: "instres",
   createDB: "cdb",
-  createDBresult: "cdbres"
+  createDBresult: "cdbres",
+  testStartResult: "testres"
 };
 
 
@@ -158,8 +159,9 @@ Node.Worker.prototype.createChild = function ()
       //
       // Terminate and delete all worker's sessions
       while (pthis.sessions.length) {
-        pthis.sessions[0].terminate();
-        pthis.deleteSession(pthis.sessions[0]);
+        var sToDel = pthis.sessions[0];
+        sToDel.terminate();
+        pthis.deleteSession(sToDel);
       }
       //
       // Now, deleting all sessions should have programmed my death (see Worker::deleteSession).
@@ -285,6 +287,11 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       }
       else
         this.log("WARN", "Can't handle install result message: no callback", "Worker.handleAppChildMessage", msg);
+      break;
+
+    case Node.Worker.msgTypeMap.testStartResult:
+      if (this.app.testAuto && msg.cnt && this.app.testAuto[msg.cnt.testAutoId])
+        this.app.testAuto[msg.cnt.testAutoId].handleUpdateSchemaResult(msg.cnt);
       break;
 
     default:

@@ -453,6 +453,8 @@ Node.App.prototype.install = function (params, callback)
     else {
       // App exists -> first terminate every session and wait for the workers to terminate
       params.req.query.force = true;    // force TERMINATE
+      params.req.query.timeout = 15000; // max: 15 sec
+      params.req.query.msg = "The application is currently being updated and will be restarted in 15 seconds. It is recommended that you end the working session and close the browser";
       pthis.terminate(params, function (err) {
         if (err)
           return errorFnc("Can't terminate the app: " + err);

@@ -28,6 +28,11 @@ Node.Logger = function (par, type)
 };
 
 
+Node.Logger.msgTypeMap = {
+  log: "log"
+};
+
+
 // Define usefull properties for this object
 Object.defineProperties(Node.Logger.prototype, {
   config: {
@@ -43,100 +48,60 @@ Object.defineProperties(Node.Logger.prototype, {
  */
 Node.Logger.prototype.init = function ()
 {
-  var pthis = this;
-  //
-  // If I need to log SERVER exceptions, log them
-  if (this.parentType === "SERVER" && this.config.handleException) {
-    process.on("uncaughtException", function (err) {
-      pthis.log("ERROR", "Uncaught server exception : " + (err.stack || err), "Logger.init");
-      //
-      // Do not exit if the problem was inside gcloud
-      if ((err.stack + "").indexOf("node_modules/gcloud") === -1)
-        process.exit(1);
-    });
+  // If I'm the SERVER
+  if (this.parentType === "SERVER") {
+    // If I need to log exceptions, add listener
+    if (this.config.handleException) {
+      process.on("uncaughtException", function (err) {
+        this.log("ERROR", "Uncaught server exception : " + (err.stack || err), "Logger.init");
+        //
+        // Do not exit if the problem was inside gcloud
+        if ((err.stack + "").indexOf("node_modules/gcloud") === -1)
+          process.exit(1);
+      }.bind(this));
+    }
+    //
+    // Create the LOG file
+    this.initLogFile();
   }
-  //
-  // Create the LOG file
-  this.initLogFile();
 };
 
 
 /**
  *  Initialize file stream if needed
+ *  (only SERVER calls this method)
  */
 Node.Logger.prototype.initLogFile = function ()
 {
-  var pthis = this;
-  //
-  // Create LOG folder if missing (server is the first to enter here and will create a new LOG dir if needed
-  // but that directory will have ROOT:INDERT owner... Childer will fix it later)
   var logPath = Node.path.resolve(__dirname + "/../log");
-  if (!Node.fs.existsSync(logPath))
-    Node.fs.mkdirSync(logPath);
   //
-  // Now create a new LOG file every day (only server can do it otherwise the LOG file
-  // will have bad permissions)
-  // If there is no DATE (it happens on start up)
-  if (!this.date) {
-    // Create a new log file... SERVER will create a new file with ROOT:INDERT owner,
-    // childer will fix it with INDERT:INDERT owner
-    this.date = (new Date()).toISOString().substring(0, 10);
-    //
-    // If I'm the childer
-    if (this.parentType === "CHILDER") {
-      // Create a day timer that will "force" the logger to create a new file with the right ownership
-      var now = new Date();
-      var msTillNewFile = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1, 0, 0, 0, 0) - new Date();
-      setTimeout(function () {
-        // First call in this day
-        pthis.initLogFile();
-        //
-        // And schedule backup for following days
-        setInterval(function () {
-          // Calls for following days
-          pthis.initLogFile();
-        }, 86400000);
-      }, msTillNewFile);
-    }
-    else if (this.parentType === "SERVER")
-      this.log("INFO", "******* Server " + this.config.name + " started *******");
+  // If I haven't done it yet
+  if (!this.newLogTimer) {
+    // Create a timer that will change LOG file each day
+    this.newLogTimer = setInterval(function () {
+      this.initLogFile();
+    }.bind(this), 60 * 1000);   // Check day change each minute
   }
-  else if ((new Date()).toISOString().substring(0, 10) !== this.date) {
-    // There is a date and the day has changed
-    // If I'm the SERVER (that runs as INDERT) or the CHILDER (that runs as ROOT) I can change/create a new file
-    // But if I'm not SERVER nor CHILDER I can't change to the new file unless the new file is already there
-    var newDate = (new Date()).toISOString().substring(0, 10);
-    if (this.parentType === "SERVER" || this.parentType === "CHILDER" || Node.fs.existsSync(logPath + "/" + newDate + ".log")) {
-      this.date = newDate;
-      delete this.stream;   // A new file is required
-    }
+  //
+  // If day has changed, create a new LOG
+  if (this.ISOdate && (new Date()).toISOString().substring(0, 10) !== this.ISOdate) {
+    delete this.ISOdate;
+    delete this.stream;
   }
+  //
+  // If there is no DATE -> date is NOW()
+  if (!this.ISOdate)
+    this.ISOdate = (new Date()).toISOString().substring(0, 10);
   //
   // If needed, create a new file for the given date
   if (!this.stream) {
-    this.stream = Node.fs.createWriteStream(logPath + "/" + this.date + ".log", {"flags": "a"});
+    this.stream = Node.fs.createWriteStream(logPath + "/" + this.ISOdate + ".log", {"flags": "a", "mode": 0600});
     //
-    // If I'm the CHILDER logger (root)
-    if (this.parentType === "CHILDER") {
-      // Fix file permissions when opened (not on a windows machine)
-      if (!/^win/.test(process.platform))
-        this.stream.on("open", function () {
-          Node.child.execFile("/bin/chmod", ["-R", 777, logPath], function (err, stdout, stderr) {    // jshint ignore:line
-            if (err)
-              console.log("[Logger.initLogFile] Can't chmod to 777 the log file: " + err);
-            //
-            Node.child.execFile("/usr/sbin/chown", ["-R", "indert:indert", logPath], function (err, stdout, stderr) {    // jshint ignore:line
-              if (err)
-                console.log("[Logger.initLogFile] Can't chown the log file: " + err);
-            });
-          });
-        });
-      //
-      // Delete old logs
-      this.deleteOldLogs();
-    }
-    else if (this.parentType === "SERVER")
-      this.log("INFO", "******* New log for server " + this.config.name + " *******");
+    // Add first message
+    this.log("INFO", "******* New log for server " + this.config.name + " *******");
+    //
+    // A new LOG file has been created -> delete old logs if any
+    this.deleteOldLogs();
   }
 };
 
@@ -146,16 +111,30 @@ Node.Logger.prototype.initLogFile = function ()
  */
 Node.Logger.prototype.deleteOldLogs = function ()
 {
-  // Delete logs that are older than 15 days
-  var oldDate = new Date();
-  oldDate.setDate(oldDate.getDate() - 15);
-  oldDate = oldDate.toISOString().substring(0, 10);
+  var logPath = Node.path.resolve(__dirname + "/../log");
   //
-  var filename = "../log/" + oldDate + ".log";
-  Node.rimraf(filename, function (err) {
+  // Delete logs that are older than 15 days
+  Node.fs.readdir(logPath, function (err, files) {
     if (err)
-      console.log("Error deleting the file " + filename + ": " + err);
-  });
+      return console.error("[Logger::deleteOldLogs] Error while reading LOG directory: " + err);
+    //
+    for (var i = 0; i < files.length; i++) {
+      var fn = files[i];
+      //
+      // Skip files that are not in the form [year]-[month]-[day].log
+      if (fn.split("-").length !== 3 || fn.indexOf(".") === -1 || fn.substring(fn.lastIndexOf(".")) !== ".log")
+        continue;
+      //
+      // Delete old logs (keep last 15 days logs)
+      var fdt = new Date(fn.substring(0, 10));
+      if ((new Date() - fdt) > 15 * 24 * 3600 * 1000) {
+        Node.rimraf(logPath + "/" + fn, function (err) {
+          if (err)
+            console.log("[Logger::deleteOldLogs] Error deleting the file " + logPath + "/" + fn + ": " + err);
+        });
+      }
+    }
+  }.bind(this));
 };
 
 
@@ -179,19 +158,20 @@ Node.Logger.prototype.log = function (level, message, sender, data)
     }
   }
   //
-  // For CHILD, add user and project
-  if (this.parentType === "CHILD") {
+  // Add level-specific info
+  if (this.parentType === "CHILD") {  // For CHILD, add user and project
     data = data || {};
     data.prj = this.parent.project.name;
     data.user = this.parent.project.user.userName;
     data.sid = this.parent.sid;
   }
   //
-  // If level is DEBUG -> use console.log
-  // If level is ERROR -> use console.error AND log file
-  if (level === "DEBUG" || level === "ERROR") {
+  // If I'm running in "local" mode
+  // - if level is DEBUG -> write to console.log (or console.error if IDE message)
+  // - if level is ERROR -> write to console.error
+  if (this.config && this.config.local && (level === "DEBUG" || level === "ERROR")) {
+    // Compute text message
     var s = new Date().toISOString() + " - " + level + " - " + message;
-    //
     if (sender || data) {
       s += " - (";
       if (sender)
@@ -201,25 +181,32 @@ Node.Logger.prototype.log = function (level, message, sender, data)
       s += ")";
     }
     //
-    // Debug goes only to console.log
-    if (level === "DEBUG" && this.config && this.config.local) {
-      // For APPS use always ERROR console (otherwise it sends this message to "app-dtt-console")
+    if (level === "DEBUG") {
+      // For IDEAPP always use console.error (otherwise user sees this into "app-dtt-console")
       if (this.parentType === "IDEAPP")
         console.error(s);
       else
         console.log(s);
-//      return;
     }
-    //
-    // Error goes to console.error and continue with log file
-    if (level === "ERROR" && this.config && this.config.local)
+    else if (level === "ERROR")
       console.error(s);
   }
   //
-  // Init LOG file if needed
+  // Don't write DEBUG messages to file
+  if (level === "DEBUG")
+    return;
+  //
+  // If I'm not the SERVER, ask my owner if he can log this for me
+  if (this.parentType !== "SERVER") {
+    if (process.connected)
+      process.send({type: Node.Logger.msgTypeMap.log, level: level, message: message, sender: sender, data: data});
+    return;
+  }
+  //
+  // I'm the SERVER -> init LOG file if needed
   this.initLogFile();
   //
-  // Log to file
+  // Log message to physical file
   var l = {dt: new Date().toISOString(), lev: level, msg: message.replace(/\n/g, ""), snd: sender, data: data};
   this.stream.write(JSON.stringify(l) + "\n");
 };

@@ -105,7 +105,7 @@ Node.Utils.chunkMap = {};
 Node.Utils.process_on = function (msg, callback)
 {
   // If it's not a chunked message
-  if (msg.cnt.type !== "chunk")
+  if (!msg.cnt || msg.cnt.type !== "chunk")
     return callback(msg);
   //
   // It's a chunk!!

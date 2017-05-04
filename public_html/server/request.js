@@ -534,5 +534,122 @@ Node.Request.prototype.restoreBranch = function (branchName, parentPrjData, opti
 };
 
 
+/*
+ * Send request to console to invite users for telecollaboration
+ * @param {Object} msg
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.inviteUsers = function (msg, callback)
+{
+  var pthis = this;
+  //
+  // Create a form to be sent via post
+  var form = new Node.FormData();
+  form.append("user", msg.userName);
+  form.append("users", JSON.stringify(msg.users));
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=inviteUsers&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.inviteUsers",
+              {err: err, code: code, data: data, options: options});
+      callback(err || "Invalid response");
+    }
+    else
+      callback();
+  });
+};
+
+
+/*
+ * Ask to console users list
+ * @param {Object} msg
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.listUsers = function (msg, callback)
+{
+  var pthis = this;
+  //
+  // Create a form to be sent via post
+  var form = new Node.FormData();
+  form.append("user", msg.user);
+  form.append("company", this.config.serverType);
+  form.append("matchingString", msg.matchingString);
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=listUsers&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.listUsers",
+              {err: err, code: code, data: data, options: options});
+      callback(undefined, err || "Invalid response");
+    }
+    else {
+      try {
+        callback(JSON.parse(data));
+      }
+      catch (ex) {
+        pthis.logger.log("ERROR", "GET reply error", "Request.listUsers", {data: data, code: code, options: options});
+        callback(null, "Invalid response");
+      }
+    }
+  });
+};
+
+
+/**
+ * Ask to console if user with given address is online
+ * @param {string} address
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.isUserOnline = function (address, callback)
+{
+  var pthis = this;
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=isUserOnline&email=" + address + "&autk=" + this.config.autk,
+    method: "GET"
+  };
+  this.getRequest(options, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.isUserOnline", {err: err, code: code, data: data, options: options});
+      callback(null, err || "Invalid response");
+    }
+    else {
+      // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
+      // Better check if the answer is a JSON string... I don't want to crash everything
+      try {
+        callback(JSON.parse(data));
+      }
+      catch (ex) {
+        pthis.logger.log("ERROR", "GET reply error", "Request.isUserOnline", {data: data, code: code, options: options});
+        callback(null, "Invalid response");
+      }
+    }
+  });
+};
+
+
 // Export module
 module.exports = Node.Request;

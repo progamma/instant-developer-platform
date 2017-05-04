@@ -344,7 +344,9 @@ Node.Project.prototype.editProject = function (params, callback)
   // If not found, create a new session for this project
   if (!session) {
     this.log("DEBUG", "Create a new IDE session", "Project.editProject");
-    session = this.server.createSession(this);
+    //
+    var qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
+    session = this.server.createSession(this, {openParams: qry});
   }
   //
   // Redirect to the MAIN page with the sid as querystring
@@ -1291,6 +1293,9 @@ Node.Project.prototype.execCommand = function (params, callback)
     case "tutorials":
       this.downloadFile(params, callback);
       break;
+    case "files":
+      this.downloadFile(params, callback);
+      break;
     case "upload":
       this.uploadResource(params, callback);
       break;
@@ -1337,9 +1342,6 @@ Node.Project.prototype.execCommand = function (params, callback)
           break;
         case "build":
           this.buildProject(params, callback);
-          break;
-        case "files":
-          this.downloadFile(params, callback);
           break;
         case "filesystem":
           this.handleFileSystem(params, callback);

@@ -33,6 +33,7 @@ Node.TestAuto = function (app, options)
   }
   this.rid = options.rid;
   this.recDuration = 0;
+  this.totPauseTime = 0;
   this.replayDuration = options.duration ? parseInt(options.duration) : 0;
   this.maxSessions = options.maxSessions ? parseInt(options.maxSessions) : 1;
   this.requests = [];
@@ -41,7 +42,7 @@ Node.TestAuto = function (app, options)
   this.delays = [];
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [],
-    tagErrors: [], timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
+    tagErrors: [], noResponseErrors: [], timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
   this.reqIndex = 0;
   this.startTime = 0;
   this.totalSessionsDuration = 0;
@@ -71,6 +72,12 @@ Node.TestAuto.ModeMap = {
 };
 
 
+Node.TestAuto.msgTypeMap = {
+  appmsg: "appmsg",
+  testStart: "test"
+};
+
+
 /**
  * Initialize this test
  * @param {Node.AppClient} appClient
@@ -80,10 +87,34 @@ Node.TestAuto.prototype.init = function (appClient)
   this.appClient = appClient;
   this.session = appClient.session;
   //
+  // If there isn't a real session I need to create it
+  if (!this.session.id) {
+    this.session = this.app.createNewSession();
+    //
+    // If needed ask the worker to create the physical child process
+    if (!this.session.worker.child)
+      this.session.worker.createChild();
+  }
+  //
   // Tell app this is a test auto
-  if (this.session.id) {
-    var ev = [{id: "setTestAuto"}];
-    this.session.sendToChild({type: "appmsg", sid: this.session.id, content: ev});
+  var ev = [{id: "setTestAuto"}];
+  this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+  //
+  // Tell app to update its dbs
+  if (this.mode !== Node.TestAuto.ModeMap.rec)
+    this.session.sendToChild({type: Node.TestAuto.msgTypeMap.testStart, sid: this.session.id, cnt: {testAutoId: this.id}});
+};
+
+
+/**
+ * Handle update schema result
+ * @param {object} res
+ * */
+Node.TestAuto.prototype.handleUpdateSchemaResult = function (res)
+{
+  if (res && res.err) {
+    this.consoleRequest.sendResponse(this.rid, 500, "Update schema failed: " + res.err);
+    return;
   }
   //
   // If I want to replay a test, get recorded file/files for this test
@@ -104,6 +135,10 @@ Node.TestAuto.prototype.sniff = function (req, cts)
 {
   // If I receive an initTestAuto request in replay mode, I start the replay
   for (var i = 0; i < req.length; i++) {
+    // Add an entry to objects map for each element found inside current request content
+    if (req[i].cnt)
+      this.addObjToMap(req[i].cnt);
+    //
     if (req[i].id === "initTestAuto") {
       this.startTime = new Date().getTime();
       if (this.mode !== Node.TestAuto.ModeMap.rec) {
@@ -117,23 +152,20 @@ Node.TestAuto.prototype.sniff = function (req, cts)
             }
           }.bind(this), 200);
         }
-        else
-          this.playRequest();
+        else {
+          if (this.mode === Node.TestAuto.ModeMap.stepByStep)
+            this.playRequest();
+        }
       }
-      return;
+      continue;
     }
     //
     if (req[i].id === "playTestAuto") {
-      // Remember a playTestAuto msg arrived (but not message sent when pause at the test end)
-      if (!req[i].content.end)
-        this.playTestAutoMsg = true;
+      // Remember a playTestAuto msg arrived
       if (req[i].content.play)
         this.play();
-      else {
-        this.nextReq = req[i].content.nextReq;
+      else
         this.pause();
-        delete this.nextReq;
-      }
       return;
     }
     //
@@ -144,36 +176,72 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       else // Save console.test value
         this.consoleTest.push(req[i].cnt);
       //
-      return;
+      if (req.length === 1)
+        return;
+      else {
+        req.splice(1, i);
+        continue;
+      }
     }
     //
     if (req[i].id === "stepForwardTestAuto") {
       if (this.mode !== Node.TestAuto.ModeMap.rec)
         this.stepForward();
-      return;
+      //
+      if (req.length === 1)
+        return;
+      else {
+        req.splice(1, i);
+        continue;
+      }
     }
     //
     if (req[i].id === "sendExceptionToTestAuto") {
       this.saveException(req[i].cnt);
-      return;
+      //
+      if (req.length === 1)
+        return;
+      else {
+        req.splice(1, i);
+        continue;
+      }
     }
     //
     if (req[i].id === "getTaggingDataResults") {
       this.saveTagResults(req[i].cnt);
-      return;
+      //
+      if (req.length === 1)
+        return;
+      else {
+        req.splice(1, i);
+        continue;
+      }
     }
     //
-    if (["setTestAuto", "calculateTagResults", "closePopup"].indexOf(req[i].id) !== -1)
-      return;
+    if (["setTestAuto", "calculateTagResults", "setTaggingData", "closePopup", "onPause", "onResume"].indexOf(req[i].id) !== -1) {
+      if (req.length === 1)
+        return;
+      else {
+        req.splice(1, i);
+        continue;
+      }
+    }
     //
     if (["alertCB", "confirmCB", "promptCB", "popupBoxReturn"].indexOf(req[i].id) !== -1)
-      this.session.sendMessageToClientApp({type: "appmsg", content: [{id: "closePopup"}]});
+      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: [{id: "closePopup"}]});
     //
     // Cookies are in the client and server ask it for them. But in case of non reg or load test,
     // I have not a client. So save cookies in onStart request to simulate cookies request in those kind of tests
-    if (req[i].id === "onStart" && this.mode === Node.TestAuto.ModeMap.rec)
+    if (req[i].id === "onStart" && this.mode === Node.TestAuto.ModeMap.rec) {
       req[i].cookies = req[i].cookies || this.session.cookies;
+      this.onStartArrived = true;
+      this.playTime = new Date().getTime();
+    }
   }
+  //
+  // In recording mode, don't save requests arriving before onStart (they could be onPause/onResume...)
+  if (this.mode === Node.TestAuto.ModeMap.rec && !this.onStartArrived)
+    return;
   //
   var currentTime = new Date().getTime();
   //
@@ -189,6 +257,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
             return;
         }
       }
+      //
       // No input messages yet: this is the first request or the previous request was closed.
       // Anyway open a new request.
       if (this.inputMessages.length === 0)
@@ -201,15 +270,6 @@ Node.TestAuto.prototype.sniff = function (req, cts)
           delay = currentTime - this.inputMessages[this.inputMessages.length - 1].time;
         else // Otherwise use last output message to calculate the delay
           delay = currentTime - this.outputMessages[this.outputMessages.length - 1].time;
-        //
-        // If this is a client event after a playTestAutoMsg, set the delay to 2000 milliseconds by default.
-        // This prevent the case in which the recording has been paused for long time.
-        // When I replay, I don't want to wait for dead time occurred during recording.
-        // So, I set long dead times to 2000 milliseconds
-        if (this.playTestAutoMsg) {
-          delay = delay > 2000 ? 2000 : delay;
-          delete this.playTestAutoMsg;
-        }
         //
         // Use the delay to check if a request need to be closed
         if (delay > 200) {
@@ -228,7 +288,15 @@ Node.TestAuto.prototype.sniff = function (req, cts)
             // add 0 before adding current delay because first request has no delay.
             if (this.delays.length === 0)
               this.delays.push(0);
-            this.delays.push(delay);
+            //
+            //
+            if (this.paused)
+              this.totPauseTime += currentTime - this.pauseTimeStamp;
+            //
+            var delayToPush = (delay - this.totPauseTime) > 0 ? (delay - this.totPauseTime) : 0;
+            this.delays.push(delayToPush);
+            this.reqClosed = true;
+            this.totPauseTime = 0;
           }
         }
         else // Otherwise simply add this message as input of current opened request
@@ -240,35 +308,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
     var syntReq = this.synthesizeReq(req);
     this.outputMessages.push({content: syntReq, time: currentTime});
     //
-    // Add an entry to objects map for each element found inside current request content
-    var i, j;
-    for (i = 0; i < req.length; i++) {
-      if (req[i].cnt) {
-        if (req[i].cnt.child && req[i].cnt.child.elements) {
-          for (j = 0; j < req[i].cnt.child.elements.length; j++)
-            this.addObjToMap(req[i].cnt.child.elements[j]);
-        }
-        //
-        if (req[i].cnt.child && req[i].cnt.child.children) {
-          for (j = 0; j < req[i].cnt.child.children.length; j++)
-            this.addObjToMap(req[i].cnt.child.children[j]);
-        }
-        //
-        if (req[i].cnt.elements)
-          for (j = 0; j < req[i].cnt.elements.length; j++)
-            this.addObjToMap(req[i].cnt.elements[j]);
-      }
-    }
-    //
     // Process next request
     if (this.mode !== Node.TestAuto.ModeMap.rec) {
       this.expectedResponses -= syntReq.length;
       //
       // When all expected responses arrived, process next request
-      if (this.expectedResponses <= 0 && !this.paused && !this.playTimeout) {
-        delete this.expectedResponses;
+      if (this.expectedResponses <= 0 && !this.paused && !this.playTimeout)
         this.playRequest();
-      }
     }
   }
 };
@@ -304,23 +350,26 @@ Node.TestAuto.prototype.saveException = function (ex)
     exception.method = stackMsg;
   }
   //
+  // Save exceptions as parent result. In case of step-by-step the parent is myself
+  var testAuto = this.parent || this;
+  //
   // Check if need to save this exception
   var insert = true;
-  for (var i = 0; i < this.testResult.exceptions.length; i++) {
+  for (var i = 0; i < testAuto.testResult.exceptions.length; i++) {
     // Save old occurr value and temporarily set it to 1 to compare exceptions without this property
-    var occurr = this.testResult.exceptions[i].occurr;
-    this.testResult.exceptions[i].occurr = 1;
-    if (JSON.stringify(this.testResult.exceptions[i]) === JSON.stringify(exception)) {
+    var occurr = testAuto.testResult.exceptions[i].occurr;
+    testAuto.testResult.exceptions[i].occurr = 1;
+    if (JSON.stringify(testAuto.testResult.exceptions[i]) === JSON.stringify(exception)) {
       insert = false;
-      this.testResult.exceptions[i].occurr = occurr + 1;
+      testAuto.testResult.exceptions[i].occurr = occurr + 1;
       break;
     }
     else
-      this.testResult.exceptions[i].occurr = occurr;
+      testAuto.testResult.exceptions[i].occurr = occurr;
   }
   //
   if (insert)
-    this.testResult.exceptions.push(exception);
+    testAuto.testResult.exceptions.push(exception);
 };
 
 
@@ -340,7 +389,8 @@ Node.TestAuto.prototype.save = function ()
   for (var i = 0; i < this.delays.length - 1; i++)
     totDelays += this.delays[i];
   //
-  this.delays[this.delays.length - 1] = this.recDuration - totDelays;
+  var lastDelay = this.recDuration - totDelays;
+  this.delays[this.delays.length - 1] = lastDelay > 0 ? lastDelay : 1000;
   //
   // Create recorded session object
   var rec = {};
@@ -399,11 +449,17 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     //
     // If a browser is involved in testing send info about test to it
     if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
-      var msgContent = {id: "endTest", exceptions: this.testResult.exceptions, consoleTestErrors: this.testResult.consoleTestErrors};
+      var msgContent = {
+        id: "endTest",
+        exceptions: this.testResult.exceptions,
+        consoleTestErrors: this.testResult.consoleTestErrors,
+        tagErrors: this.testResult.tagErrors,
+        noResponseErrors: this.testResult.noResponseErrors
+      };
       ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: msgContent}}];
-      this.session.sendMessageToClientApp({type: "appmsg", content: ev});
+      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
       //
-      this.testResult.duration = parseInt(duration / 1000);
+      this.testResult.duration = parseInt(this.recDuration / 1000);
       this.testResult.percentageCompleted = 100;
       delete this.testResult.cpu;
       delete this.testResult.memory;
@@ -431,7 +487,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
   // If play request is caused by a step forward command, tell preview to update its timer adding giving value
   if (this.mode === Node.TestAuto.ModeMap.stepByStep && stepForward) {
     ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "updateTimer", millisecToAdd: this.delays[this.reqIndex]}}}];
-    this.session.sendMessageToClientApp({type: "appmsg", content: ev});
+    this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
   }
   //
   // Get next delay
@@ -440,6 +496,8 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
   this.playTimeout = setTimeout(function () {
     clearTimeout(this.playTimeout);
     delete this.playTimeout;
+    clearTimeout(this.responseTimeout);
+    delete this.responseTimeout;
     //
     // Get next request
     req = this.requests[this.reqIndex];
@@ -451,12 +509,17 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     for (var i = 0; i < req.output.length; i++)
       this.expectedResponses += req.output[i].content.length;
     //
+    // this.expectedResponses changes every time a response come from server.
+    // So I need another property to save total expected responses for each request in order to compare
+    // its value with this.expectedResponses when responseTimeout fired
+    this.outputLength = this.expectedResponses;
+    //
     // A client request can be multiple (i.e. it can consists of more sub-request).
     // Process all them
     for (var i = 0; i < req.input.length; i++) {
       for (var j = 0; j < req.input[i].content.length; j++) {
-        if (req.input[i].content[j].id === "setTaggingData") {
-          // In step-by-step mode, when I'm processing setTaggingData command
+        if (req.input[i].content[j].id === "saveTaggingData") {
+          // In step-by-step mode, when I'm processing saveTaggingData command
           // I send recorded taggingData to client, so it can compare values with
           // current elements' values and check if there are some differences
           if (this.mode === Node.TestAuto.ModeMap.stepByStep)
@@ -465,12 +528,22 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
           // If needed, convert remelems id to the new ones
           var tagValues = req.input[i].content[j].content;
           if (tagValues) {
-            for (var k = 0; k < tagValues.length; k++)
-              tagValues[k].elId = this.getNewIdFromOldId(tagValues[k].elId);
+            var newId;
+            for (var k = 0; k < tagValues.length; k++) {
+              newId = this.getNewIdFromOldId(tagValues[k].elId);
+              console.log("DEBUG CONVERSIONE TAG:", JSON.stringify(tagValues[k]), " --->", newId);
+              //
+              // If current object has a new id, replace the old one
+              tagValues[k].elId = newId || tagValues[k].elId;
+              //
+              // If I didn't find new id, it means I haven't got the object in the map
+              if (!newId)
+                tagValues[k].elNotFound = true;
+            }
             //
             // Tell client to calculate tag results
-            ev = [{id: "calculateTagResults", content: req.input[i].content[j].content}];
-            this.session.sendToChild({type: "appmsg", sid: this.session.id, content: ev});
+            ev = [{id: "calculateTagResults", content: tagValues}];
+            this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
           }
         }
       }
@@ -478,25 +551,26 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       // If needed, convert remelems id to the new ones
       var input = req.input[i].content;
       for (var k = 0; k < input.length; k++)
-        input[k].obj = this.getNewIdFromOldId(input[k].obj);
+        input[k].obj = this.getNewIdFromOldId(input[k].obj) || input[k].obj;
       //
       // Process request
-      this.session.sendToChild({type: "appmsg", sid: this.session.id, content: input});
+      this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input});
     }
     //
     // Set response timeout only if replay is not paused.
     // When replay is paused it means I'm replay step-by-step, so I don't want to automatically play next request
     if (!this.paused) {
-      if (this.reqIndex !== 1) {
-        // Try to play next request if test has not done yet by itself
-        var nextDelay = this.delays[this.reqIndex] * 2;
+      // Try to play next request if test has not done yet by itself
+      var nextDelay = this.getReqDuration(req) * 5;
+      //
+      this.responseTimeout = setTimeout(function () {
+        if (this.outputLength !== 0 && this.outputLength === this.expectedResponses)
+          this.saveNoResponse();
         //
-        this.responseTimeout = setTimeout(function () {
-          clearTimeout(this.responseTimeout);
-          delete this.responseTimeout;
-          this.playRequest();
-        }.bind(this), nextDelay);
-      }
+        clearTimeout(this.responseTimeout);
+        delete this.responseTimeout;
+        this.playRequest();
+      }.bind(this), nextDelay);
       //
       // No need to wait for response. Process next request
       if (req.output.length === 0)
@@ -511,9 +585,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
  * */
 Node.TestAuto.prototype.stepForward = function ()
 {
-  this.nextReq = true;
   this.pause();
-  delete this.nextReq;
   this.playRequest(true);
 };
 
@@ -523,22 +595,17 @@ Node.TestAuto.prototype.stepForward = function ()
  * */
 Node.TestAuto.prototype.pause = function ()
 {
-  //
   if (!this.paused)
     this.recDuration += new Date().getTime() - this.startTime;
   //
   if (this.mode !== Node.TestAuto.ModeMap.rec) {
-    // If this.nextReq is enabled it means client pause test execution automatically.
-    // And automatically it will restart the execution. So I don't have to go back into
-    // request execution
-    if (!this.nextReq)
-      this.reqIndex--;
-    //
     clearTimeout(this.playTimeout);
     clearTimeout(this.responseTimeout);
     delete this.playTimeout;
     delete this.responseTimeout;
   }
+  else
+    this.pauseTimeStamp = new Date().getTime();
   //
   this.paused = true;
 };
@@ -553,6 +620,11 @@ Node.TestAuto.prototype.play = function ()
   this.paused = false;
   if (this.mode !== Node.TestAuto.ModeMap.rec)
     this.playRequest();
+  else {
+    if (!this.reqClosed || this.totPauseTime === 0)
+      this.totPauseTime += this.startTime - this.pauseTimeStamp;
+    this.reqClosed = false;
+  }
 };
 
 
@@ -613,13 +685,17 @@ Node.TestAuto.prototype.prepareReplay = function ()
       this.recDuration = this.recFiles[0].duration;
       this.objectsMap = this.recFiles[0].objectsMap || {};
       this.filesReady = true;
+      //
+      // Tell client test replay is ready to start
+      var ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "readyToStart"}}}];
+      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
       break;
 
     case Node.TestAuto.ModeMap.nonReg:
       var test = {};
       test.requests = this.recFiles[0].requests;
       test.delays = this.recFiles[0].delays;
-      this.consoleTest = this.recFiles[0].consoleTest;
+      test.consoleTest = this.recFiles[0].consoleTest;
       test.recDuration = this.recFiles[0].duration;
       test.objectsMap = this.recFiles[0].objectsMap || {};
       //
@@ -764,7 +840,7 @@ Node.TestAuto.prototype.reset = function (options)
   this.delays = [];
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [], tagErrors: [],
-    timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
+    noResponseErrors: [], timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
   this.reqIndex = 0;
   this.startTime = 0;
   this.totalSessionsDuration = 0;
@@ -844,11 +920,11 @@ Node.TestAuto.prototype.createChild = function (test)
   childTestAuto.parent = this;
   childTestAuto.session = session;
   childTestAuto.appClient = appClient;
-  childTestAuto.requests = test.requests;
-  childTestAuto.delays = test.delays;
+  childTestAuto.requests = JSON.parse(JSON.stringify(test.requests || []));
+  childTestAuto.delays = JSON.parse(JSON.stringify(test.delays || []));
   childTestAuto.recDuration = test.recDuration;
-  childTestAuto.consoleTest = test.consoleTest;
-  childTestAuto.objectsMap = test.objectsMap;
+  childTestAuto.consoleTest = JSON.parse(JSON.stringify(test.consoleTest || []));
+  childTestAuto.objectsMap = JSON.parse(JSON.stringify(test.objectsMap || {}));
   childTestAuto.startTime = new Date().getTime();
   //
   // Save new test auto into children map
@@ -856,7 +932,7 @@ Node.TestAuto.prototype.createChild = function (test)
   //
   // Tell app this is a test auto
   var ev = [{id: "setTestAuto"}];
-  childTestAuto.session.sendToChild({type: "appmsg", sid: childTestAuto.session.id, content: ev});
+  childTestAuto.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: childTestAuto.session.id, content: ev});
   //
   // Starting play requests
   this.children[childTestAuto.childId].playRequest();
@@ -890,7 +966,7 @@ Node.TestAuto.prototype.onTerminateTest = function (id, res)
   var i;
   //
   // Calculate total exceptions occurred
-  var totExceptions = 0, totTagErrors = 0, totConsoleTestErrors = 0;
+  var totExceptions = 0, totTagErrors = 0, totConsoleTestErrors = 0, totNoResponseErrors = 0;
   for (i = 0; i < this.testResult.exceptions.length; i++)
     totExceptions += this.testResult.exceptions[i].occurr;
   //
@@ -902,8 +978,12 @@ Node.TestAuto.prototype.onTerminateTest = function (id, res)
   for (i = 0; i < this.testResult.consoleTestErrors.length; i++)
     totConsoleTestErrors += this.testResult.consoleTestErrors[i].occurr;
   //
+  // Calculate total no response errors occurred
+  for (i = 0; i < this.testResult.noResponseErrors.length; i++)
+    totNoResponseErrors += this.testResult.noResponseErrors[i].occurr;
+  //
   // Calculate error average for ended session
-  this.totalSessionsError = totExceptions + totTagErrors + totConsoleTestErrors;
+  this.totalSessionsError = totExceptions + totTagErrors + totConsoleTestErrors + totNoResponseErrors;
   var totChildren = this.mode === Node.TestAuto.ModeMap.load ? this.totalChildren : 1;
   var totErrors = this.totalSessionsError / totChildren;
   this.testResult.totErrors.push(totErrors.toFixed(2));
@@ -911,7 +991,7 @@ Node.TestAuto.prototype.onTerminateTest = function (id, res)
   if (this.testsEnded === this.maxSessions) {
     clearInterval(this.resultInterval);
     delete this.resultInterval;
-    this.testResult.duration = parseInt((new Date().getTime() - this.startTime) / 1000);
+    this.testResult.duration = parseInt(Math.round((new Date().getTime() - this.startTime) / 1000));
     //
     delete this.testsEnded;
     //
@@ -938,25 +1018,39 @@ Node.TestAuto.prototype.saveTagResults = function (res)
   if (!res)
     return;
   //
+  // Save tag as parent result. In case of step-by-step the parent is myself
+  var testAuto = this.parent || this;
+  //
   // Save just tag with errors
-  var insert = true;
   for (var i = 0; i < res.length; i++) {
-    if (res[i].error) {
-      res[i].occurr = 1;
-      for (var j = 0; j < this.testResult.tagErrors.length; j++) {
-        var occurr = this.testResult.tagErrors[j].occurr;
-        this.testResult.tagErrors[j].occurr = 1;
-        if (JSON.stringify(this.testResult.tagErrors[j]) === JSON.stringify(res[i])) {
-          insert = false;
-          this.testResult.tagErrors[j].occurr = occurr + 1;
-          break;
+    if (res[i].error && res[i].props) {
+      for (var k = 0; k < res[i].props.length; k++) {
+        if ((res[i].props[k].oldValue !== res[i].props[k].newValue) || res[i].elNotFound) {
+          var insert = true;
+          var tagErr = {};
+          tagErr.elId = res[i].elId;
+          tagErr.elName = res[i].elName;
+          tagErr.error = true;
+          tagErr.elNotFound = res[i].elNotFound;
+          tagErr.propName = res[i].props[k].propName;
+          tagErr.oldValue = res[i].props[k].oldValue;
+          tagErr.newValue = res[i].props[k].newValue;
+          tagErr.occurr = 1;
+          //
+          for (var j = 0; j < testAuto.testResult.tagErrors.length; j++) {
+            var occurr = testAuto.testResult.tagErrors[j].occurr;
+            testAuto.testResult.tagErrors[j].occurr = 1;
+            if (JSON.stringify(testAuto.testResult.tagErrors[j]) === JSON.stringify(tagErr)) {
+              insert = false;
+              testAuto.testResult.tagErrors[j].occurr = occurr + 1;
+              break;
+            }
+            else
+              testAuto.testResult.tagErrors[j].occurr = occurr;
+          }
+          if (insert)
+            testAuto.testResult.tagErrors.push(tagErr);
         }
-        else
-          this.testResult.tagErrors[j].occurr = occurr;
-      }
-      if (insert) {
-        delete res[i].error;
-        this.testResult.tagErrors.push(res[i]);
       }
     }
   }
@@ -975,6 +1069,8 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
   if (!consoleTest)
     return;
   //
+  // Save consoleTestResults as parent result. In case of step-by-step the parent is myself
+  var testAuto = this.parent || this;
   var i;
   for (i = 0; i < this.consoleTest.length; i++) {
     // If I found the same console test into my saved list, don't save this console test as error
@@ -992,24 +1088,51 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
       obj.occurr = 1;
       //
       var insert = true;
-      for (var j = 0; j < this.testResult.consoleTestErrors.length; j++) {
+      for (var j = 0; j < testAuto.testResult.consoleTestErrors.length; j++) {
         // Save old occurr value and temporarily set it to 1 to compare console tests without this property
-        var occurr = this.testResult.consoleTestErrors[j].occurr;
-        this.testResult.consoleTestErrors[j].occurr = 1;
-        if (JSON.stringify(this.testResult.consoleTestErrors[j]) === JSON.stringify(obj)) {
+        var occurr = testAuto.testResult.consoleTestErrors[j].occurr;
+        testAuto.testResult.consoleTestErrors[j].occurr = 1;
+        if (JSON.stringify(testAuto.testResult.consoleTestErrors[j]) === JSON.stringify(obj)) {
           insert = false;
-          this.testResult.consoleTestErrors[j].occurr = occurr + 1;
+          testAuto.testResult.consoleTestErrors[j].occurr = occurr + 1;
           break;
         }
         else
-          this.testResult.consoleTestErrors[j].occurr = occurr;
+          testAuto.testResult.consoleTestErrors[j].occurr = occurr;
       }
       if (insert)
-        this.testResult.consoleTestErrors.push(obj);
+        testAuto.testResult.consoleTestErrors.push(obj);
       //
       break;
     }
   }
+};
+
+
+/**
+ * Save a "no response" error
+ * */
+Node.TestAuto.prototype.saveNoResponse = function ()
+{
+  var testAuto = this.parent || this;
+  //
+  var obj = {};
+  obj.requestNumber = this.reqIndex;
+  obj.message = "Server didn't respond";
+  obj.occurr = 1;
+  //
+  // Check if need to save this exception
+  var insert = true;
+  for (var i = 0; i < testAuto.testResult.noResponseErrors.length; i++) {
+    if (testAuto.testResult.noResponseErrors[i].requestNumber === obj.requestNumber) {
+      insert = false;
+      testAuto.testResult.noResponseErrors[i].occurr++;
+      break;
+    }
+  }
+  //
+  if (insert)
+    testAuto.testResult.noResponseErrors.push(obj);
 };
 
 
@@ -1075,18 +1198,46 @@ Node.TestAuto.prototype.getChildBySID = function (sid)
 Node.TestAuto.prototype.addObjToMap = function (obj)
 {
   if (obj.pid) {
-    if (!this.objectsMap[obj.pid])
-      this.objectsMap[obj.pid] = {oldId: obj.id};
-    else if (!this.objectsMap[obj.pid].newId)
-      this.objectsMap[obj.pid].newId = obj.id;
+    // The objectsMap elements have to be arrays, because there are some objects having
+    // the same pid (i.e. dataMap rows)
+    this.objectsMap[obj.pid] = this.objectsMap[obj.pid] || [];
+    //
+    var oldIdPos = -1;
+    for (var i = 0; i < this.objectsMap[obj.pid].length; i++) {
+      if (this.objectsMap[obj.pid][i].oldId === obj.id) {
+        oldIdPos = i;
+        break;
+      }
+    }
+    if (this.mode === Node.TestAuto.ModeMap.rec) {
+      if (!this.objectsMap[obj.pid][oldIdPos])
+        this.objectsMap[obj.pid].push({oldId: obj.id});
+    }
+    else {
+      for (var i = 0; i < this.objectsMap[obj.pid].length; i++) {
+        if (!this.objectsMap[obj.pid][i].newId) {
+          this.objectsMap[obj.pid][i].newId = obj.id;
+          break;
+        }
+      }
+    }
   }
   //
   if (obj.children) {
     for (var i = 0; i < obj.children.length; i++)
       this.addObjToMap(obj.children[i]);
   }
-  else
-    return;
+  //
+  if (obj.elements) {
+    for (var i = 0; i < obj.elements.length; i++)
+      this.addObjToMap(obj.elements[i]);
+  }
+  //
+  if (obj.child) {
+    this.addObjToMap(obj.child);
+  }
+  //
+  return;
 };
 
 
@@ -1100,14 +1251,15 @@ Node.TestAuto.prototype.getNewIdFromOldId = function (oldId)
   var pids = Object.keys(this.objectsMap);
   //
   for (var i = 0; i < pids.length; i++) {
-    if (this.objectsMap[pids[i]].oldId === oldId) {
-      newId = this.objectsMap[pids[i]].newId;
-      break;
+    for (var j = 0; j < this.objectsMap[pids[i]].length; j++) {
+      if (this.objectsMap[pids[i]][j].oldId === oldId) {
+        newId = this.objectsMap[pids[i]][j].newId;
+        break;
+      }
     }
+    if (newId)
+      break;
   }
-  //
-  // If I don't find newId, return the old one
-  newId = newId || oldId;
   //
   return newId;
 };
@@ -1160,6 +1312,26 @@ Node.TestAuto.prototype.calcSystemLoad = function (pids)
     //
     this.testResult.memory.push(mem);
   }.bind(this));
+};
+
+
+/**
+ * Get request duration (i.e. time occurred between first input item and last output item)
+ * @param {Object} req
+ * */
+Node.TestAuto.prototype.getReqDuration = function (req)
+{
+  if (!req || !req.input || !req.output)
+    return 0;
+  //
+  // Get first input item and last output item
+  var firstInputItem = req.input[0];
+  var lastOutputItem = req.output[req.output.length - 1] || req.input[req.input.length - 1];
+  //
+  var startTimeStamp = firstInputItem && firstInputItem.time ? firstInputItem.time : 0;
+  var endTimeStamp = lastOutputItem && lastOutputItem.time ? lastOutputItem.time : 0;
+  //
+  return endTimeStamp - startTimeStamp;
 };
 
 

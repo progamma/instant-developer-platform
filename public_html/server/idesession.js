@@ -435,7 +435,7 @@ Node.IDESession.prototype.processMessage = function (msg)
       break;
 
     case Node.IDESession.msgTypeMap.sendRestResponse:
-      this.log("INFO", "Sending REST response", "IDESession.processMessage", msg);
+      this.log("DEBUG", "Sending REST response", "IDESession.processMessage", msg);
       if (typeof msg.text === "object")
         msg.text = JSON.stringify(msg.text);
       this.restRes.status(msg.code || 500).end(msg.text + "");

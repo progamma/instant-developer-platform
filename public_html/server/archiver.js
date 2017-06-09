@@ -17,6 +17,8 @@ Node.AWS = require("aws-sdk");
 Node.rimraf = require("rimraf");
 Node.fs = require("fs");
 Node.gcloud = require("gcloud");
+Node.http = require("http");
+Node.https = require("https");
 
 
 /**
@@ -116,6 +118,31 @@ Node.Archiver.prototype.upload = function (pathFile, pathCloud, callback)
 Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
 {
   var pthis = this;
+  //
+  // Path cloud is needed!
+  if (!pathCloud) {
+    this.logger.log("WARN", "Missing file name", "Archiver.download");
+    return callback("Missing file name");
+  }
+  //
+  // First, if the pathCloud is an URL, download the file directly
+  if (pathCloud.toLowerCase().startsWith("http://") || pathCloud.toLowerCase().startsWith("https://")) {
+    // Handle only HTTP and HTTPS
+    var request = (pathCloud.toLowerCase().startsWith("http://") ? Node.http : Node.https).get(pathCloud, function (resp) {
+      resp.pipe(Node.fs.createWriteStream(pathFile));
+      resp.on("end", function () {
+        // Handle HTTP's STATUS CODE
+        if (resp.statusCode >= 400)
+          callback("Wrong reply: " + resp.statusCode);
+        else
+          callback();
+      });
+    });
+    request.on("error", callback);
+    //
+    // Do nothing and wait for download to complete
+    return;
+  }
   //
   // If the storage is gcloud
   if (this.config.storage === "gcloud") {

@@ -166,9 +166,9 @@ Node.Database.initDbEnv = function (user, callback)
     // Crate the role
     var query;
     if (user.userName === "manager")
-      query = "CREATE ROLE inde CREATEDB LOGIN NOINHERIT VALID UNTIL 'infinity';";
+      query = "CREATE ROLE inde CREATEDB LOGIN PASSWORD '" + user.dbPassword + "' NOINHERIT VALID UNTIL 'infinity';";
     else
-      query = "CREATE ROLE \"" + user.userName + "\" CREATEDB LOGIN NOINHERIT VALID UNTIL 'infinity';";
+      query = "CREATE ROLE \"" + user.userName + "\" CREATEDB LOGIN PASSWORD '" + user.dbPassword + "' NOINHERIT VALID UNTIL 'infinity';";
 
     client.query(query, function (err) {
       if (err && err.code !== "42710") {    // 42710: role already exists

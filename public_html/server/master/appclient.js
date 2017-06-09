@@ -111,6 +111,35 @@ Node.AppClient.prototype.openConnection = function (socket)
 {
   var pthis = this;
   //
+  // If my ID is inside the cTokens array, my ID is a CTOKEN
+  var ctoken = (this.session.cTokens.indexOf(this.id) !== -1 ? this.id : undefined);
+  if (ctoken) { // I've been invited...
+    // I've been invited: if this session has not a master -> that's not allowed
+    if (!this.session.masterAppClient) {
+      this.log("WARN", "Master, that invited me, is gone", "AppClient.openConnection", {ctoken: ctoken});
+      socket.emit("redirect", "http://www.instantdeveloper.com");
+      return;
+    }
+    //
+    // "Eat" the token from the list of valid tokens
+    var id = this.session.cTokens.indexOf(ctoken);
+    this.session.cTokens.splice(id, 1);
+    //
+    this.log("DEBUG", "A new client is SLAVE for session", "AppClient.openConnection");
+  }
+  else {  // I've not been invited
+    // I've not been invited: if this session has already a master (and it's not me) -> that's not allowed
+    if (this.session.masterAppClient && this.session.masterAppClient !== this) {
+      this.log("WARN", "Session is busy", "AppClient.openConnection");
+      socket.emit("redirect", "http://www.instantdeveloper.com");
+      return;
+    }
+    //
+    // Now I'm the client master
+    this.log("DEBUG", "A new client is MASTER for session", "AppClient.openConnection");
+    this.session.masterAppClient = this;
+  }
+  //
   this.socket = socket;
   //
   // Stop killClient timer (see AppClient::init)
@@ -118,14 +147,6 @@ Node.AppClient.prototype.openConnection = function (socket)
     clearTimeout(this.killClient);
     delete this.killClient;
   }
-  //
-  // If the session has no client master, I'm the client master
-  if (!this.session.masterAppClient || this.session.masterAppClient === this) {
-    this.log("DEBUG", "A new client is MASTER for session", "AppClient.openConnection");
-    this.session.masterAppClient = this;
-  }
-  else
-    this.log("DEBUG", "A new client is SLAVE for session", "AppClient.openConnection");
   //
   // Listen for "appmsg" (sent by client app.js)
   socket.on("appmsg", function (msg) {

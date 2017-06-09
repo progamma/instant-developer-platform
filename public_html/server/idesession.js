@@ -79,6 +79,8 @@ Node.IDESession.msgTypeMap = {
   createDB: "cdb",
   createDBresult: "cdbres",
   //
+  cTokenOp: "ctop",
+  //
   deviceMsg: "dm",
   cloudConnectorMsg: "ccm",
   //
@@ -276,7 +278,7 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
     //
     // If the user has an image, use it for profile
     if (this.project.user.IID)
-      profile.img = "/" + this.project.user.userName + "/picture" + (this.config.auth ? "?autk=" + this.config.autk : "");
+      profile.img = "/" + this.project.user.userName + "/picture";
   }
   //
   // If not reconnected
@@ -332,18 +334,6 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
       // (the client can come back until the MASTER is alive)
       pthis.cTokens.push(ctoken);
   });
-};
-
-
-/**
- * Adds a new CToken for this session
- * @param {string} ctoken
- */
-Node.IDESession.prototype.addCToken = function (ctoken)
-{
-  // Add the ctoken to the array (if not there already)
-  if (this.cTokens.indexOf(ctoken) === -1)
-    this.cTokens.push(ctoken);
 };
 
 
@@ -430,15 +420,16 @@ Node.IDESession.prototype.processMessage = function (msg)
         this.log("WARN", "Can't close client connection (socket not found)", "IDESession.processMessage", msg);
       break;
 
+    case Node.IDESession.msgTypeMap.cTokenOp:
+      this.handleCTokenOpMsg(msg);
+      break;
+
     case Node.IDESession.msgTypeMap.createDB:
       this.handleCreateDBMsg(msg);
       break;
 
     case Node.IDESession.msgTypeMap.sendRestResponse:
-      this.log("DEBUG", "Sending REST response", "IDESession.processMessage", msg);
-      if (typeof msg.text === "object")
-        msg.text = JSON.stringify(msg.text);
-      this.restRes.status(msg.code || 500).end(msg.text + "");
+      this.handleSendResponseMsg(msg);
       break;
 
     case Node.IDESession.msgTypeMap.deviceMsg:
@@ -446,7 +437,7 @@ Node.IDESession.prototype.processMessage = function (msg)
       break;
 
     case Node.IDESession.msgTypeMap.cloudConnectorMsg:
-      this.handleCloudConnectorMessage(msg);
+      this.project.user.handleCloudConnectorMessage(msg.cnt, this);
       break;
 
     case Node.IDESession.msgTypeMap.sync:
@@ -505,6 +496,20 @@ Node.IDESession.prototype.sendMessageToOffline = function (msg)
 
 
 /**
+ * Handles a CToken operation for this session
+ * @param {object} msg
+ */
+Node.IDESession.prototype.handleCTokenOpMsg = function (msg)
+{
+  var ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
+  if (msg.cnt.op === "add" && ctidx === -1)
+    this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
+  else if (msg.cnt.op === "del" && ctidx !== -1)
+    this.cTokens.splice(ctidx, 1);  // Add the ctoken to the array (if not there already)
+};
+
+
+/**
  * Handles a create DB message
  * @param {object} msg
  */
@@ -530,6 +535,29 @@ Node.IDESession.prototype.handleCreateDBMsg = function (msg)
 
 
 /**
+ * Handles a send response message
+ * @param {object} msg
+ */
+Node.IDESession.prototype.handleSendResponseMsg = function (msg)
+{
+  this.log("DEBUG", "Sending REST response", "IDESession.handleSendResponseMsg", msg);
+  //
+  // Convert objects into strings
+  if (typeof msg.text === "object")
+    msg.text = JSON.stringify(msg.text);
+  //
+  // Handle options, if any
+  if (msg.options.contentType)
+    this.restRes.writeHead(msg.code || 500, {"Content-Type": msg.options.contentType});
+  else
+    this.restRes.status(msg.code || 500);
+  //
+  // Send response
+  this.restRes.end(msg.text + "");
+};
+
+
+/**
  * Handle a device message
  * @param {object} msg
  */
@@ -539,34 +567,6 @@ Node.IDESession.prototype.handleDeviceMessage = function (msg)
     case "deviceListRequest":   // Send DEVICE list to child process
       this.sendToChild({type: Node.IDESession.msgTypeMap.deviceMsg,
         cnt: {type: "deviceList", data: this.project.user.getUiDeviceList(this)}});
-      break;
-  }
-};
-
-
-/**
- * Handle a Cloud Connector message
- * @param {object} msg
- */
-Node.IDESession.prototype.handleCloudConnectorMessage = function (msg)
-{
-  switch (msg.cnt.type) {
-    case "connectorListRequest":
-      this.sendToChild({type: Node.IDESession.msgTypeMap.cloudConnectorMsg,
-        cnt: {type: "connectorList", data: this.project.user.getUiCloudConnectorsList()}});
-      break;
-
-    case "remoteCmd":
-      var conn = this.project.user.getCloudConnectorByName(msg.cnt.conn);
-      if (conn) {
-        msg.cnt.data.sid = this.id;
-        conn.socket.emit("cloudServerMsg", msg.cnt.data);
-      }
-      else if (msg.cnt.data.cbid) {
-        this.sendToChild({type: Node.IDESession.msgTypeMap.cloudConnectorMsg,
-          cnt: {type: "response", appid: msg.cnt.data.appid, cbid: msg.cnt.data.cbid, dmid: msg.cnt.data.dmid,
-            data: {error: "Remote connector not found"}}});
-      }
       break;
   }
 };

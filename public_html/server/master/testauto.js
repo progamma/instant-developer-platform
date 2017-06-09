@@ -179,7 +179,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (req.length === 1)
         return;
       else {
-        req.splice(1, i);
+        req.splice(i--, 1);
         continue;
       }
     }
@@ -191,7 +191,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (req.length === 1)
         return;
       else {
-        req.splice(1, i);
+        req.splice(i--, 1);
         continue;
       }
     }
@@ -202,7 +202,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (req.length === 1)
         return;
       else {
-        req.splice(1, i);
+        req.splice(i--, 1);
         continue;
       }
     }
@@ -213,7 +213,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (req.length === 1)
         return;
       else {
-        req.splice(1, i);
+        req.splice(i--, 1);
         continue;
       }
     }
@@ -222,7 +222,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (req.length === 1)
         return;
       else {
-        req.splice(1, i);
+        req.splice(i--, 1);
         continue;
       }
     }
@@ -514,54 +514,71 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     // its value with this.expectedResponses when responseTimeout fired
     this.outputLength = this.expectedResponses;
     //
-    // A client request can be multiple (i.e. it can consists of more sub-request).
-    // Process all them
-    for (var i = 0; i < req.input.length; i++) {
-      for (var j = 0; j < req.input[i].content.length; j++) {
-        if (req.input[i].content[j].id === "saveTaggingData") {
-          // In step-by-step mode, when I'm processing saveTaggingData command
-          // I send recorded taggingData to client, so it can compare values with
-          // current elements' values and check if there are some differences
-          if (this.mode === Node.TestAuto.ModeMap.stepByStep)
-            this.paused = true;
-          //
-          // If needed, convert remelems id to the new ones
-          var tagValues = req.input[i].content[j].content;
-          if (tagValues) {
-            var newId;
-            for (var k = 0; k < tagValues.length; k++) {
-              newId = this.getNewIdFromOldId(tagValues[k].elId);
-              console.log("DEBUG CONVERSIONE TAG:", JSON.stringify(tagValues[k]), " --->", newId);
-              //
-              // If current object has a new id, replace the old one
-              tagValues[k].elId = newId || tagValues[k].elId;
-              //
-              // If I didn't find new id, it means I haven't got the object in the map
-              if (!newId)
-                tagValues[k].elNotFound = true;
-            }
+    // Process request
+    var processRequest = function (request, i, timer) {
+      setTimeout(function () {
+        for (var j = 0; j < request.input[i].content.length; j++) {
+          if (request.input[i].content[j].id === "saveTaggingData") {
+            // In step-by-step mode, when I'm processing saveTaggingData command
+            // I send recorded taggingData to client, so it can compare values with
+            // current elements' values and check if there are some differences
+            if (this.mode === Node.TestAuto.ModeMap.stepByStep)
+              this.paused = true;
             //
-            // Tell client to calculate tag results
-            ev = [{id: "calculateTagResults", content: tagValues}];
-            this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+            // If needed, convert remelems id to the new ones
+            var tagValues = request.input[i].content[j].content;
+            if (tagValues) {
+              var newId;
+              for (var k = 0; k < tagValues.length; k++) {
+                newId = this.getNewIdFromOldId(tagValues[k].elId);
+                //
+                // If current object has a new id, replace the old one
+                tagValues[k].elId = newId || tagValues[k].elId;
+                //
+                // If I didn't find new id, it means I haven't got the object in the map
+                if (!newId)
+                  tagValues[k].elNotFound = true;
+              }
+              //
+              // Tell client to calculate tag results
+              ev = [{id: "calculateTagResults", content: tagValues}];
+              this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+            }
           }
         }
-      }
-      //
-      // If needed, convert remelems id to the new ones
-      var input = req.input[i].content;
-      for (var k = 0; k < input.length; k++)
-        input[k].obj = this.getNewIdFromOldId(input[k].obj) || input[k].obj;
-      //
-      // Process request
-      this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input});
+        //
+        // If needed, convert remelems id to the new ones
+        var input = request.input[i].content;
+        for (var k = 0; k < input.length; k++)
+          input[k].obj = this.getNewIdFromOldId(input[k].obj) || input[k].obj;
+        //
+        this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input});
+      }.bind(this), timer);
+    }.bind(this);
+    //
+    // A client request can be multiple (i.e. it can consists of more sub-request).
+    // Process all them
+    var reqDelay = 0;
+    for (var i = 0; i < req.input.length; i++) {
+      var timeout = req.input[i - 1] ? req.input[i].time - req.input[i - 1].time : 0;
+      reqDelay += timeout;
+      processRequest(req, i, reqDelay);
     }
     //
     // Set response timeout only if replay is not paused.
     // When replay is paused it means I'm replay step-by-step, so I don't want to automatically play next request
     if (!this.paused) {
       // Try to play next request if test has not done yet by itself
-      var nextDelay = this.getReqDuration(req) * 5;
+      var reqDuration = this.getReqDuration(req);
+      //
+      // Set min delay to 1 second
+      var nextDelay = Math.max(1000, reqDuration * 5);
+      //
+      // Set max delay to 10 seconds
+      nextDelay = Math.min(10000, nextDelay);
+      //
+      // For long request (i.e. more than 10 seconds), set delay to 2 * req duration
+      nextDelay = (reqDuration >= 10000) ? 2 * reqDuration : nextDelay;
       //
       this.responseTimeout = setTimeout(function () {
         if (this.outputLength !== 0 && this.outputLength === this.expectedResponses)
@@ -1117,7 +1134,7 @@ Node.TestAuto.prototype.saveNoResponse = function ()
   var testAuto = this.parent || this;
   //
   var obj = {};
-  obj.requestNumber = this.reqIndex;
+  obj.requestNumber = this.reqIndex - 1;
   obj.message = "Server didn't respond";
   obj.occurr = 1;
   //
@@ -1159,9 +1176,17 @@ Node.TestAuto.prototype.saveResults = function (res)
  * */
 Node.TestAuto.prototype.terminate = function ()
 {
-  // Close connection
-  if (this.appClient && this.appClient.close)
-    this.appClient.close();
+  // Terminate children
+  var ids = Object.keys(this.children);
+  for (var i = 0; i < ids.length; i++) {
+    var child = this.children[ids[i]];
+    if (child.session && child.session.worker)
+      child.session.worker.deleteSession(child.session);
+  }
+  //
+  // Terminate session
+  if (this.session)
+    this.session.worker.deleteSession(this.session);
   //
   // Reset all (clear and delete all timeouts, reset all properties and so on)
   this.reset({id: this.id, mode: this.mode});

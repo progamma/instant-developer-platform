@@ -18,6 +18,7 @@ Node.Worker = require("../master/worker");
 Node.Archiver = require("../archiver");
 Node.Utils = require("../utils");
 Node.TestAuto = require("../master/testauto");
+Node.AppSession = require("../master/appsession");
 
 
 /*
@@ -81,7 +82,7 @@ Node.App.prototype.log = function (level, message, sender, data)
 Node.App.prototype.save = function ()
 {
   var r = {cl: "Node.App", name: this.name, version: this.version, date: this.date,
-    stopped: this.stopped};
+    stopped: this.stopped, startSS: this.startSS};
   return r;
 };
 
@@ -96,6 +97,7 @@ Node.App.prototype.load = function (v)
   this.version = v.version;
   this.date = v.date;
   this.stopped = v.stopped;
+  this.startSS = v.startSS;
 };
 
 
@@ -172,6 +174,74 @@ Node.App.prototype.createNewSession = function ()
 };
 
 
+/*
+ * Get a server session by name
+ * @param {string} name
+ * @returns {Node.AppSession}
+ */
+Node.App.prototype.getServerSession = function (name)
+{
+  for (var i = 0; i < this.workers.length; i++) {
+    var s = this.workers[i].getServerSession(name);
+    if (s)
+      return s;
+  }
+};
+
+
+/*
+ * Start a server session
+ * @param {string} name
+ * @returns {Node.AppSession}
+ */
+Node.App.prototype.startServerSession = function (name, request)
+{
+  // Check if a session with same name already exists
+  if (this.getServerSession(name))
+    return this.log("WARN", "Can't start server session: session with same name already exists",
+            "App.startServerSession", {name: name, request: request});
+  //
+  var ss = this.createNewSession();
+  ss.name = name;
+  //
+  // If I haven't done it yet create the physical process for the worker
+  if (!ss.worker.child)
+    ss.worker.createChild();
+  //
+  // Route this message to the child
+  var ev = {id: "onStart", name: name, content: {}, master: true};
+  ss.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: ss.id, content: [ev], request: request});
+  //
+  return ss;
+};
+
+
+/**
+ * Start default server session
+ */
+Node.App.prototype.startDefaultServerSession = function ()
+{
+  if (!this.startSS)
+    return;
+  //
+  this.startServerSession("_default", {});
+};
+
+
+/**
+ * Stop default server session
+ */
+Node.App.prototype.stopDefaultServerSession = function ()
+{
+  if (!this.startSS)
+    return;
+  //
+  var s = this.getServerSession("_default");
+  if (s)
+    s.terminate();
+};
+
+
 /**
  * Delete the worker from the array
  * @param {worker} worker
@@ -233,7 +303,7 @@ Node.App.prototype.sendStatus = function (params, callback)
   }
   else {  // windows
     cmd = "cmd";
-    cmdParams = ["/c", "dir", "/s", "/-c", path];
+    cmdParams = ["/c", "dir", "/s", "/-c", path.replace(/\//g, "\\")];      // Inside "cmd /c" command / are not allowed
   }
   this.server.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {
     if (err) {
@@ -382,10 +452,10 @@ Node.App.prototype.install = function (params, callback)
     return callback("The app is already updating");
   }
   //
-  // TODO: Protezione per installazioni accidentali -> togliere quando attiviamo l'autk
-  if (!params.req.query.rid) {
-    this.log("WARN", "Missing RID", "App.install");
-    return callback("Missing RID");
+  // If the file is missing -> can't continue
+  if (!pathCloud) {
+    this.log("WARN", "Missing FILE parameter", "App.install");
+    return callback("Missing FILE parameter");
   }
   //
   // Error function
@@ -454,7 +524,7 @@ Node.App.prototype.install = function (params, callback)
       // App exists -> first terminate every session and wait for the workers to terminate
       params.req.query.force = true;    // force TERMINATE
       params.req.query.timeout = 15000; // max: 15 sec
-      params.req.query.msg = "The application is currently being updated and will be restarted in 15 seconds. It is recommended that you end the working session and close the browser";
+      params.req.query.msg = "The application is currently being updated and will be restarted in 15 seconds. It is recommended that you end the working session and close the browser";  // jshint ignore:line
       pthis.terminate(params, function (err) {
         if (err)
           return errorFnc("Can't terminate the app: " + err);
@@ -559,6 +629,9 @@ Node.App.prototype.install = function (params, callback)
                 //
                 // Save config
                 pthis.config.saveConfig();
+                //
+                // If needed, start app's server session
+                pthis.startDefaultServerSession();
                 //
                 // Log the operation
                 pthis.log("INFO", "Application " + (appExisted ? "updated" : "installed"), "App.install");
@@ -830,6 +903,16 @@ Node.App.prototype.configure = function (params, callback)
     else if (query.updating === "true")
       this.updating = true;
   }
+  if (query.startSS) {
+    if (query.startSS === "false" && this.startSS) {
+      this.stopDefaultServerSession();
+      this.startSS = false;
+    }
+    else if (query.startSS === "true" && !this.startSS) {
+      this.startSS = true;
+      this.startDefaultServerSession();
+    }
+  }
   //
   // Save the new configuration
   this.config.saveConfig();
@@ -838,80 +921,6 @@ Node.App.prototype.configure = function (params, callback)
   this.log("DEBUG", "Updated app configuration", "App.configure", {config: query});
   //
   callback();
-};
-
-
-/**
- * Process the commands related to this app
- * @param {object} params
- * @param {function} callback (err or {err, msg, code})
- */
-Node.App.prototype.processCommand = function (params, callback)
-{
-  this.execCommand(params, callback);
-};
-
-
-/**
- * Execute commands for the app
- * @param {object} params
- * @param {function} callback (err or {err, msg, code})
- */
-Node.App.prototype.execCommand = function (params, callback)
-{
-  var command = params.tokens[0];
-  //
-  // If the authorization key is enabled and the given one does not match -> error
-  if (this.config.auth && params.req.query.autk !== this.config.autk) {
-    this.log("WARN", "Unauthorized", "App.execCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
-  }
-  //
-  // Valid AUTK (or AUTK not enabled)
-  switch (command) {
-    case "status":
-      this.sendStatus(params, callback);
-      break;
-    case "sessions":
-      this.sendSessions(params, callback);
-      break;
-    case "start":
-      this.stopped = false;
-      callback();
-      break;
-    case "stop":
-      this.stopped = true;
-      callback();
-      break;
-    case "terminate":
-      this.terminate(params, callback);
-      break;
-    case "install":
-      this.install(params, callback);
-      break;
-    case "uninstall":
-      this.uninstall(params, callback);
-      break;
-    case "backup":
-      this.backup(params, callback);
-      break;
-    case "restore":
-      this.restore(params, callback);
-      break;
-    case "filesystem":
-      this.handleFileSystem(params, callback);
-      break;
-    case "config":
-      this.configure(params, callback);
-      break;
-    case "test":
-      this.test(params, callback);
-      break;
-    default:
-      this.log("WARN", "Invalid Command", "App.execCommand", {cmd: command, url: params.req.originalUrl});
-      callback("Invalid Command");
-      break;
-  }
 };
 
 
@@ -1003,6 +1012,81 @@ Node.App.prototype.test = function (params, callback)
 Node.App.prototype.getTestById = function (id)
 {
   return this.testAuto ? this.testAuto[id] : null;
+};
+
+
+/**
+ * Process the commands related to this app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.processCommand = function (params, callback)
+{
+  this.execCommand(params, callback);
+};
+
+
+/**
+ * Execute commands for the app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.execCommand = function (params, callback)
+{
+  var command = params.tokens[0];
+  //
+  // If the authorization key is enabled and the given one does not match -> error
+  if (this.config.auth && params.req.query.autk !== this.config.autk) {
+    this.log("WARN", "Unauthorized", "App.execCommand", {url: params.req.originalUrl});
+    return callback({err: "Unauthorized", code: 401});
+  }
+  //
+  // Valid AUTK (or AUTK not enabled)
+  switch (command) {
+    case "status":
+      this.sendStatus(params, callback);
+      break;
+    case "sessions":
+      this.sendSessions(params, callback);
+      break;
+    case "start":
+      this.stopped = false;
+      this.startDefaultServerSession();
+      callback();
+      break;
+    case "stop":
+      this.stopped = true;
+      callback();
+      break;
+    case "terminate":
+      this.terminate(params, callback);
+      break;
+    case "install":
+      this.install(params, callback);
+      break;
+    case "uninstall":
+      this.uninstall(params, callback);
+      break;
+    case "backup":
+      this.backup(params, callback);
+      break;
+    case "restore":
+      this.restore(params, callback);
+      break;
+    case "filesystem":
+      this.handleFileSystem(params, callback);
+      break;
+    case "config":
+      this.configure(params, callback);
+      break;
+    case "test":
+      this.test(params, callback);
+      break;
+    default:
+      this.log("WARN", "Invalid Command", "App.execCommand", {cmd: command, url: params.req.originalUrl});
+      callback("Invalid Command");
+      break;
+  }
 };
 
 

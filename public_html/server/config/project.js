@@ -364,8 +364,8 @@ Node.Project.prototype.editProject = function (params, callback)
  */
 Node.Project.prototype.viewProject = function (params, callback)
 {
-  // If the project is not public and the AUTK is enabled it must match
-  if (!this.public && this.config.auth && params.req.query.autk !== this.config.autk) {
+  // If the project is not public and the edit prj token is enabled it must match
+  if (!this.public && this.config.editPrjToken && (!this.token || params.req.query.t !== this.token)) {
     this.log("WARN", "Unauthorized", "Project.viewProject");
     return callback({err: "Unauthorized", code: 401});
   }
@@ -398,62 +398,86 @@ Node.Project.prototype.downloadFile = function (params, callback)
   var filename = params.tokens[params.tokens.length - 1];
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/" + folder + "/" + filename;
   //
-  // Compute the mimetype
-  var mimetype = Node.mime.lookup(filename);
-  //
-  // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
-  var stream;
-  if ((mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
-    var positions = params.req.headers.range.replace(/bytes=/, "").split("-");
-    //
-    Node.fs.stat(path, function (err, stats) {
-      if (err) {
-        pthis.log("ERROR", "Error while reading file " + path + "'s stats: " + err, "Project.downloadFile");
-        return callback({err: "Error while reading file " + path + "'s stats: " + err, code: 404});
-      }
-      //
-      var total = stats.size;
-      var start = parseInt(positions[0], 10);
-      var end = positions[1] ? parseInt(positions[1], 10) : total - 1;
-      //
-      var chunksize = (end - start) + 1;
-      params.res.writeHead(206, {
-        "Content-Range": "bytes " + start + "-" + end + "/" + total,
-        "Accept-Ranges": "bytes",
-        "Content-Length": chunksize,
-        "Content-Type": mimetype
-      });
-      //
-      // Send the requested file slice
-      stream = Node.fs.createReadStream(path, {start: start, end: end});
-      stream.on("open", function () {
-        stream.pipe(params.res);
-      });
-      stream.on("end", function () {
-        callback({skipReply: true});
-      });
-      stream.on("error", function (err) {
-        pthis.log("ERROR", "Error while streaming file " + path + ": " + err, "Project.downloadFile");
-        callback({err: "Error while streaming file " + path + ": " + err, code: 404});
-      });
-    });
-    //
-    return;
+  // Send the file only if there is an editing session
+  var session = this.server.getOpenSession(this);
+  if (!session) {
+    this.log("WARN", "No session is asking for this file", "Project.downloadFile");
+    return callback("No session is asking for this file");
   }
   //
-  // Send the full file
-  params.res.writeHead(200, {"Content-Type": mimetype});
+  // filename must not contain ..
+  if (filename.indexOf("..") !== -1) {
+    this.log("WARN", "Double dot operator (..) not allowed", "Project.downloadFile");
+    return callback("Double dot operator (..) not allowed");
+  }
   //
-  stream = Node.fs.createReadStream(path);
-  stream.on("open", function () {
-    stream.pipe(params.res);
-  });
-  stream.on("end", function () {
-    callback({skipReply: true});
-  });
-  stream.on("error", function (err) {
-    pthis.log("WARN", "Error sending the file " + path + ": " + err, "Project.downloadFile");
-    callback({skipReply: true});
+  // Full path must be valid and not a directory
+  Node.fs.stat(path, function (err, pathStats) {
+    if (err) {
+      pthis.log("WARN", "Can't get path info: " + err, "Project.downloadFile");
+      return callback({err: "Can't get path info: " + err, code: 404});
+    }
+    if (pathStats.isDirectory()) {
+      pthis.log("WARN", "Invalid path (file is a directory)", "Project.downloadFile");
+      return callback("Invalid path (file is a directory)");
+    }
+    //
+    // Compute the mimetype
+    var mimetype = Node.mime.lookup(filename);
+    //
+    // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
+    var stream;
+    if ((mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
+      var positions = params.req.headers.range.replace(/bytes=/, "").split("-");
+      //
+      Node.fs.stat(path, function (err, stats) {
+        if (err) {
+          pthis.log("ERROR", "Error while reading file " + path + "'s stats: " + err, "Project.downloadFile");
+          return callback({err: "Error while reading file " + path + "'s stats: " + err, code: 404});
+        }
+        //
+        var total = stats.size;
+        var start = parseInt(positions[0], 10);
+        var end = positions[1] ? parseInt(positions[1], 10) : total - 1;
+        //
+        // Send the requested file slice
+        stream = Node.fs.createReadStream(path, {start: start, end: end});
+        stream.on("open", function () {
+          params.res.writeHead(206, {
+            "Content-Range": "bytes " + start + "-" + end + "/" + total,
+            "Accept-Ranges": "bytes",
+            "Content-Length": (end - start) + 1,
+            "Content-Type": mimetype
+          });
+          //
+          stream.pipe(params.res);
+        });
+        stream.on("end", function () {
+          callback({skipReply: true});
+        });
+        stream.on("error", function (err) {
+          pthis.log("ERROR", "Error while streaming file " + path + ": " + err, "Project.downloadFile");
+          callback({err: "Error while streaming file " + path + ": " + err, code: 404});
+        });
+      });
+      //
+      return;
+    }
+    //
+    // Send the full file
+    stream = Node.fs.createReadStream(path);
+    stream.on("open", function () {
+      params.res.writeHead(200, {"Content-Type": mimetype});
+      //
+      stream.pipe(params.res);
+    });
+    stream.on("end", function () {
+      callback({skipReply: true});
+    });
+    stream.on("error", function (err) {
+      pthis.log("WARN", "Error sending the file " + path + ": " + err, "Project.downloadFile");
+      callback({err: "Error sending the file " + path + ": " + err, code: 404});
+    });
   });
 };
 
@@ -507,10 +531,16 @@ Node.Project.prototype.uploadResource = function (params, callback)
   var filename = params.tokens[1];
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/resources/" + filename;
   //
+  // filename must be a valid GUID followed by "." and the extension
+  if (!filename.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.?\w*$/i)) {
+    this.log("WARN", "Invalid file name (not a GUID)", "Project.uploadResource");
+    return callback("Invalid file name (not a GUID)");
+  }
+  //
   // Get the session that will receive this resource
   var session = this.server.getOpenSession(this);
   if (!session) {
-    pthis.log("WARN", "No session is waiting for this resource", "Project.uploadResource");
+    this.log("WARN", "No session is waiting for this resource", "Project.uploadResource");
     return callback("No session is waiting for this resource");
   }
   //
@@ -949,7 +979,7 @@ Node.Project.prototype.renameProject = function (params, callback)
   //
   // Command is in the form
   // (http://servername/username/prjname/rename?newName=newName)
-  var newName = params.req.query.newName;
+  var newName = Node.Utils.clearName(params.req.query.newName);
   var oldName = this.name;
   //
   // If a new name was not provided or it's the same as the old one
@@ -1305,6 +1335,9 @@ Node.Project.prototype.execCommand = function (params, callback)
     case "restoreBranch":
       this.restoreBranch(params, callback);
       break;
+    case "playTutorial":
+      this.openTutorial(params, callback);
+      break;
 
     default:
       // If the authorization key is enabled and the given one does not match -> error
@@ -1352,7 +1385,6 @@ Node.Project.prototype.execCommand = function (params, callback)
         case "updateTutProject":
           this.updateTutProject(params, callback);
           break;
-        case "playTutorial":
         case "editTutorial":
           this.openTutorial(params, callback);
           break;

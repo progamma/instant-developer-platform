@@ -13,6 +13,7 @@ Node.rimraf = require("rimraf");
 Node.ncp = require("../ncp_fixed");
 Node.fs = require("fs");
 Node.child = require("child_process");
+Node.crypto = require("crypto");
 
 // Import classes
 Node.Project = require("./project");
@@ -32,6 +33,7 @@ Node.User = function (par)
   this.parent = par;
   //
   this.userName = "";
+  this.dbPassword = "";
   this.projects = [];
   this.databases = [];
   this.apps = [];
@@ -88,7 +90,7 @@ Node.User.prototype.log = function (level, message, sender, data)
  */
 Node.User.prototype.save = function ()
 {
-  var r = {cl: "Node.User", userName: this.userName, projects: this.projects, databases: this.databases, apps: this.apps,
+  var r = {cl: "Node.User", userName: this.userName, dbPassword: this.dbPassword, projects: this.projects, databases: this.databases, apps: this.apps,
     name: this.name, surname: this.surname, OSUser: this.OSUser, IID: this.IID, uid: this.uid, gid: this.gid};
   return r;
 };
@@ -106,10 +108,15 @@ Node.User.prototype.load = function (v)
   this.apps = v.apps;
   this.name = v.name;
   this.surname = v.surname;
+  this.dbPassword = v.dbPassword;
   this.OSUser = v.OSUser;
   this.uid = v.uid;
   this.gid = v.gid;
   this.IID = v.IID;
+  //
+  // TODO: eliminare prima o poi... i vecchi utenti avevano questa password hard-coded
+  if (!this.dbPassword)
+    this.dbPassword = "12345";
 };
 
 
@@ -235,6 +242,9 @@ Node.User.prototype.init = function (userName, callback)
   var pthis = this;
   this.userName = userName;
   //
+  // Create a new random-dbPassword
+  this.dbPassword = Node.crypto.randomBytes(16).toString("hex");
+  //
   // If I'm the manager user, I don't need anything more
   if (this.userName === "manager")
     return callback();
@@ -246,6 +256,17 @@ Node.User.prototype.init = function (userName, callback)
     //
     pthis.createUserFolder(callback);
   });
+};
+
+
+/**
+ * Start default server session of all apps
+ */
+Node.User.prototype.startServerSessions = function ()
+{
+  // Notify event to my apps
+  for (var i = 0; this.apps && i < this.apps.length; i++)
+    this.apps[i].startDefaultServerSession();
 };
 
 
@@ -1341,6 +1362,7 @@ Node.User.prototype.addCloudConnector = function (socket, data)
   connector.name = data.name;
   connector.socket = socket;
   connector.dmlist = data.dmlist;
+  connector.callbacks = [];
   //
   // Add the cloudConnector to the owner's list
   this.cloudConnectors.push(connector);
@@ -1404,14 +1426,70 @@ Node.User.prototype.getUiCloudConnectorsList = function ()
 
 /*
  * Get a cloudConnector given its name
- * @param {string} name
+ * @param {string} ccName- name of cloud connector
+ * @param {string} dmName - name of datamodel
+ * @param {string} dmKey - key of datamodel
  * @returns {Object}
  */
-Node.User.prototype.getCloudConnectorByName = function (name)
+Node.User.prototype.getCloudConnectorByName = function (ccName, dmName, dmKey)
 {
   for (var i = 0; i < this.cloudConnectors.length; i++) {
-    if (this.cloudConnectors[i].name === name)
-      return this.cloudConnectors[i];
+    var cc = this.cloudConnectors[i];
+    if (cc.name === ccName) {
+      for (var j = 0; j < cc.dmlist.length; j++) {
+        var dm = cc.dmlist[i];
+        if (dm.name === dmName && dm.key === dmKey)
+          return cc;
+      }
+    }
+  }
+};
+
+
+/**
+ * Handle a Cloud Connector message
+ * @param {object} msg
+ * @param {IDESession/Worker/Socket} sender
+ */
+Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
+{
+  switch (msg.type) {
+    case "connectorListRequest":
+      sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
+        cnt: {type: "connectorList", data: this.getUiCloudConnectorsList()}});
+      break;
+
+    case "remoteCmd":
+      var conn = this.getCloudConnectorByName(msg.conn, msg.data.dm, msg.key);
+      //
+      // Connector not found -> invoke callback with error
+      if (!conn && msg.data.cbid)
+        return sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
+          cnt: {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, dmid: msg.data.dmid,
+            data: {error: "Remote connector not found"}}});
+      //
+      // Send message to connector
+      conn.socket.emit("cloudServerMsg", msg.data);
+      //
+      // Store callback function for invoke it when response comes
+      if (msg.data.cbid)
+        conn.callbacks[msg.data.cbid] = sender;
+      break;
+
+    case "response":
+      for (var i = 0; i < this.cloudConnectors.length; i++) {
+        var cc = this.cloudConnectors[i];
+        if (cc.socket === sender) {
+          var recipient = cc.callbacks[msg.cbid];
+          if (!recipient)
+            return false;
+          //
+          recipient.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: msg});
+          delete cc.callbacks[msg.cbid];
+          return true;
+        }
+      }
+      break;
   }
 };
 
@@ -1452,11 +1530,24 @@ Node.User.prototype.processCommand = function (params, callback)
   else if (this.userName === "manager")
     isAPP = true;
   //
-  var objName = params.tokens[0];
+  var objName = Node.Utils.clearName(params.tokens[0]);
   var command = params.tokens[1];
   //
   // Remove objName from the list
   params.tokens.splice(0, 1);
+  //
+  // If the authorization key is enabled and the given one does not match -> error
+  // (do it only for "CREATE", "RESTORE" and "DELETE" commands 'cause other commands will handle it where it's needed)
+  if (this.auth && params.req.query.autk !== this.autk && ["create", "restore", "delete"].indexOf(command) !== -1) {
+    this.logger.log("WARN", "Unauthorized", "User.processCommand", {url: params.req.originalUrl});
+    return callback({err: "Unauthorized", code: 401});
+  }
+  //
+  // CREATE, DELETE and RESTORE commands can be executed only on "true" users
+  if (this.userName === "manager" && ["create", "restore", "delete"].indexOf(command) !== -1) {
+    this.logger.log("WARN", "Command can't be executed on the MANAGER user", "User.processCommand", {url: params.req.originalUrl});
+    return callback("Command can't be executed on the MANAGER user");
+  }
   //
   var project, database, app;
   switch (command) {
@@ -1581,51 +1672,56 @@ Node.User.prototype.execCommand = function (params, callback)
 {
   var command = params.tokens[0];
   //
-  // If the authorization key is enabled and the given one does not match -> error
-  if (this.config.auth && params.req.query.autk !== this.config.autk) {
-    this.log("WARN", "Unauthorized", "User.execCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
-  }
-  //
   // MANAGER user handles only APPS, DATABASES and SESSIONS commands
   if (this.userName === "manager" && ["apps", "databases", "appsessions"].indexOf(command) === -1) {
     this.log("WARN", "Invalid command for MANAGER", "User.execCommand", {url: params.req.originalUrl});
     return callback("Invalid command");
   }
   //
-  // Execute the command
+  // Handle commands
   switch (command) {
-    case "status":
-      this.sendStatus(params, callback);
-      break;
-    case "apps":
-      this.sendAppsList(params, callback);
-      break;
-    case "databases":
-      this.sendDatabasesList(params, callback);
-      break;
-    case "projects":
-      this.sendProjectsList(params, callback);
-      break;
-    case "appsessions":
-      this.sendAppSessions(params, callback);
-      break;
-    case "profile":
-      this.profileUser(params, callback);
-      break;
     case "picture":
       this.downloadProfilePic(params, callback);
       break;
-    case "backup":
-      this.backup(params, callback);
-      break;
-    case "restore":
-      this.restore(params, callback);
-      break;
+
     default:
-      this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
-      callback("Invalid Command");
-      break;
+      // If the authorization key is enabled and the given one does not match -> error
+      if (this.config.auth && params.req.query.autk !== this.config.autk) {
+        this.log("WARN", "Unauthorized", "User.execCommand", {url: params.req.originalUrl});
+        return callback({err: "Unauthorized", code: 401});
+      }
+      //
+      // Valid AUTK (or AUTK not enabled)
+      switch (command) {
+        case "status":
+          this.sendStatus(params, callback);
+          break;
+        case "apps":
+          this.sendAppsList(params, callback);
+          break;
+        case "databases":
+          this.sendDatabasesList(params, callback);
+          break;
+        case "projects":
+          this.sendProjectsList(params, callback);
+          break;
+        case "appsessions":
+          this.sendAppSessions(params, callback);
+          break;
+        case "profile":
+          this.profileUser(params, callback);
+          break;
+        case "backup":
+          this.backup(params, callback);
+          break;
+        case "restore":
+          this.restore(params, callback);
+          break;
+        default:
+          this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
+          callback("Invalid Command");
+          break;
+      }
   }
 };
 

@@ -131,7 +131,7 @@ Node.Logger.prototype.deleteOldLogs = function ()
         Node.rimraf(logPath + "/" + fn, function (err) {
           if (err)
             console.log("[Logger::deleteOldLogs] Error deleting the file " + logPath + "/" + fn + ": " + err);
-        });
+        });   // jshint ignore:line
       }
     }
   }.bind(this));

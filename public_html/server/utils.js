@@ -369,5 +369,34 @@ Node.Utils.getCPUload = function (callback)
 };
 
 
+/**
+ * HTML encode the given string
+ * @param {string} str - string to be HTML-encoded
+ */
+Node.Utils.HTMLencode = function (str)
+{
+  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+};
+
+
+/**
+ * Cleans the given name (as it's done by the console)
+ * @param {string} str - string to be cleaned
+ */
+Node.Utils.clearName = function (str)
+{
+  var allowedChar = "qwertyuiopasdfghjklzxcvbnm1234567890- ";
+  var out = "";
+  //
+  str = str.toLowerCase();
+  for (var i = 0; i < str.length; i++) {
+    if (allowedChar.indexOf(str[i]) !== -1)
+      out += str[i];
+  }
+  //
+  return out.replace(/ /g, "-");
+};
+
+
 // Export module
 module.exports = Node.Utils;

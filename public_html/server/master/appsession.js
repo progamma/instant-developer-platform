@@ -26,6 +26,9 @@ Node.AppSession = function (par)
   // New SessionID
   this.id = Node.Utils.generateUID36();
   //
+  // List of client tokens (tele-collaboration)
+  this.cTokens = [];
+  //
   // Array of AppClients (clients connected with this session)
   this.appClients = [];
 };
@@ -303,6 +306,46 @@ Node.AppSession.prototype.handleSessionParams = function (params)
     // If this session is a "pure" REST session... I need to "re-schedule" my death
     this.scheduleRESTDeath();
   }
+};
+
+
+/**
+ * Handles a CToken operation for this session
+ * @param {object} msg
+ */
+Node.AppSession.prototype.handleCTokenOpMsg = function (msg)
+{
+  var ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
+  if (msg.cnt.op === "add" && ctidx === -1)
+    this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
+  else if (msg.cnt.op === "del" && ctidx !== -1)
+    this.cTokens.splice(ctidx, 1);  // Add the ctoken to the array (if not there already)
+};
+
+
+/**
+ * Handles a send response message
+ * @param {object} msg
+ */
+Node.AppSession.prototype.handleSendResponseMsg = function (msg)
+{
+  this.log("DEBUG", "Send REST response", "AppSession.handleSendResponseMsg", msg);
+  //
+  // Convert objects into strings
+  if (typeof msg.text === "object")
+    msg.text = JSON.stringify(msg.text);
+  //
+  // TODO: Rimuovere prima o poi (serve solo se le app di un server prod non sono aggiornate)
+  msg.options = msg.options || {};
+  //
+  // Handle options, if any
+  if (msg.options.contentType)
+    this.restRes.writeHead(msg.code || 500, {"Content-Type": msg.options.contentType});
+  else
+    this.restRes.status(msg.code || 500);
+  //
+  // Send response
+  this.restRes.end(msg.text + "");
 };
 
 

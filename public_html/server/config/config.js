@@ -13,6 +13,7 @@ Node.ncp = require("../ncp_fixed");
 Node.rimraf = require("rimraf");
 Node.multiparty = require("multiparty");
 Node.path = require("path");
+Node.child = require("child_process");
 
 // Import Classes
 Node.Utils = require("../utils");
@@ -357,14 +358,55 @@ Node.Config.prototype.check = function ()
 
 /**
  * Get the server URL
+ * @param {object} req - optional http request to be used to get HOST
  * @returns {String}
  */
-Node.Config.prototype.getUrl = function ()
+Node.Config.prototype.getUrl = function (req)
 {
   if (this.local)
-    return "http://localhost:8081";
+    return "http://localhost:8081";                               // Return LOCAL url
+  else if (req && this.getHostFromReq(req))
+    return this.protocol + "://" + this.getHostFromReq(req);      // If a REQ object was given use it to get the "right" HOST
   else
-    return this.protocol + "://" + this.name + "." + this.domain;
+    return this.protocol + "://" + this.name + "." + this.domain; // Return "design-time" url
+};
+
+
+/**
+ * Returns a valid HOST from the given HTTP request
+ * @param {object} req - http request to be used to get HOST
+ * @returns {String}
+ */
+Node.Config.prototype.getHostFromReq = function (req)
+{
+  // If I'm local -> return the given host
+  if (this.local)
+    return req.headers.host;
+  //
+  // No host -> return undefined (i.e. the given host)
+  if (!req.headers.host)
+    return;
+  //
+  // Extract HOST from request (and remove TCP port if it's there)
+  var host = req.headers.host.toLowerCase();
+  if (host.indexOf(":") !== -1)
+    host = host.substring(0, host.indexOf(":"));
+  //
+  // If it's me use the given host
+  if (host === this.name + "." + this.domain)
+    return req.headers.host;
+  //
+  // If the user configured multi-certificates, check user domains
+  if (this.customSSLCerts) {
+    for (var i = 0; i < this.customSSLCerts.length; i++) {
+      var cert = this.customSSLCerts[i];
+      //
+      // If the certificate is a multi-domain certificate check only sub-domain part otherwise check full domain
+      if ((cert.SSLDomain[0] === "*" && cert.SSLDomain.split(".").slice(1).join(".") === host.split(".").slice(1).join(".")) ||
+              (cert.SSLDomain[0] !== "*" && cert.SSLDomain === host))
+        return req.headers.host;    // It's good -> use the given host
+    }
+  }
 };
 
 
@@ -384,12 +426,12 @@ Node.Config.prototype.getMainFile = function ()
 
 /**
  * Return the current main file (index.html)
- * @param {string} page - (optional) if specified use that as file name (with no extension)
+ * @param {boolean} offline - (optional) if given use offline.htm file
  */
-Node.Config.prototype.getAppMainFile = function (page)
+Node.Config.prototype.getAppMainFile = function (offline)
 {
   // Use INDEXLOCAL.html file if I'm on a local machine or if I'm not minifying
-  page = page || "index";
+  var page = (offline ? "offline" : "index");
   if (this.local || !this.minify)
     page += "Local";
   //
@@ -519,8 +561,15 @@ Node.Config.prototype.processRun = function (req, res)
   // Handle only GET or POST
   if (req.method !== "POST" && req.method !== "GET") {
     this.logger.log("WARN", "Request not GET nor POST", "Config.processRun",
-            {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
+            {meth: req.method, url: req.originalUrl, remoteAddress: req.connection.remoteAddress});
     return res.status(405).end("HTTP method not supported");
+  }
+  //
+  // If the HOST is not valid, don't reply
+  if (!this.getHostFromReq(req)) {
+    this.logger.log("WARN", "Bad HOST", "Config.processRun",
+            {meth: req.method, url: req.originalUrl, host: req.headers.host, remoteAddress: req.connection.remoteAddress});
+    return res.status(500).end("Invalid HOST parameter");
   }
   //
   if (isIDE) {     // IDE
@@ -632,14 +681,14 @@ Node.Config.prototype.processRun = function (req, res)
           return res.status(500).send("Invalid client");
         }
       }
-      else if (req.query.mode !== "rest" && session.masterAppClient) {
+      else if (req.query.mode !== "rest" && req.query.ctoken) {
         // - SID was provided and is valid and is connected with a master client
         // - Session is not REST
         // - CID was not provided
         // That's telecollaboration!!!
         // Create a new ID for the new client that will be created soon (client will be created
         // inside the session::createAppClient called below)
-        cid = Node.Utils.generateUID36();
+        cid = req.query.ctoken;   // Use the CTOKEN as new client ID... it's easier
         session.newCid = cid;
         //
         this.logger.log("DEBUG", "No CID provided for MASTER session -> grant for telecollaboration", "Config.startApp", {sid: sid, cid: cid});
@@ -677,7 +726,7 @@ Node.Config.prototype.processRun = function (req, res)
     var oldreq = session.request;
     session.request = {query: req.query, body: req.body};
     if (req.connection && req.connection.remoteAddress)
-      session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, '');
+      session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, "");
     session.cookies = req.cookies;
     //
     if (params) {
@@ -1226,12 +1275,25 @@ Node.Config.prototype.sendMessage = function (params, callback)
  */
 Node.Config.prototype.update = function (params, callback)
 {
+  // If the file is missing -> can't continue
+  if (!params.req.query.file) {
+    this.log("WARN", "Missing FILE parameter", "Config.update");
+    return callback("Missing FILE parameter");
+  }
+  //
   var pthis = this;
   var foldername = params.req.query.file.substring(0, params.req.query.file.length - 7);      // Remove .tar.gz
   //
   // Compute source and destination paths
   var pathCloud = "updates/" + params.req.query.file;
   var path = Node.path.resolve(__dirname + "/../..") + "/update.tmp";
+  //
+  // Handle absolute URLs
+  if (params.req.query.file.toLowerCase().startsWith("http://") || params.req.query.file.toLowerCase().startsWith("https://")) {
+    // Recalc local variables
+    pathCloud = params.req.query.file;
+    foldername = foldername.substring(foldername.lastIndexOf("/") + 1);
+  }
   //
   // Create error function (plus clean up)
   var errorFnc = function (err) {
@@ -1317,6 +1379,7 @@ Node.Config.prototype.update = function (params, callback)
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
  */
+/*jshint maxcomplexity:35 */
 Node.Config.prototype.configureCert = function (params, callback)
 {
   /*
@@ -1504,6 +1567,119 @@ Node.Config.prototype.configureCert = function (params, callback)
 
 
 /**
+ * Check if the data-disk must be size-adjusted
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Config.prototype.checkDataDisk = function (params, callback)
+{
+  // Do nothing on a windows machine
+  if (/^win/.test(process.platform))
+    return callback();
+  //
+  var disk = {};
+  var errorFnc = function (err) {
+    this.logger.log("ERROR", err, "Config.checkDataDisk", disk);
+    callback(err);
+  }.bind(this);
+  //
+  // First compute the "SCSI" disk reading it from dmesg.boot when disk was first detected  (da1 is /mnt/disk)
+  // I'm expecting something like this:
+  //    (da1:vtscsi0:0:2:0): UNMAPPED
+  //    da1 at vtscsi0 bus 0 scbus0 target 2 lun 0
+  //    da1: <Google PersistentDisk 1> Fixed Direct Access SPC-4 SCSI device
+  //    da1: 2937028.393MB/s transfers
+  //    da1: Command Queueing enabled
+  //    da1: 10240MB (20971520 512 byte sectors)
+  Node.child.execFile("/usr/bin/grep", ["da1", "/var/run/dmesg.boot"], function (err, stdout, stderr) {    // jshint ignore:line
+    if (err)
+      return errorFnc("Error while computing SCSI device id: " + (stderr || err));
+    //
+    stdout = stdout.split("\n");      // Split lines
+    var scsiId = stdout[0];           // First row
+    scsiId = scsiId.substring(1, scsiId.indexOf(")"));      // Get part inside ()
+    scsiId = scsiId.split(":");       // Split :
+    scsiId = scsiId.slice(2);         // Remove "(da1:vtscsi0:"
+    scsiId = scsiId.join(":");        // Re-join and get scsiId
+    //
+    // Ask the system to reprobe disk size
+    this.server.execFileAsRoot("/sbin/camcontrol", ["reprobe", scsiId], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err)
+        return errorFnc("Error while reprobing disk size: " + (stderr || err));
+      //
+      // Get current part status (da1 is /mnt/disk)
+      this.server.execFileAsRoot("/sbin/gpart", ["show", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+        if (err)
+          return errorFnc("Error while executing GPART: " + (stderr || err));
+        //
+        stdout = stdout.split("\n");      // Split lines
+        //
+        // Expected reply:
+        // =>      34  20971453  da1  GPT  (TOTALSIZE)            (eg. 15G)
+        //         34         6       - free -  (3.0K)
+        //         40  20971440    1  freebsd-ufs  (USEDSIZE)     (eg. 10G)
+        //   20971480         7       - free -  (3.5K)
+        //
+        disk.designSize = stdout[0].split(/\s+/)[5];
+        disk.designSize = disk.designSize.substring(1, disk.designSize.length - 1);   // Remove ()
+        //
+        // Now search the "freebsd-ufs" partition (there should be only one!)
+        for (var i = 1; i < stdout.length; i++) {
+          if (stdout[i].indexOf("freebsd-ufs") !== -1) {
+            disk.currSize = stdout[i].split(/\s+/)[5];
+            disk.currSize = disk.currSize.substring(1, disk.currSize.length - 1);    // Remove ()
+            break;
+          }
+        }
+        //
+        // If Size is the same, do nothing
+        if (disk.designSize === disk.currSize)
+          return callback();
+        //
+        // Size is not equal... fix it
+        this.logger.log("INFO", "Fixing data disk", "Config.checkDataDisk", disk);
+        //
+        // Recover partition
+        this.server.execFileAsRoot("/sbin/gpart", ["recover", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+          if (err)
+            return errorFnc("Error while executing GPART RECOVER: " + (stderr || err));
+          //
+          // Out from the box you cannot write to MBR of disk, which is the one FreeBSD boots from.
+          // After setting sysctl kern.geom.debugflags=16 I get allowed to shoot in the foot and write to MBR.
+          this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=16"], function (err, stdout, stderr) {   // jshint ignore:line
+            if (err)
+              return errorFnc("Error while executing SYSCTL=16: " + (stderr || err));
+            //
+            // Resize partition to fill up all the free space
+            this.server.execFileAsRoot("/sbin/gpart", ["resize", "-i", "1", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+              if (err)
+                return errorFnc("Error while executing GPART RESIZE: " + (stderr || err));
+              //
+              // Resize file system and fill up the partition (quiet mode!!!)
+              this.server.execFileAsRoot("/sbin/growfs", ["-y", "/dev/da1p1"], function (err, stdout, stderr) {   // jshint ignore:line
+                if (err)
+                  return errorFnc("Error while executing GROWFS: " + (stderr || err));
+                //
+                // Restore flag
+                this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=0"], function (err, stdout, stderr) {   // jshint ignore:line
+                  if (err)
+                    return errorFnc("Error while executing SYSCTL=0: " + (stderr || err));
+                  //
+                  // Done!
+                  this.logger.log("INFO", "Data disk fixed", "Config.checkDataDisk");
+                  callback({msg: "Fixed to " + disk.designSize, code: 200});
+                }.bind(this));
+              }.bind(this));
+            }.bind(this));
+          }.bind(this));
+        }.bind(this));
+      }.bind(this));
+    }.bind(this));
+  }.bind(this));
+};
+
+
+/**
  * Process an URL command
  * @param {request} req
  * @param {response} res
@@ -1512,6 +1688,13 @@ Node.Config.prototype.processCommand = function (req, res)
 {
   var pthis = this;
   //
+  // Handle only GET or POST
+  if (req.method !== "POST" && req.method !== "GET") {
+    this.logger.log("WARN", "Request not GET nor POST", "Config.processCommand",
+            {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
+    return res.status(405).end("HTTP method not supported");
+  }
+  //
   // Tokenize URL
   var params = {tokens: req.originalUrl.substring(1).split("?")[0].split("/")};
   //
@@ -1519,12 +1702,8 @@ Node.Config.prototype.processCommand = function (req, res)
   params.req = req;
   params.res = res;
   //
-  // Handle only GET or POST
-  if (req.method !== "POST" && req.method !== "GET") {
-    this.logger.log("WARN", "Request not GET nor POST", "Config.processCommand",
-            {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
-    return res.status(405).end("HTTP method not supported");
-  }
+  // Merge Query-string parameters with BODY (i.e. x-www-form-urlencoded POST parameters)
+  params.req.query = Object.assign(req.query, req.body);
   //
   // Log the operation
   this.logger.log("DEBUG", "Processing operation", "Config.processCommand", {url: req.originalUrl, host: req.connection.remoteAddress});
@@ -1537,12 +1716,12 @@ Node.Config.prototype.processCommand = function (req, res)
     if (result && typeof result === "string")
       result = {err: result};
     //
-    // Handle RID if given
-    if (req.query.rid) {
+    // Handle RID if given (not for Unauthorized... that should go out immediately on the main output stream)
+    if (params.req.query.rid && result.code !== 401) {
       if (result.err)
-        pthis.server.request.sendResponse(req.query.rid, result.code || 500, result.err);
+        pthis.server.request.sendResponse(params.req.query.rid, result.code || 500, result.err);
       else
-        pthis.server.request.sendResponse(req.query.rid, 200, result.msg || "OK");
+        pthis.server.request.sendResponse(params.req.query.rid, 200, result.msg || "OK");
     }
     else if (!result.skipReply) { // No RID -> answer (unless don't needed)
       if (result.err)
@@ -1559,11 +1738,18 @@ Node.Config.prototype.processCommand = function (req, res)
   };
   //
   // Extract user and command
-  var userName = params.tokens[0];
+  var userName = Node.Utils.clearName(params.tokens[0]);
   var command = params.tokens[1];
   //
   // Remove user from list of tokens
   params.tokens.splice(0, 1);
+  //
+  // If the authorization key is enabled and the given one does not match -> error
+  // (do it only for "CREATE", "RESTORE" and "DELETE" commands 'cause other commands will handle it where it's needed)
+  if (this.auth && params.req.query.autk !== this.autk && ["create", "restore", "delete"].indexOf(command) !== -1) {
+    this.logger.log("WARN", "Unauthorized", "Config.execCommand", {url: params.req.originalUrl});
+    return callback({err: "Unauthorized", code: 401});
+  }
   //
   // Handle user commands
   // (http://servername/username/command)
@@ -1610,7 +1796,7 @@ Node.Config.prototype.processCommand = function (req, res)
   //
   // If the callee gave me a RID (i.e. he wants to know "asynchronously" if the command was succeded)
   // and I've not ansered yet (with errors or other) send an "OK" reply (that means I'm handling it)
-  if (req.query.rid && !res.answered) {
+  if (params.req.query.rid && !res.answered) {
     res.status(200).send("OK");
     res.answered = true;
   }
@@ -1670,6 +1856,9 @@ Node.Config.prototype.execCommand = function (params, callback)
     case "reboot":
       this.server.childer.send({type: Node.Config.msgTypeMap.execCmd, cmd: "reboot"});
       callback();
+      break;
+    case "checkdisk":
+      this.checkDataDisk(params, callback);
       break;
     default:
       // For any other command ask MANAGER user

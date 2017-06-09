@@ -798,20 +798,6 @@ Node.TwManager.prototype.saveTrans = function (callback)
     // Remember that this transaction has been saved
     tr.saved = true;
   }
-
-
-  // TODO: Eliminare quando non si perdono più transazioni
-  var trlist = "";
-  for (i = 0; i < translist.length; i++) {
-    var tr1 = translist[i];
-    trlist += (trlist ? "," : "") + tr1.id + "[" + tr1.transItems.length + "]";
-  }
-  this.logger.log("DEBUG", "Saving transactions", "TwManager.saveTrans", {trlist: trlist});
-
-
-
-
-
   //
   // If there is nothing to save
   if (TL.length === 0) {
@@ -1005,20 +991,6 @@ Node.TwManager.prototype.emptyTransList = function ()
   //
   // Clear server-side trans lists
   var tm = this.doc.transManager;
-
-
-  // TODO: Rimuovere quando non si perderanno più le transazioni!
-  if (tm.translist.length) {
-    this.logger.log("DEBUG", "Emptying transactions lists", "TwManager.emptyTransList",
-            {translist: tm.translist.length, redolist: tm.redolist.length});
-    for (var i = 0; i < tm.translist.length; i++) {
-      var tr = tm.translist[i];
-      if (!tr.saved)
-        this.logger.log("WARN", "LOST unsaved transaction!!!!", "TwManager.emptyTransList", {tr: tr.save()});
-    }
-  }
-
-
   tm.translist = [];
   tm.redolist = [];
 };
@@ -1085,26 +1057,31 @@ Node.TwManager.prototype.createBranch = function (newBranchName, callback)
       newCommit.originBranch = pthis.actualBranch.name;
       //
       // Save the branch... a new commit is born
-      branch.saveCommitsList();
-      //
-      // Last, copy resource.json file from the original branch (if exists)
-      var srcRes = pthis.path + "/branches/" + pthis.actualBranch.name + "/resources.json";
-      var dstRes = pthis.path + "/branches/" + newBranchName + "/resources.json";
-      Node.fs.exists(srcRes, function (exists) {
-        if (exists) {
-          pthis.copyFile(srcRes, dstRes, function (err) {
-            if (err) {
-              pthis.logger.log("WARN", "Error while copying resources.json between branches", "TwManager.createBranch",
-                      {branch: newBranchName, srcRes: srcRes, dstRes: dstRes});
-              return callback(InDe.rh.t("tw_branch_create_err"));
-            }
-            //
-            // Operation completed
-            branchCreated();
-          });
+      branch.saveCommitsList(function (err) {
+        if (err) {
+          pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.createBranch", {branch: newBranchName});
+          return callback(InDe.rh.t("tw_branch_create_err"));
         }
-        else  // File resurces.json does not exist -> operation completed
-          branchCreated();
+        //
+        // Last, copy resource.json file from the original branch (if exists)
+        var srcRes = pthis.path + "/branches/" + pthis.actualBranch.name + "/resources.json";
+        var dstRes = pthis.path + "/branches/" + newBranchName + "/resources.json";
+        Node.fs.exists(srcRes, function (exists) {
+          if (exists) {
+            pthis.copyFile(srcRes, dstRes, function (err) {
+              if (err) {
+                pthis.logger.log("WARN", "Error while copying resources.json between branches: " + err, "TwManager.createBranch",
+                        {branch: newBranchName, srcRes: srcRes, dstRes: dstRes});
+                return callback(InDe.rh.t("tw_branch_create_err"));
+              }
+              //
+              // Operation completed
+              branchCreated();
+            });
+          }
+          else  // File resurces.json does not exist -> operation completed
+            branchCreated();
+        });
       });
     }
     else  // Last commit not found -> operation completed
@@ -1431,35 +1408,6 @@ Node.TwManager.prototype.commit = function (message, callback)
     this.logger.log("WARN", "Can't commit: nothing to commit", "TwManager.commit");
     return callback(InDe.rh.t("tw_no_commit"));
   }
-
-
-
-
-
-  // TODO: Eliminare quando non si perdono più transazioni
-  if (this.child.config.name.indexOf("-progamma") !== -1 || this.child.config.name === "security") {
-    if (this.compressed)
-      delete this.compressed;
-    else {
-      Node.targz = require("tar.gz");
-      new Node.targz().compress(this.path + "/trans", this.child.config.directory + "/_backup/" + this.child.project.user.userName + "_" +
-              this.child.project.name + "_commit_" + new Date().toISOString().slice(0, 19).replace(/[-,:]/g, "") + ".tar.gz", function (err) {
-        if (err)
-          console.error(err);
-        //
-        // Proseguo
-        pthis.compressed = true;
-        pthis.commit(message, callback);
-      });
-      //
-      return;
-    }
-  }
-
-
-
-
-
   //
   // Create a new commit with the given message
   var newCommit = pthis.actualBranch.createCommit(message);
@@ -1503,23 +1451,28 @@ Node.TwManager.prototype.commit = function (message, callback)
             pthis.doc.resources = [];
             //
             // Now, that everything if fine, save the list of the commits in the branch
-            pthis.actualBranch.saveCommitsList();
-            //
-            // Empty the list of in-memory changes
-            pthis.emptyTransList();
-            //
-            // Update UI
-            pthis.sendTWstatus();
-            //
-            // Invalidate list of parent commits... Now that I've committed it's the right time to re-check
-            // if I can fetch changes from the parent project
-            delete pthis.parentCommits;
-            //
-            // Log the commit
-            pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
-            //
-            // Operation completed
-            callback();
+            pthis.actualBranch.saveCommitsList(function (err) {
+              if (err) {
+                pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.commit");
+                return callback(InDe.rh.t("tw_commit_err"));
+              }
+              //
+              // Empty the list of in-memory changes
+              pthis.emptyTransList();
+              //
+              // Update UI
+              pthis.sendTWstatus();
+              //
+              // Invalidate list of parent commits... Now that I've committed it's the right time to re-check
+              // if I can fetch changes from the parent project
+              delete pthis.parentCommits;
+              //
+              // Log the commit
+              pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
+              //
+              // Operation completed
+              callback();
+            });
           });
         });
       });
@@ -1537,34 +1490,6 @@ Node.TwManager.prototype.merge = function (branchName, callback)
 {
   var pthis = this;
   //
-
-
-
-  // TODO: RIMUOVERE DA QUI
-  if (this.child.config.name.indexOf("-progamma") !== -1 || this.child.config.name === "security") {
-    if (this.compressed)
-      delete this.compressed;
-    else {
-      Node.targz = require("tar.gz");
-      new Node.targz().compress(this.path, this.child.config.directory + "/_backup/" +
-              this.child.project.user.userName + "_" + this.child.project.name + "_merge_" +
-              branchName + "_" + new Date().toISOString().slice(0, 19).replace(/[-,:]/g, "") + ".tar.gz", function (err) {
-        if (err)
-          console.error(err);
-        //
-        // Proseguo
-        pthis.compressed = true;
-        pthis.merge(branchName, callback);
-      });
-      //
-      return;
-    }
-  }
-  // TODO: RIMUOVERE FINO A QUI
-
-
-
-
   var branch = this.getBranchByName(branchName);
   if (!branch) {
     this.logger.log("WARN", "Branch not found", "TwManager.merge", {branch: branchName});
@@ -1623,23 +1548,28 @@ Node.TwManager.prototype.merge = function (branchName, callback)
     pthis.saveDocument();
     //
     // Save the list of commits (new commits have been added to the actual branch)
-    pthis.actualBranch.saveCommitsList();
-    //
-    // Save the configuration file
-    pthis.saveConfig(function (err) {
+    pthis.actualBranch.saveCommitsList(function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Error while saving config: " + err, "TwManager.merge");
+        pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.merge");
         return callback(InDe.rh.t("tw_merge_err"));
       }
       //
-      // Update UI (there could be conflicts)
-      pthis.sendTWstatus();
-      //
-      // Log the branch merge
-      pthis.logger.log("DEBUG", "Branch merged", "TwManager.merge", {branch: branchName});
-      //
-      // Operation completed
-      callback();
+      // Save the configuration file
+      pthis.saveConfig(function (err) {
+        if (err) {
+          pthis.logger.log("WARN", "Error while saving config: " + err, "TwManager.merge");
+          return callback(InDe.rh.t("tw_merge_err"));
+        }
+        //
+        // Update UI (there could be conflicts)
+        pthis.sendTWstatus();
+        //
+        // Log the branch merge
+        pthis.logger.log("DEBUG", "Branch merged", "TwManager.merge", {branch: branchName});
+        //
+        // Operation completed
+        callback();
+      });
     });
   };
 };
@@ -1686,24 +1616,29 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
     pthis.saveDocument();
     //
     // Save the list of commits (new commits have been added to this branch)
-    pthis.actualBranch.saveCommitsList();
-    //
-    // Save the configuration file
-    pthis.saveConfig(function (err) {
+    pthis.actualBranch.saveCommitsList(function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Can't save config: " + err, "TwManager.rebase");
+        pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.rebase");
         return callback(InDe.rh.t("tw_merge_err"));
       }
       //
-      // If the branch was a PR, update UI
-      if (branch.type === Node.Branch.PR)
-        pthis.sendTWstatus();
-      //
-      // Log the branch merge
-      pthis.logger.log("DEBUG", "Actual branch rebased", "TwManager.rebase", {actBranch: pthis.actualBranch.name, branch: branchName});
-      //
-      // Operation completed
-      callback();
+      // Save the configuration file
+      pthis.saveConfig(function (err) {
+        if (err) {
+          pthis.logger.log("WARN", "Can't save config: " + err, "TwManager.rebase");
+          return callback(InDe.rh.t("tw_merge_err"));
+        }
+        //
+        // If the branch was a PR, update UI
+        if (branch.type === Node.Branch.PR)
+          pthis.sendTWstatus();
+        //
+        // Log the branch merge
+        pthis.logger.log("DEBUG", "Actual branch rebased", "TwManager.rebase", {actBranch: pthis.actualBranch.name, branch: branchName});
+        //
+        // Operation completed
+        callback();
+      });
     });
   };
   //
@@ -2070,34 +2005,6 @@ Node.TwManager.prototype.pushBranch = function (options, callback)
     return;
   }
   //
-
-
-
-  // TODO: RIMUOVERE DA QUI
-  if (this.child.config.name.indexOf("-progamma") !== -1 || this.child.config.name === "security") {
-    if (this.compressed)
-      delete this.compressed;
-    else {
-      Node.targz = require("tar.gz");
-      new Node.targz().compress(this.path, this.child.config.directory + "/_backup/" +
-              this.child.project.user.userName + "_" + this.child.project.name +
-              "_backup_push_" + new Date().toISOString().slice(0, 19).replace(/[-,:]/g, "") + ".tar.gz", function (err) {
-        if (err)
-          console.error(err);
-        //
-        // Proseguo
-        pthis.compressed = true;
-        pthis.pushBranch(options, callback);
-      });
-      //
-      return;
-    }
-  }
-  // TODO: RIMUOVERE FINO A QUI
-
-
-
-  //
   // I have a parent project... I now can backup my branch under target's (parent) user cloud space
   // (NOTE: backup the given branch in the parent's cloud space)
   var newBranchName = this.child.project.user.userName + "_" + this.child.project.name + "_" + this.actualBranch.name;
@@ -2304,104 +2211,69 @@ Node.TwManager.prototype.pullBranch = function (branchName, options, callback)
         //
         // Now it's one of my branches
         pthis.branches.push(branch);
-
-
-
-        // TODO: RIMUOVERE DA QUI
-        var backup;
-        if (pthis.child.config.name.indexOf("-progamma") !== -1 || pthis.child.config.name === "security") {
-          backup = function (backupdone) {
-            Node.targz = require("tar.gz");
-            new Node.targz().compress(pthis.path, pthis.child.config.directory + "/_backup/" + pthis.child.project.user.userName + "_" +
-                    pthis.child.project.name + (options.diff ? "_fetchdiff_" : (options.diff === false ? "_fetch_" : "_pull_")) +
-                    new Date().toISOString().slice(0, 19).replace(/[-,:]/g, "") + ".tar.gz", function (err) {
-              if (err)
-                console.error(err);
-              backupdone();
-            });
-          };
-        }
-        else {
-          backup = function (backupdone) {
-            backupdone();
-          };
-        }
-        backup(function () {
-          // TODO: RIMUOVERE FINO A QUI
-
-
-
-
-
-
-          // Now if I wanted only DIFF
-          if (options.diff === true) {
-            // First: this branch is not a PR but it's "like" a PR. Reasons:
-            // - this branch will be merged (with rebase, see above), and it will not be used like a normal branch for switching
-            // - the sendDiffBranch does not have to send saved/memory modifications (like it would do for any normal branch)
-            branch.type = Node.Branch.PR;
-            pthis.sendDiffBranch(branch.name);
-            delete branch.type;
+        //
+        // Now if I wanted only DIFF
+        if (options.diff === true) {
+          // First: this branch is not a PR but it's "like" a PR. Reasons:
+          // - this branch will be merged (with rebase, see above), and it will not be used like a normal branch for switching
+          // - the sendDiffBranch does not have to send saved/memory modifications (like it would do for any normal branch)
+          branch.type = Node.Branch.PR;
+          pthis.sendDiffBranch(branch.name);
+          delete branch.type;
+          //
+          // Delete the received (temporary) branch
+          pthis.deleteBranch(branch.name, function (err) {
+            if (err) {
+              pthis.logger.log("WARN", "Error while deleting the diff branch: " + err, "TwManager.pullBranch", {branch: branch.name});
+              return callback("Error while deleting the diff branch " + branch.name + ": " + err);
+            }
             //
-            // Delete the received (temporary) branch
+            // Operation completed
+            callback();
+          });
+        }
+        else if (options.diff === false) {  // Fetch
+          // Rebase the restored branch
+          pthis.rebase(branch.name, function (err) {
+            if (err) {
+              pthis.logger.log("WARN", "Error while rebasing the branch: " + err, "TwManager.pullBranch", {branch: branch.name});
+              return callback("Error while rebasing the branch " + branch.name + ": " + err);
+            }
+            //
+            // Delete the new branch
             pthis.deleteBranch(branch.name, function (err) {
               if (err) {
-                pthis.logger.log("WARN", "Error while deleting the diff branch: " + err, "TwManager.pullBranch", {branch: branch.name});
-                return callback("Error while deleting the diff branch " + branch.name + ": " + err);
+                pthis.logger.log("WARN", "Error while deleting the merged branch: " + err, "TwManager.pullBranch", {branch: branch.name});
+                return callback("Error while deleting the merged branch " + branch.name + ": " + err);
               }
+              //
+              // Something has been fetched from my parent server...
+              // Now I need nothing from my parent
+              delete pthis.parentCommits;
+              //
+              // Update the client status
+              pthis.sendTWstatus();
               //
               // Operation completed
               callback();
             });
-          }
-          else if (options.diff === false) {  // Fetch
-            // Rebase the restored branch
-            pthis.rebase(branch.name, function (err) {
-              if (err) {
-                pthis.logger.log("WARN", "Error while rebasing the branch: " + err, "TwManager.pullBranch", {branch: branch.name});
-                return callback("Error while rebasing the branch " + branch.name + ": " + err);
-              }
-              //
-              // Delete the new branch
-              pthis.deleteBranch(branch.name, function (err) {
-                if (err) {
-                  pthis.logger.log("WARN", "Error while deleting the merged branch: " + err, "TwManager.pullBranch", {branch: branch.name});
-                  return callback("Error while deleting the merged branch " + branch.name + ": " + err);
-                }
-                //
-                // Something has been fetched from my parent server...
-                // Now I need nothing from my parent
-                delete pthis.parentCommits;
-                //
-                // Update the client status
-                pthis.sendTWstatus();
-                //
-                // Operation completed
-                callback();
-              });
-            });
-          }
-          else {    // Simple pull: operation completed
-            // Done, save config (I've a new branch)
-            pthis.saveConfig(function (err) {
-              if (err) {
-                pthis.logger.log("WARN", "Error while saving config file: " + err, "TwManager.pullBranch", {branch: branch.name});
-                return callback("Error while saving config file: " + err);
-              }
-              //
-              // Inform the client that a branch has been created
-              pthis.sendBranchesList();
-              //
-              // Operation completed
-              callback();
-            });
-          }
-
-
-          // TODO: RIMUOVERE DA QUI
-        });
-        // TODO: RIMUOVERE FINO A QUI
-
+          });
+        }
+        else {    // Simple pull: operation completed
+          // Done, save config (I've a new branch)
+          pthis.saveConfig(function (err) {
+            if (err) {
+              pthis.logger.log("WARN", "Error while saving config file: " + err, "TwManager.pullBranch", {branch: branch.name});
+              return callback("Error while saving config file: " + err);
+            }
+            //
+            // Inform the client that a branch has been created
+            pthis.sendBranchesList();
+            //
+            // Operation completed
+            callback();
+          });
+        }
       });
     };
   });

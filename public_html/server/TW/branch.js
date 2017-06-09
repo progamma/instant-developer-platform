@@ -158,9 +158,9 @@ Node.Branch.prototype.setPushed = function (callback)
   //
   // If needed update commit list
   if (updateList)
-    this.saveCommitsList();
-  //
-  callback();
+    this.saveCommitsList(callback);
+  else
+    callback();
 };
 
 
@@ -293,14 +293,15 @@ Node.Branch.prototype.getCommitsTransItemsByID = function (filter, callback)
 
 /**
  * Save the commits
+ * @param {function} callback - function(err)
  */
-Node.Branch.prototype.saveCommitsList = function ()
+Node.Branch.prototype.saveCommitsList = function (callback)
 {
   var twManager = this.parent;
   //
   // If there are no commits, don't save anything
   if (!this.commits)
-    return;
+    return callback();
   //
   var clist = JSON.stringify(this.commits, function (k, v) {
     if (v instanceof Node.Commit)
@@ -313,6 +314,8 @@ Node.Branch.prototype.saveCommitsList = function ()
   Node.fs.writeFile(path, clist, function (err) {
     if (err)
       twManager.logger.log("ERROR", "Error writing the file " + path + ": " + err, "Branch.saveCommitsList");
+    //
+    callback(err);
   });
 };
 
@@ -1152,11 +1155,8 @@ Node.Branch.prototype.revert = function (options, callback)
       return callback(InDe.rh.t("tw_norevert"));
     }
     //
-    // Save the list of commits
-    this.saveCommitsList();
-    //
-    // Done
-    callback();
+    // Save the list of commits and report to callee
+    this.saveCommitsList(callback);
   }.bind(this));
 };
 

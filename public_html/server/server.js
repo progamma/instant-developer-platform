@@ -34,6 +34,7 @@ Node.rimraf = require("rimraf");
 Node.BodyParser = require("body-parser");
 Node.errorHandler = require("errorhandler");
 Node.constants = require("constants");
+Node.gcloud = require("gcloud");
 
 
 /**
@@ -59,7 +60,6 @@ Node.Server.msgTypeMap = {
   sessionid: "sid",
   disconnectChild: "dc",
   asid: "asid",
-  clientToken: "clientToken",
   deviceMessage: "deviceMessage",
   sync: "sync",
   cloudConnector: "cloudConnector",
@@ -126,7 +126,7 @@ Node.Server.prototype.initServer = function ()
       cert: Node.fs.readFileSync(this.config.SSLCert, "utf8"),
       ca: ca,
       secureProtocol: "SSLv23_method",
-      secureOptions: Node.constants.SSL_OP_NO_SSLv3 | Node.constants.SSL_OP_NO_SSLv2,
+      secureOptions: Node.constants.SSL_OP_NO_SSLv3 | Node.constants.SSL_OP_NO_SSLv2, // jshint ignore:line
       ciphers: [
         "ECDHE-RSA-AES256-GCM-SHA384",
         "ECDHE-RSA-AES128-GCM-SHA256",
@@ -191,7 +191,8 @@ Node.Server.prototype.initServer = function ()
         //
         // Prepare certificate
         var cred = {key: Node.fs.readFileSync(certToUse.SSLKey, "utf8"),
-          cert: Node.fs.readFileSync(certToUse.SSLCert, "utf8"), ciphers: ssl.ciphers};
+          cert: Node.fs.readFileSync(certToUse.SSLCert, "utf8"),
+          secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
         cred.ca = [];
         for (i = 0; i < certToUse.SSLCABundles.length; i++)
           cred.ca.push(Node.fs.readFileSync(certToUse.SSLCABundles[i], "utf8"));
@@ -244,6 +245,9 @@ Node.Server.prototype.start = function ()
   //
   // Create a new AUTK token and send it (if needed)
   this.config.initTokenTimer();
+  //
+  // Start default server session of all apps
+  this.startServerSessions();
   //
   // Activate HELMET: hide "powered by express"
   Node.app.use(Node.helmet.hidePoweredBy());
@@ -307,6 +311,17 @@ Node.Server.prototype.start = function ()
           res.setHeader("Cache-Control", "public, max-age=31536000");
       };
     //
+    // Protect SERVER's directories (for every app) before EXPRESS-STATIC kicks in
+    Node.app.use("/", function (req, res, next) {
+      var pathParts = req.path.toLowerCase().split("/");
+      // http://localhost/Test/server/app.js  ->  [ '', 'test', 'server', 'app.js' ]
+      if (pathParts.length > 2 && pathParts[2] === "server")   // Part 0 is app name
+        return res.sendStatus(404);
+      //
+      next();
+    });
+    //
+    // Serve APPS directory as static
     Node.app.use(Node.express.static(this.config.appDirectory + "/apps", expOpts));
   }
   //
@@ -323,7 +338,7 @@ Node.Server.prototype.start = function ()
   Node.app.all("/:user/:command", function (req, res) {
     pthis.config.processCommand(req, res);
   });
-  Node.app.get("/:user/db/:dbname/:command", function (req, res) {
+  Node.app.all("/:user/db/:dbname/:command", function (req, res) {
     pthis.config.processCommand(req, res);
   });
 //  Node.app.get("/:user/:appname/:command", function (req, res) {
@@ -356,7 +371,7 @@ Node.Server.prototype.start = function ()
     //
     // For any get request, redirect to same HTTPS request
     httpRouter.get("*", function (req, res) {
-      return res.redirect(pthis.config.getUrl() + req.originalUrl);
+      return res.redirect(pthis.config.getUrl(req) + req.originalUrl);
     });
     //
     // Create the http server
@@ -542,9 +557,6 @@ Node.Server.prototype.socketListener = function ()
     socket.on(Node.Server.msgTypeMap.asid, function (m) {
       pthis.handleSessionASID(socket, m);
     });
-    socket.on(Node.Server.msgTypeMap.clientToken, function (m) {
-      pthis.handleClientToken(socket, m);
-    });
     socket.on(Node.Server.msgTypeMap.deviceMessage, function (m) {
       pthis.handleDeviceMessage(socket, m);
     });
@@ -624,7 +636,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     session = this.appSessions[msg.sid];
     if (!session) {
       this.logger.log("WARN", "Session not found", "Server.handleSessionASID", {sid: msg.sid});
-      socket.emit(Node.Server.msgTypeMap.redirect, this.config.getUrl() + "/" + msg.appname);
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
     //
@@ -632,14 +644,14 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     appcli = session.getAppClientById(msg.cid);
     if (!appcli) {
       this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", {sid: msg.sid, cid: msg.cid});
-      socket.emit(Node.Server.msgTypeMap.redirect, this.config.getUrl() + "/" + msg.appname);
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
     //
     // If the app client is already connected with someone else, refuse connection
     if (appcli.socket) {
       this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", {sid: msg.sid, cid: msg.cid});
-      socket.emit(Node.Server.msgTypeMap.redirect, this.config.getUrl() + "/" + msg.appname);
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
     //
@@ -652,7 +664,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       // a SID and CID from the "old" app. If that's the case, redirect to the right app
       this.logger.log("WARN", "Session mismatch for app", "Server.handleSessionASID",
               {sid: msg.sid, app: msg.appname, oldapp: session.worker.app.name});
-      socket.emit(Node.Server.msgTypeMap.redirect, this.config.getUrl() + "/" + msg.appname);
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
     //
@@ -664,24 +676,6 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     // Connect this socket with the app client
     appcli.openConnection(socket);
   }
-};
-
-
-/**
- * Handle client token message (received by the client when inviting a user)
- * @param {Node.Socket} socket - socket that received the message
- * @param {object} msg
- */
-Node.Server.prototype.handleClientToken = function (socket, msg)
-{
-  // If the session is not there, tell the client that the session is gone
-  var session = this.IDESessions[msg.sid];
-  if (!session)
-    return this.logger.log("WARN", "Session not found", "Server.handleClientToken", {sid: msg.sid});
-  //
-  session.addCToken(msg.ctoken);
-  //
-  this.logger.log("DEBUG", "Added CToken", "Server.handleClientToken", {sid: msg.sid, ctoken: msg.ctoken});
 };
 
 
@@ -789,7 +783,7 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
     // Add useful info (see App.handleSync)
     msg.request = msg.request || {};
     if (socket.handshake && socket.handshake.address)
-      msg.request.remoteAddress = socket.handshake.address.replace(/^.*:/, '');
+      msg.request.remoteAddress = socket.handshake.address.replace(/^.*:/, "");
   }
   //
   // If I don't have a session I can't continue
@@ -811,49 +805,49 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
  */
 Node.Server.prototype.handleCloudConnectorMessage = function (socket, msg)
 {
-  var pthis = this;
-  //
   var sendErrorToClient = function (errmsg) {
-    pthis.logger.log("WARN", "Error handling a cloudConnector msg: " + errmsg, "Server.handleCloudConnectorMessage",
+    this.logger.log("WARN", "Error handling a cloudConnector msg: " + errmsg, "Server.handleCloudConnectorMessage",
             {clientip: socket.handshake.address});
     //
     socket.emit("indeError", {type: "auth", msg: errmsg});
-  };
+  }.bind(this);
   //
-  if (msg.type === "init") {
-    // Without username add to all users
-    if (!msg.userName) {
-      var i;
-      for (i = 0; i < pthis.config.users.length; i++)
-        pthis.config.users[i].addCloudConnector(socket, msg.data);
-      //
-      socket.on("disconnect", function () {
-        for (i = 0; i < pthis.config.users.length; i++)
-          pthis.config.users[i].removeCloudConnector(socket);
-      });
-      return;
-    }
-    //
-    var user = pthis.config.getUser(msg.userName);
+  // Create list of users recipient from this connector
+  var users = [];
+  if (msg.userName) {
+    var user = this.config.getUser(msg.userName);
     if (!user)
       return sendErrorToClient("user " + msg.userName + " not found");
     //
-    user.addCloudConnector(socket, msg.data);
+    users.push(user);
+  }
+  else
+    users = this.config.users.slice();
+  //
+  var i;
+  if (msg.type === "init") {
+    // Informs all recipient users that a connector is connected
+    for (i = 0; i < users.length; i++)
+      users[i].addCloudConnector(socket, msg.data);
     //
     socket.on("disconnect", function () {
-      user.removeCloudConnector(socket);
+      // Informs all recipient users that a connector is disconnected
+      for (i = 0; i < users.length; i++)
+        users[i].removeCloudConnector(socket);
     });
   }
   else {
-    // First try IDE sessions. If not found try with app (MASTER) sessions
-    var session = pthis.IDESessions[msg.sid];
-    if (!session)
-      session = pthis.appSessions[msg.sid];
+    // I turn the message to the users.
+    // Each user check if the message started from a its own session and handle the response
+    var handled = false;
+    for (i = 0; i < users.length; i++)
+      if (users[i].handleCloudConnectorMessage(msg, socket)) {
+        handled = true;
+        break;
+      }
     //
-    if (!session)
+    if (!handled)
       return sendErrorToClient("session not found");
-    //
-    session.sendToChild({type: "ccm", cnt: msg});
   }
 };
 
@@ -1141,8 +1135,8 @@ Node.Server.prototype.cleanBucket = function (prj)
  */
 Node.Server.prototype.backupDisk = function (scheduled)
 {
-  // If I'm on a windows machine, backup is not supported
-  if (/^win/.test(process.platform))
+  // If I'm LOCAL or on a windows machine, backup is not supported
+  if (this.config.local || /^win/.test(process.platform))
     return;
   //
   // If I need to reschedule and the backup was previously started, stop everything
@@ -1241,52 +1235,59 @@ Node.Server.prototype.backupDisk = function (scheduled)
   var doBackup = function () {
     this.logger.log("DEBUG", "Start disk backup", "Server.backupDisk", this.backupInfo);
     //
+    var gce = Node.gcloud(this.config.configGCloudStorage).compute();
     var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
-    var cmdSnapPars = ["-q", "compute", "disks", "snapshot", this.backupInfo.diskName,
-      "--description", "Snapshot created at " + new Date() + "for server " + this.config.name,
-      "--snapshot-names", this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3), // Remove ms from time,
-      "--zone", this.backupInfo.cloudZone];
-    this.execFileAsRoot("gcloud", cmdSnapPars, function (err, stdout, stderr) {
+    var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
+    //
+    var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
+            snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
+    snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
       if (err)
-        return this.logger.log("WARN", "Can't create the snapshot: " + (stderr || err), "Server.backupDisk");
+        return this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
       //
-      // Snapshot created, now clean up (if needed)
-      // List all snapshots for this disk
-      var cmdCleanPars = ["-q", "compute", "snapshots", "list", "--regexp", this.backupInfo.diskName + "-.*", "--format", "json"];
-      this.execFileAsRoot("gcloud", cmdCleanPars, function (err, stdout, stderr) {
-        if (err)
-          return this.logger.log("WARN", "Can't list all snapshots for this server: " + (stderr || err), "Server.backupDisk");
-        //
-        // If there are too many snapshot, delete older ones
-        var snapList = JSON.parse(stdout);
-        this.logger.log("DEBUG", "#snapshot: " + snapList.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
-        if (snapList.length > this.config.numMaxSnapshot) {
-          // Remove older ones. First I need to sort them by date
-          snapList.sort(function (f1, f2) {
-            var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
-            var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
-            dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
-                    dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
-            dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
-                    dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
-            return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
-          });
+      // Wait for completition
+      operation.on("error", function (err) {
+        this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
+      }.bind(this));
+      //
+      operation.on("complete", function (metadata) {    // jshint ignore:line
+        // Snapshot created, now clean up (if needed)
+        // List all snapshots for this disk
+        gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
+          if (err)
+            return this.logger.log("WARN", "Can't list all snapshots for this server: " + err, "Server.backupDisk");
           //
-          // Now I can remove older one
-          for (var i = this.config.numMaxSnapshot; i < snapList.length; i++) {
-            (function (sname) {
-              this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
-              //
-              var cmdDelPars = ["-q", "compute", "snapshots", "delete", sname];
-              this.execFileAsRoot("gcloud", cmdDelPars, function (err, stdout, stderr) {
-                if (err)
-                  return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + (stderr || err), "Server.backupDisk", this.backupInfo);
-              }.bind(this));
-            }.bind(this))(snapList[i].name);    // jshint ignore:line
+          this.logger.log("DEBUG", "#snapshot: " + snapshots.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
+          if (snapshots.length > this.config.numMaxSnapshot) {
+            // Remove older ones. First I need to sort them by date
+            snapshots.sort(function (f1, f2) {
+              var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
+              var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
+              dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
+                      dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
+              dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
+                      dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
+              return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
+            });
+            //
+            // Now I can remove older one
+            for (var i = this.config.numMaxSnapshot; i < snapshots.length; i++) {
+              (function (sname) {
+                this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
+                //
+                var snapshot = gce.snapshot(sname);
+                snapshot.delete(function (err, operation, apiResponse) {    // jshint ignore:line
+                  if (err)
+                    return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                  //
+                  operation.on("error", function (err) {
+                    this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                  }.bind(this));
+                }.bind(this));
+              }.bind(this))(snapshots[i].name);    // jshint ignore:line
+            }
           }
-        }
-        //
-        this.logger.log("DEBUG", "Disk backup completed", "Server.backupDisk");
+        }.bind(this));
       }.bind(this));
     }.bind(this));
   }.bind(this);
@@ -1414,6 +1415,16 @@ Node.Server.prototype.sendManifest = function (req, res)
     this.logger.log("ERROR", "Error while sending MANIFEST: " + ex.message, "Server.sendManifest");
     res.status(500).end();
   }
+};
+
+
+/**
+ * Start default server session of all apps
+ */
+Node.Server.prototype.startServerSessions = function ()
+{
+  for (var i = 0; i < this.config.users.length; i++)
+    this.config.users[i].startServerSessions();
 };
 
 

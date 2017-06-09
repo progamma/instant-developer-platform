@@ -43,7 +43,9 @@ Node.Worker.msgTypeMap = {
   installResult: "instres",
   createDB: "cdb",
   createDBresult: "cdbres",
-  testStartResult: "testres"
+  serverSession: "serverSession",
+  testStartResult: "testres",
+  cTokenOp: "ctop"
 };
 
 
@@ -249,12 +251,8 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
 
     case Node.Worker.msgTypeMap.sendRestResponse:
       appsess = this.server.appSessions[msg.sid];
-      if (appsess) {
-        this.log("DEBUG", "Send REST response", "Worker.handleAppChildMessage", msg);
-        if (typeof msg.text === "object")
-          msg.text = JSON.stringify(msg.text);
-        appsess.restRes.status(msg.code || 500).end(msg.text + "");
-      }
+      if (appsess)
+        appsess.handleSendResponseMsg(msg);
       else
         this.log("WARN", "Can't send REST response: session not found", "Worker.handleAppChildMessage", msg);
       break;
@@ -273,11 +271,17 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       break;
 
     case Node.Worker.msgTypeMap.cloudConnectorMsg:
-      this.handleCloudConnectorMsg(msg.cnt);
+      this.user.handleCloudConnectorMessage(msg.cnt, this);
       break;
 
     case Node.Worker.msgTypeMap.createDB:
       this.handleCreateDBMsg(msg);
+      break;
+
+    case Node.Worker.msgTypeMap.cTokenOp:
+      appsess = this.server.appSessions[msg.sid];
+      if (appsess)
+        appsess.handleCTokenOpMsg(msg);
       break;
 
     case Node.Worker.msgTypeMap.installResult:
@@ -292,6 +296,10 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
     case Node.Worker.msgTypeMap.testStartResult:
       if (this.app.testAuto && msg.cnt && this.app.testAuto[msg.cnt.testAutoId])
         this.app.testAuto[msg.cnt.testAutoId].handleUpdateSchemaResult(msg.cnt);
+      break;
+
+    case Node.Worker.msgTypeMap.serverSession:
+      this.handleServerSessionMsg(msg);
       break;
 
     default:
@@ -337,27 +345,6 @@ Node.Worker.prototype.handleSyncBroad = function (msg)
 
 
 /*
- * Process the cloud connector message
- * @param {object} msg
- */
-Node.Worker.prototype.handleCloudConnectorMsg = function (msg)
-{
-  switch (msg.type) {
-    case "remoteCmd":
-      var conn = this.user.getCloudConnectorByName(msg.conn);
-      if (conn)
-        conn.socket.emit("cloudServerMsg", msg.data);
-      else if (msg.data.cbid) {
-        this.child.send({type: Node.Worker.msgTypeMap.cloudConnectorMsg,
-          cnt: {type: "response", appid: msg.data.appid, cbid: msg.data.cbid,
-            data: {error: "Remote connector not found"}}});
-      }
-      break;
-  }
-};
-
-
-/*
  * Handles a create DB message
  * @param {object} msg
  */
@@ -379,6 +366,54 @@ Node.Worker.prototype.handleCreateDBMsg = function (msg)
     // Report to callee
     pthis.child.send({type: Node.Worker.msgTypeMap.createDBresult, dbname: msg.dbname, err: err});
   });
+};
+
+
+/*
+ * Handles a server session message
+ * @param {object} msg
+ */
+Node.Worker.prototype.handleServerSessionMsg = function (msg)
+{
+  var name = msg.cnt.name;
+  var ss = this.app.getServerSession(name);
+  //
+  switch (msg.cnt.cmd) {
+    case "start":
+      if (ss)
+        return this.log("WARN", "Can't start server session: session with same name already exists", "Worker.handleServerSessionMsg", msg);
+      //
+      this.app.startServerSession(name);
+      break;
+
+    case "stop":
+      if (!ss)
+        return this.log("WARN", "Can't stop server session: session not found", "Worker.handleServerSessionMsg", msg);
+      //
+      ss.terminate();
+      break;
+
+    case "running":
+      var ev = {id: "serverSessionCB", content: {cbId: msg.cnt.cbId, running: !!ss}, master: true};
+      this.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: msg.cnt.sid, content: [ev], request: msg.cnt.request});
+      break;
+  }
+};
+
+
+/*
+ * Get a server session by name
+ * @param {string} name
+ * @returns {Node.AppSession}
+ */
+Node.Worker.prototype.getServerSession = function (name)
+{
+  var ids = Object.keys(this.sessions);
+  for (var i = 0; i < ids.length; i++) {
+    var s = this.sessions[ids[i]];
+    if (s.name === name)
+      return s;
+  }
 };
 
 
@@ -544,7 +579,7 @@ Node.Worker.prototype.getStatus = function (callback)
     return callback(stat);
   //
   // Add more info (per-process CPU load)
-  this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
+  Node.child.execFile("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
     if (err) {
       this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
       return callback(null, "Error getting the CPU load: " + (stderr || err));

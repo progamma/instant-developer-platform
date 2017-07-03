@@ -1437,7 +1437,7 @@ Node.User.prototype.getCloudConnectorByName = function (ccName, dmName, dmKey)
     var cc = this.cloudConnectors[i];
     if (cc.name === ccName) {
       for (var j = 0; j < cc.dmlist.length; j++) {
-        var dm = cc.dmlist[i];
+        var dm = cc.dmlist[j];
         if (dm.name === dmName && dm.key === dmKey)
           return cc;
       }
@@ -1463,10 +1463,13 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       var conn = this.getCloudConnectorByName(msg.conn, msg.data.dm, msg.key);
       //
       // Connector not found -> invoke callback with error
-      if (!conn && msg.data.cbid)
-        return sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
-          cnt: {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, dmid: msg.data.dmid,
-            data: {error: "Remote connector not found"}}});
+      if (!conn) {
+        if (msg.data.cbid)
+          sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
+            cnt: {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, dmid: msg.data.dmid,
+              data: {error: "Remote connector not found"}}});
+        return;
+      }
       //
       // Send message to connector
       conn.socket.emit("cloudServerMsg", msg.data);
@@ -1530,7 +1533,8 @@ Node.User.prototype.processCommand = function (params, callback)
   else if (this.userName === "manager")
     isAPP = true;
   //
-  var objName = Node.Utils.clearName(params.tokens[0]);
+  // Databases' name is not filtered by console -> trust callee
+  var objName = (isDB ? params.tokens[0] : Node.Utils.clearName(params.tokens[0]));
   var command = params.tokens[1];
   //
   // Remove objName from the list
@@ -1543,8 +1547,8 @@ Node.User.prototype.processCommand = function (params, callback)
     return callback({err: "Unauthorized", code: 401});
   }
   //
-  // CREATE, DELETE and RESTORE commands can be executed only on "true" users
-  if (this.userName === "manager" && ["create", "restore", "delete"].indexOf(command) !== -1) {
+  // MANAGER user can't CREATE, DELETE or RESTORE projects... Only "true" users can do that
+  if (this.userName === "manager" && ["create", "restore", "delete"].indexOf(command) !== -1 && !isDB && !isAPP) {
     this.logger.log("WARN", "Command can't be executed on the MANAGER user", "User.processCommand", {url: params.req.originalUrl});
     return callback("Command can't be executed on the MANAGER user");
   }
@@ -1553,7 +1557,7 @@ Node.User.prototype.processCommand = function (params, callback)
   switch (command) {
     case "create":
       if (isDB)
-        this.createDatabase(objName, callback);
+        callback("Not supported");
       else if (isAPP)
         callback("Not supported");
       else
@@ -1562,19 +1566,25 @@ Node.User.prototype.processCommand = function (params, callback)
 
     case "restore":
       if (isDB) {
-        this.createDatabase(objName, function (err) {
-          if (err)
-            return callback(err);
-          //
-          database = pthis.getDatabase(objName);
-          database.processCommand(params, function (err) {
-            // If error -> delete database
-            callback(err);
+        database = pthis.getDatabase(objName);
+        if (!database) {
+          // If the database does not exist, create a new one
+          this.createDatabase(objName, function (err) {
             if (err)
-              pthis.deleteDatabase(objName, function () {
-              });
+              return callback(err);
+            //
+            database = pthis.getDatabase(objName);
+            database.processCommand(params, function (err) {
+              // If error -> delete database
+              callback(err);
+              if (err)
+                pthis.deleteDatabase(objName, function () {
+                });
+            });
           });
-        });
+        }
+        else // The database, exists, restore (i.e. overwrite) it
+          database.processCommand(params, callback);
       }
       else if (isAPP) {
         app = this.getApp(objName);
@@ -1652,7 +1662,7 @@ Node.User.prototype.processCommand = function (params, callback)
       else {
         project = this.getProject(objName);
         if (!project) {
-          this.log("WARN", "Project not found", "User.processCommand", {cmd: command, database: objName});
+          this.log("WARN", "Project not found", "User.processCommand", {cmd: command, project: objName});
           return callback({code: 404, err: "Project not found"});
         }
         //

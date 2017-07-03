@@ -62,7 +62,7 @@ Object.defineProperties(Node.Config.prototype, {
  */
 Node.Config.prototype.save = function ()
 {
-  var r = {cl: "Node.Config", name: this.name, domain: this.domain, protocol: this.protocol,
+  var r = {cl: "Node.Config", name: this.name, domain: this.domain, protocol: this.protocol, alias: this.alias,
     serverType: this.serverType, portHttp: this.portHttp, portHttps: this.portHttps,
     SSLCert: this.SSLCert, SSLKey: this.SSLKey, SSLCABundles: this.SSLCABundles, customSSLCerts: this.customSSLCerts,
     directory: this.directory, auth: this.auth, editPrjToken: this.editPrjToken,
@@ -132,6 +132,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.domain = v.domain;
   if (v.protocol)
     this.protocol = v.protocol;
+  if (v.alias)
+    this.alias = v.alias;
   if (v.minify)
     this.minify = v.minify;
   if (v.SSLKey)
@@ -396,16 +398,12 @@ Node.Config.prototype.getHostFromReq = function (req)
   if (host === this.name + "." + this.domain)
     return req.headers.host;
   //
-  // If the user configured multi-certificates, check user domains
-  if (this.customSSLCerts) {
-    for (var i = 0; i < this.customSSLCerts.length; i++) {
-      var cert = this.customSSLCerts[i];
-      //
-      // If the certificate is a multi-domain certificate check only sub-domain part otherwise check full domain
-      if ((cert.SSLDomain[0] === "*" && cert.SSLDomain.split(".").slice(1).join(".") === host.split(".").slice(1).join(".")) ||
-              (cert.SSLDomain[0] !== "*" && cert.SSLDomain === host))
+  // If I've an alias list, use it
+  if (this.alias) {
+    var aliases = this.alias.split(",");
+    for (var i = 0; i < aliases.length; i++)
+      if (host === aliases[i])
         return req.headers.host;    // It's good -> use the given host
-    }
   }
 };
 
@@ -627,7 +625,7 @@ Node.Config.prototype.processRun = function (req, res)
     // Search the app with the given name
     app = user.getApp(appName);
     if (!app) {
-      this.logger.log("WARN", "App not found", "Config.processRun", {user: userName, app: appName});
+      this.logger.log("WARN", "App not found", "Config.processRun", {user: userName, app: appName, url: req.originalUrl});
       return res.status(404).send("App " + appName + " not found");
     }
     //
@@ -883,6 +881,10 @@ Node.Config.prototype.sendStatus = function (params, callback)
   delete result.cl;
   delete result.users;
   //
+  // Remove "sensitive data"
+  delete result.configGCloudStorage;
+  delete result.dbPassword;
+  //
   // Add server info
   var srvFile = Node.path.resolve(__dirname + "/../server.js");
   result.serverInfo = {version: this.server.version, startTime: this.server.startTime, pid: process.pid, lastWrite: Node.fs.statSync(srvFile).mtime};
@@ -974,6 +976,8 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.domain = query.domain;
   if (query.protocol)
     this.protocol = query.protocol;
+  if (query.alias)
+    this.alias = query.alias;
   if (query.serverType)
     this.serverType = query.serverType;
   if (query.portHttp)
@@ -1194,10 +1198,10 @@ Node.Config.prototype.handleLog = function (params, callback)
       }
       //
       // Empty the file (don't delete it otherwise PM2 will not create it again)
-      Node.fs.truncate(path + filename, 0, function (err) {
+      this.server.execFileAsRoot("/usr/bin/truncate", ["-s0", path + filename], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
-          pthis.logger.log("WARN", "Can't clear file " + filename + ": " + err, "Config.handleLog");
-          return callback("Can't clear file " + filename + ": " + err);
+          pthis.logger.log("WARN", "Can't clear file " + filename + ": " + (stderr || err), "Config.handleLog");
+          return callback("Can't clear file " + filename + ": " + (stderr || err));
         }
         //
         callback();
@@ -1748,7 +1752,7 @@ Node.Config.prototype.processCommand = function (req, res)
   // (do it only for "CREATE", "RESTORE" and "DELETE" commands 'cause other commands will handle it where it's needed)
   if (this.auth && params.req.query.autk !== this.autk && ["create", "restore", "delete"].indexOf(command) !== -1) {
     this.logger.log("WARN", "Unauthorized", "Config.execCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
+    return sendResponse({err: "Unauthorized", code: 401});
   }
   //
   // Handle user commands
@@ -1812,10 +1816,12 @@ Node.Config.prototype.execCommand = function (params, callback)
 {
   var command = params.tokens[0];
   //
-  // There are only 2 commands that can be executed without AUTK
-  if (command === "config" && params.req.query.name && Object.keys(params.req.query) === 1)   // Server RENAME
+  // There are only 2 commands that can be executed without AUTK:
+  // - Server RENAME (only if name is the default NEWIMAGE)
+  // - TOKEN REFRESH
+  if (command === "config" && params.req.query.name && Object.keys(params.req.query).length === 1 && this.name === "newimage")
     return this.configureServer(params, callback);
-  else if (command === "refresh")     // TOKEN REFRESH
+  else if (command === "refresh")
     return this.refresh(params, callback);
   //
   // If the authorization key is enabled and the given one does not match -> error

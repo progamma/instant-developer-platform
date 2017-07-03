@@ -2101,6 +2101,10 @@ Node.TwManager.prototype.handleRestoreBranch = function (options, callback)
   // Delete the branch if it is already here
   branch = this.getBranchByName(options.branch);
   if (branch) {
+    // "Elevate" if needed (if this was a push and now is a PR, change it to PR type)
+    if (options.pr)
+      branch.type = Node.Branch.PR;
+    //
     // Append message (if given and if there was a previous message)
     if (branch.message && options.msg && branch.message !== options.msg)
       branch.message = branch.message + "\n" + options.msg;

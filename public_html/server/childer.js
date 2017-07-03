@@ -112,10 +112,10 @@ Node.Childer.prototype.handleMessage = function (msg)
             var txt = "sudo -i pm2 stop inde\n";
             txt += "rm " + __dirname + "/../log/console.*.log\n";
             txt += "sudo -i pm2 start " + __dirname + "/inde.json\n";
-            txt += "rm " + __dirname + "/_reboot";
-            Node.fs.writeFileSync(__dirname + "/_reboot", txt, {mode: 0777});
+            txt += "rm /root/_reboot";
+            Node.fs.writeFileSync("/root/_reboot", txt, {mode: 0777});
             //
-            Node.child.spawn("csh", ["-c", __dirname + "/_reboot"]).unref();
+            Node.child.spawn("csh", ["-c", "/root/_reboot"]).unref();
           }
           break;
       }

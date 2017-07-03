@@ -7,9 +7,6 @@
       "node_args": ["--harmony_object_observe"],
       "out_file": "./../log/console.out.log",
       "error_file": "./../log/console.error.log",
-      "merge_logs": true,
-      "env": {
-        "HOME": "/tmp"
-      }
+      "merge_logs": true
     }]
 }

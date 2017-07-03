@@ -364,7 +364,10 @@ Node.Worker.prototype.handleCreateDBMsg = function (msg)
       pthis.log("WARN", "Can't create database: " + err, "Worker.handleCreateDBMsg", {dbname: msg.dbname});
     //
     // Report to callee
-    pthis.child.send({type: Node.Worker.msgTypeMap.createDBresult, dbname: msg.dbname, err: err});
+    if (pthis.child)    // The child could be dead if it crashed some time ago...
+      pthis.child.send({type: Node.Worker.msgTypeMap.createDBresult, dbname: msg.dbname, err: err});
+    else
+      pthis.log("WARN", "Child process is dead -> can't send create DB result", "Worker.handleCreateDBMsg", {dbname: msg.dbname, err: err});
   });
 };
 

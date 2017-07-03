@@ -34,7 +34,7 @@ Node.rimraf = require("rimraf");
 Node.BodyParser = require("body-parser");
 Node.errorHandler = require("errorhandler");
 Node.constants = require("constants");
-Node.gcloud = require("gcloud");
+Node.googleCloudCompute = require("@google-cloud/compute");
 
 
 /**
@@ -391,10 +391,6 @@ Node.Server.prototype.start = function ()
 Node.Server.prototype.createChilder = function ()
 {
   var pthis = this;
-  //
-  // Change home variable to /tmp. This is done in order to let the child processes to have an home
-  // directory where they can write temporary data (eg. gcloud does this when uploading)
-  process.env.HOME = "/tmp";
   //
   // Fork the childer process
   this.childer = Node.child.fork("childer.js");
@@ -902,16 +898,24 @@ Node.Server.prototype.closeSession = function (session)
 /**
  * Returns an open session for the given project
  * @param {Node.Project} project
+ * @param {boolean} anytype - if true search for any (non ide, readonly, etc...) session
  */
-Node.Server.prototype.getOpenSession = function (project)
+Node.Server.prototype.getOpenSession = function (project, anytype)
 {
   var keys = Object.keys(this.IDESessions);
   for (var i = 0; i < keys.length; i++) {
     var sess = this.IDESessions[keys[i]];
     //
-    // If this session is for the project I'm looking for and its
-    // an IDE session and it's not readOnly (VIEW)
-    if (sess.project === project && sess.options.type === "ide" && !sess.options.readOnly)
+    // If it's not a session for the given project, skip it
+    if (sess.project !== project)
+      continue;
+    //
+    // It's a session for the given project. If I'm not interested in a specific type, I've done
+    if (anytype)
+      return sess;
+    //
+    // I'm interested in a "true" IDE editing session
+    if (sess.options.type === "ide" && !sess.options.readOnly)
       return sess;
   }
 };
@@ -1235,7 +1239,7 @@ Node.Server.prototype.backupDisk = function (scheduled)
   var doBackup = function () {
     this.logger.log("DEBUG", "Start disk backup", "Server.backupDisk", this.backupInfo);
     //
-    var gce = Node.gcloud(this.config.configGCloudStorage).compute();
+    var gce = Node.googleCloudCompute(this.config.configGCloudStorage);
     var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
     var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
     //

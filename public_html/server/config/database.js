@@ -171,7 +171,7 @@ Node.Database.initDbEnv = function (user, callback)
       query = "CREATE ROLE \"" + user.userName + "\" CREATEDB LOGIN PASSWORD '" + user.dbPassword + "' NOINHERIT VALID UNTIL 'infinity';";
 
     client.query(query, function (err) {
-      if (err && err.code !== "42710") {    // 42710: role already exists
+      if (err && err.code !== "42710" && err.code !== "23505") { // 42710: role already exists, 23505: duplicate key value violates unique constraint
         client.end();
         //
         user.log("ERROR", "Error while creating ROLE: " + err, "Database.initDbEnv", {query: query});

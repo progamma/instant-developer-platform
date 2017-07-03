@@ -323,7 +323,8 @@ Node.Request.prototype.getComponents = function (userName, callback)
       // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
       // Better check if the answer is a JSON string... I don't want to crash everything
       try {
-        callback(JSON.parse(data).cmpList);
+        var cmpList = JSON.parse(data).cmpList;
+        callback(cmpList);
       }
       catch (ex) {
         pthis.logger.log("ERROR", "GET reply error", "Request.getComponents", {data: data, code: code, options: options});
@@ -351,7 +352,8 @@ Node.Request.prototype.sendExportedComponent = function (userName, projectName, 
   form.append("company", this.config.serverType);
   form.append("componentName", component.name);
   form.append("componentID", component.id);
-  form.append("componentVersion", component.version);
+  if (component.version)
+    form.append("componentVersion", component.version);
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {

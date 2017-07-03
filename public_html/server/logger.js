@@ -75,6 +75,10 @@ Node.Logger.prototype.initLogFile = function ()
 {
   var logPath = Node.path.resolve(__dirname + "/../log");
   //
+  // If local check if LOG directory exists
+  if (this.config && this.config.local && !Node.fs.existsSync(logPath))
+    Node.fs.mkdirSync(logPath);
+  //
   // If I haven't done it yet
   if (!this.newLogTimer) {
     // Create a timer that will change LOG file each day

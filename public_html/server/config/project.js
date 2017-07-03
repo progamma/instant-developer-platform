@@ -399,10 +399,13 @@ Node.Project.prototype.downloadFile = function (params, callback)
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/" + folder + "/" + filename;
   //
   // Send the file only if there is an editing session
-  var session = this.server.getOpenSession(this);
-  if (!session) {
-    this.log("WARN", "No session is asking for this file", "Project.downloadFile");
-    return callback("No session is asking for this file");
+  // (don't check resources/libusage.json... that file is asked whenever the callee needs it)
+  if (folder !== "resources" || filename !== "libusage.json") {
+    var session = this.server.getOpenSession(this, true);
+    if (!session) {
+      this.log("WARN", "No session is asking for this file", "Project.downloadFile");
+      return callback("No session is asking for this file");
+    }
   }
   //
   // filename must not contain ..
@@ -508,11 +511,11 @@ Node.Project.prototype.handleFileSystem = function (params, callback)
   options.params = params;
   //
   // Handle the command
-  Node.Utils.handleFileSystem(options, function (err) {
-    if (err)
-      this.logger.log("WARN", "Error while handling file system command: " + (err.err || err), "Project.handleFileSystem");
+  Node.Utils.handleFileSystem(options, function (res) {
+    if (res && (res.err || typeof res === "string"))
+      this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "Project.handleFileSystem");
     //
-    callback(err);
+    callback(res);
   }.bind(this));
 };
 
@@ -659,7 +662,7 @@ Node.Project.prototype.configure = function (params, callback)
   // have to "apply" that configuration change into the project. If everything is fine I can report to callee
   if (query.description !== undefined || query.iconUrl !== undefined) {
     // Configure the project. If there is an open session it can't be done
-    if (this.server.getOpenSession(this)) {
+    if (this.server.getOpenSession(this, true)) {
       this.log("WARN", "Can't configure the project: open IDE session", "Project.configure");
       return callback("Can't configure the project: open IDE session");
     }
@@ -993,7 +996,7 @@ Node.Project.prototype.renameProject = function (params, callback)
   }
   //
   // If there is an open session I can't rename the project!
-  if (this.server.getOpenSession(this)) {
+  if (this.server.getOpenSession(this, true)) {
     this.log("WARN", "Can't rename the project: open IDE session", "Project.renameProject");
     return callback("Can't rename the project: open IDE session");
   }

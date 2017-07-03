@@ -614,7 +614,10 @@ Node.App.prototype.install = function (params, callback)
               worker.installCallback = function (result) {
                 // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
                 // then I have to kill it directly!)
-                worker.child.kill();
+                if (worker.child)     // Only if it's still alive
+                  worker.child.kill();
+                else
+                  result.err = result.err || "Child process is dead";
                 //
                 // If there is an error, stop
                 if (result.err)
@@ -839,11 +842,11 @@ Node.App.prototype.handleFileSystem = function (params, callback)
   options.params = params;
   //
   // Handle the command
-  Node.Utils.handleFileSystem(options, function (err) {
-    if (err)
-      this.logger.log("WARN", "Error while handling file system command: " + (err.err || err), "App.handleFileSystem");
+  Node.Utils.handleFileSystem(options, function (res) {
+    if (res && (res.err || typeof res === "string"))
+      this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "App.handleFileSystem");
     //
-    callback(err);
+    callback(res);
   }.bind(this));
 };
 

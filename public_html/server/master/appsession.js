@@ -335,7 +335,6 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
   if (typeof msg.text === "object")
     msg.text = JSON.stringify(msg.text);
   //
-  // TODO: Rimuovere prima o poi (serve solo se le app di un server prod non sono aggiornate)
   msg.options = msg.options || {};
   //
   // Handle options, if any

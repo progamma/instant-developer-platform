@@ -16,7 +16,7 @@ Node.archiver = require("archiver");
 Node.AWS = require("aws-sdk");
 Node.rimraf = require("rimraf");
 Node.fs = require("fs");
-Node.gcloud = require("gcloud");
+Node.googleCloudStorage = require("@google-cloud/storage");
 Node.http = require("http");
 Node.https = require("https");
 
@@ -31,13 +31,11 @@ Node.Archiver = function (par, nightly)
   this.parent = par;
   //
   if (this.config.storage === "gcloud") {
-    Node.indertProject = Node.gcloud(this.config.configGCloudStorage);
-    Node.storage = Node.indertProject.storage();
-    //
+    var storage = Node.googleCloudStorage(this.config.configGCloudStorage);
     if (nightly)
-      Node.indertBucket = Node.storage.bucket(this.config.nigthlybucketGCloud);
+      Node.indertBucket = storage.bucket(this.config.nigthlybucketGCloud);
     else
-      Node.indertBucket = Node.storage.bucket(this.config.bucketGCloud);
+      Node.indertBucket = storage.bucket(this.config.bucketGCloud);
   }
 };
 

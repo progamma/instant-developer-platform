@@ -533,7 +533,7 @@ Node.User.prototype.deleteDatabase = function (dbName, callback)
     if (err)
       return callback(err);
     //
-    var index = pthis.projects.indexOf(database);
+    var index = pthis.databases.indexOf(database);
     pthis.databases.splice(index, 1);
     //
     // Save the new configuration

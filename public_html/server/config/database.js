@@ -272,6 +272,20 @@ Node.Database.cleanDbEnv = function (user, callback)
 
 
 /**
+ * Get the database's URL (needed for direct connection via command line)
+ */
+Node.Database.prototype.getURL = function ()
+{
+  var dbname;
+  if (this.user.userName === "manager")
+    dbname = this.name;
+  else
+    dbname = this.user.userName + "-" + this.name;
+  return "postgresql://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort + "/" + dbname;
+};
+
+
+/**
  * Get the status of the database
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -290,7 +304,7 @@ Node.Database.prototype.sendStatus = function (params, callback)
     sqlcmd = "select pg_database_size('" + this.name + "')";
   else
     sqlcmd = "select pg_database_size('" + this.user.userName + "-" + this.name + "')";
-  Node.child.execFile("/usr/local/bin/psql", ["-t", "-c", sqlcmd], function (err, stdout, stderr) {   // jshint ignore:line
+  Node.child.execFile("/usr/local/bin/psql", ["--dbname=" + this.getURL(), "-t", "-c", sqlcmd], function (err, stdout, stderr) {   // jshint ignore:line
     if (err) {
       pthis.log("ERROR", "Error getting the size of user's DB: " + err, "Database.sendStatus", {sqlcmd: sqlcmd});
       return callback("Error getting the size of user's DB folder: " + err);
@@ -556,37 +570,39 @@ Node.Database.prototype.backup = function (params, callback)
     });
   };
   //
-  // Create the directory
-  Node.fs.mkdir(pathDB, function (err) {
+  // Remove the temp folder if present (due to a failed previous backup)
+  Node.rimraf(pathDB, function (err) {
     if (err)
-      return errorFnc("Can't create temporary directory " + pathDB + ": " + err);
+      return errorFnc("Error removing the previous temp folder (" + pathDB + "): " + err);
     //
-    // Dump the database
-    var params;
-    if (pthis.user.userName === "manager")
-      params = ["--no-owner", "-f", pathDB + "/backup", pthis.name];
-    else
-      params = ["--no-owner", "-f", pathDB + "/backup", pthis.user.userName + "-" + pthis.name];
-    Node.child.execFile("/usr/local/bin/pg_dump", params, function (err, stdout, stderr) {   // jshint ignore:line
+    // Create the directory
+    Node.fs.mkdir(pathDB, function (err) {
       if (err)
-        return errorFnc("Error backing up the database: " + err);
+        return errorFnc("Can't create temporary directory " + pathDB + ": " + err);
       //
-      // Backup in the cloud
-      var archiver = new Node.Archiver(pthis.server);
-      archiver.backup(pathDB, pathCloud, function (err) {
+      // Dump the database
+      var params = ["--no-owner", "-f", pathDB + "/backup", "--dbname=" + pthis.getURL()];
+      Node.child.execFile("/usr/local/bin/pg_dump", params, function (err, stdout, stderr) {   // jshint ignore:line
         if (err)
-          return errorFnc("Error while backing up in the cloud: " + err);
+          return errorFnc("Error backing up the database: " + err);
         //
-        // Remove the temp folder
-        Node.rimraf(pathDB, function (err) {
+        // Backup in the cloud
+        var archiver = new Node.Archiver(pthis.server);
+        archiver.backup(pathDB, pathCloud, function (err) {
           if (err)
-            return errorFnc("Error removing the temp database files: " + err);
+            return errorFnc("Error while backing up in the cloud: " + err);
           //
-          // Log the operation
-          pthis.log("INFO", "Database backed up", "Database.backup");
-          //
-          // Done
-          callback();
+          // Remove the temp folder
+          Node.rimraf(pathDB, function (err) {
+            if (err)
+              return errorFnc("Error removing the temp database files: " + err);
+            //
+            // Log the operation
+            pthis.log("INFO", "Database backed up", "Database.backup");
+            //
+            // Done
+            callback();
+          });
         });
       });
     });
@@ -645,11 +661,7 @@ Node.Database.prototype.restore = function (params, callback)
       return errorFnc("Error while restoring database cloud files: " + err);
     //
     // Restore the database dump
-    var params;
-    if (pthis.user.userName === "manager")
-      params = ["-d", pthis.name, "-f", pathDB + "/backup"];
-    else
-      params = ["-d", pthis.user.userName + "-" + pthis.name, "-f", pathDB + "/backup"];
+    var params = ["--dbname=" + pthis.getURL(), "-f", pathDB + "/backup"];
     Node.child.execFile("/usr/local/bin/psql", params, function (err, stdout, stderr) {   // jshint ignore:line
       if (err)
         return errorFnc("Error while restoring database: " + err);
@@ -658,7 +670,7 @@ Node.Database.prototype.restore = function (params, callback)
       // Note: everything should be owned by indert because I (indert process) restored it and inside
       // the backup there is no owner information (see Database::backup "--no-owner" command line parameter)
       if (pthis.user.userName !== "manager") {
-        params = ["-d", pthis.user.userName + "-" + pthis.name, "-c", "REASSIGN OWNED BY indert TO \"" + pthis.user.userName + "\""];
+        params = ["--dbname=" + pthis.getURL(), "-c", "REASSIGN OWNED BY indert TO \"" + pthis.user.userName + "\""];
         Node.child.execFile("/usr/local/bin/psql", params, function (err, stdout, stderr) {   // jshint ignore:line
           if (err)
             return errorFnc("Error while changing database object's owner: " + err);

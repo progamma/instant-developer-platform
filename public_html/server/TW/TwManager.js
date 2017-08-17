@@ -1244,13 +1244,6 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
     return callback(InDe.rh.t("tw_memory_mod"));
   }
   //
-  // Check if there are local modifications
-  // Unless the new branch is empty... if that's the case allow the user to commit local modifcations in the new empty branch)
-  if (this.localModif() && !branch.isEmpty()) {
-    this.logger.log("WARN", "Can't switch: there are local modifications", "TwManager.switchBranch", {branch: branchName});
-    return callback(InDe.rh.t("tw_switch_locmod_err"));
-  }
-  //
   // If there are unresolved conflicts, can't switch branch
   if (this.actualBranch.conflict) {
     this.logger.log("WARN", "Can't switch due to conflicts", "TwManager.switchBranch", {branch: branchName});
@@ -1259,6 +1252,13 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
   //
   // Get the list of commits to execute in order to switch from current branch to the requested one
   var commits = this.getDiffBranchSwitch(branchName);
+  //
+  // If there are local modifications and there is something to do I can't switch... I would have to undo the local modifications as well
+  // But if there is nothing to be done (the new branch is aligned with the current branch) I can switch like Git does
+  if (this.localModif() && (commits.undoList.length || commits.redoList.length)) {
+    this.logger.log("WARN", "Can't switch: there are local modifications", "TwManager.switchBranch", {branch: branchName});
+    return callback(InDe.rh.t("tw_switch_locmod_err"));
+  }
   //
   // Undo the commits that have to be undoed (backward)
   for (var i = commits.undoList.length - 1; i >= 0; i--)
@@ -1500,6 +1500,12 @@ Node.TwManager.prototype.merge = function (branchName, callback)
   if (this.memoryModif()) {
     this.logger.log("WARN", "Can't merge: there are unsaved modifications", "TwManager.merge");
     return callback(InDe.rh.t("tw_memory_mod"));
+  }
+  //
+  // If there are local modifications -> can't continue
+  if (this.localModif()) {
+    this.logger.log("WARN", "Can't switch: there are local modifications", "TwManager.merge");
+    return callback(InDe.rh.t("tw_switch_locmod_err"));
   }
   //
   // If there are unresolved conflicts, can't merge

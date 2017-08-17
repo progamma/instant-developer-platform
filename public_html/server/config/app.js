@@ -866,20 +866,6 @@ Node.App.prototype.configure = function (params, callback)
     return callback("No property specified");
   }
   //
-  // Get the list of all properties that can be configured
-  var properties = Object.keys(this.save());
-  //
-  // Hack: allow change updating status
-  properties.push("updating");
-  //
-  // Check if all the properties in the querystring are valid
-  for (var i = 0; i < queryProps.length; i++) {
-    if (properties.indexOf(queryProps[i]) === -1) {
-      this.log("WARN", "Invalid querystring: " + queryProps[i] + " is not valid", "App.configure", {queryProps: queryProps});
-      return callback("Invalid querystring: " + queryProps[i] + " is not valid");
-    }
-  }
-  //
   if (query.name) {
     try {
       Node.fs.renameSync(this.config.appDirectory + "/apps/" + this.name, this.config.appDirectory + "/apps/" + query.name);
@@ -972,6 +958,7 @@ Node.App.prototype.test = function (params, callback)
     var maxSessions = params.req.query.maxSessions;
     var pathList = params.req.query.path;
     var rid = params.req.query.rid;
+    var device = params.req.query.device || "desktop";
     //
     // Create a new test auto
     var options = {
@@ -996,7 +983,7 @@ Node.App.prototype.test = function (params, callback)
     //
     // I need a browser only if testauto mode is "recording" or "replay step-by-step"
     if (testautoMode === "r" || testautoMode === "sbs") {
-      params.res.redirect("/" + this.name + "/client/testautoPreview.html?device=desktop&testmode=" + testautoMode + "&testid=" +
+      params.res.redirect("/" + this.name + "/client/testautoPreview.html?device=" + device + "&testmode=" + testautoMode + "&testid=" +
               testautoId + "&addsid=true");
       callbackMsg.skipReply = true;
     }

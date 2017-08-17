@@ -218,7 +218,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       }
     }
     //
-    if (["setTestAuto", "calculateTagResults", "setTaggingData", "closePopup", "onPause", "onResume"].indexOf(req[i].id) !== -1) {
+    if (["setTestAuto", "calculateTagResults", "setTaggingData", "closePopup", "onPause", "onResume", "getTestProperties", "sendMessageToTestAuto"].indexOf(req[i].id) !== -1) {
       if (req.length === 1)
         return;
       else {
@@ -227,8 +227,16 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       }
     }
     //
-    if (["alertCB", "confirmCB", "promptCB", "popupBoxReturn"].indexOf(req[i].id) !== -1)
+    if (["alertCB", "confirmCB", "promptCB"].indexOf(req[i].id) !== -1)
       this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: [{id: "closePopup"}]});
+    //
+    // Save the last opened popup callback id. In record mode I saved a popupBoxReturn message having a certain cbId
+    // as a parameter. But this cbId is a "record-time" value. So I save the current cbId in order to replace the cbId into
+    // popupBoxReturn message when I'll go to send it
+    if (["popup", "confirm", "prompt"].indexOf(req[i].id) !== -1) {
+      if (!this.lastPopupCbId)
+        this.lastPopupCbId = req[i].cnt.cbId;
+    }
     //
     // Cookies are in the client and server ask it for them. But in case of non reg or load test,
     // I have not a client. So save cookies in onStart request to simulate cookies request in those kind of tests
@@ -384,20 +392,22 @@ Node.TestAuto.prototype.save = function ()
     this.requests.push({input: this.inputMessages, output: this.outputMessages});
   //
   delete this.needToSave;
-  // Set last delay to rec duration - all other delays
-  var totDelays = 0;
-  for (var i = 0; i < this.delays.length - 1; i++)
-    totDelays += this.delays[i];
   //
-  var lastDelay = this.recDuration - totDelays;
-  this.delays[this.delays.length - 1] = lastDelay > 0 ? lastDelay : 1000;
+  // Cut all delays greater than 1000 ms
+  var totDelays = 0;
+  for (var i = 0; i < this.delays.length - 1; i++) {
+    this.delays[i] = this.delays[i] > 1000 ? 1000 : this.delays[i];
+    totDelays += this.delays[i];
+  }
+  //
+  this.delays[this.delays.length - 1] = 1000;
   //
   // Create recorded session object
   var rec = {};
   rec.requests = this.requests;
   rec.delays = this.delays;
   rec.description = this.desc;
-  rec.duration = this.recDuration;
+  rec.duration = totDelays + 1000;
   rec.consoleTest = this.consoleTest;
   rec.objectsMap = this.objectsMap;
   //
@@ -504,6 +514,12 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     //
     this.reqIndex++;
     //
+    // Tell preview to update its requests counter
+    if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
+      var ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "updateReqNumber", reqIndex: this.reqIndex, reqTotal: this.requests.length}}}];
+      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
+    }
+    //
     // Set expected number of responses
     this.expectedResponses = 0;
     for (var i = 0; i < req.output.length; i++)
@@ -530,6 +546,10 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
             if (tagValues) {
               var newId;
               for (var k = 0; k < tagValues.length; k++) {
+                // Skip popup elements
+                if (tagValues[k].elId === "popup")
+                  continue;
+                //
                 newId = this.getNewIdFromOldId(tagValues[k].elId);
                 //
                 // If current object has a new id, replace the old one
@@ -543,6 +563,12 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
               // Tell client to calculate tag results
               ev = [{id: "calculateTagResults", content: tagValues}];
               this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+            }
+          }
+          else if (request.input[i].content[j].id === "popupBoxReturn") {
+            if (request.input[i].content[j].content && this.lastPopupCbId) {
+              request.input[i].content[j].content.cbId = this.lastPopupCbId;
+              delete this.lastPopupCbId;
             }
           }
         }

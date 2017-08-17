@@ -547,6 +547,10 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
     msg.text = JSON.stringify(msg.text);
   //
   // Handle options, if any
+  if (typeof msg.code === "string")
+    msg.code = parseInt(msg.code);      // Change code do INT if needed
+  if (!msg.code || msg.code < 100 || msg.code >= 600)
+    msg.code = 500;              // Don't send an invalid value (server crashes!!!)
   if (msg.options.contentType)
     this.restRes.writeHead(msg.code || 500, {"Content-Type": msg.options.contentType});
   else

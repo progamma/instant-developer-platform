@@ -42,7 +42,9 @@ Node.TestAuto = function (app, options)
   this.delays = [];
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [],
-    tagErrors: [], noResponseErrors: [], timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
+    tagErrors: [], noResponseErrors: [], consoleTestErrors: [], totErrors: [],
+    percentageCompleted: 0, nonCreatedSessions: 0};
+  this.lastCPUValues = [];
   this.reqIndex = 0;
   this.startTime = 0;
   this.totalSessionsDuration = 0;
@@ -474,17 +476,12 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       delete this.testResult.cpu;
       delete this.testResult.memory;
       delete this.testResult.activeSessions;
-      delete this.testResult.timesDiff;
       delete this.testResult.totErrors;
       //
       this.saveResults(this.testResult);
     }
-    else { // Otherwise notify parent I terminated test execution
-      var res = {};
-      res.duration = duration;
-      res.recDuration = this.recDuration;
-      this.parent.onTerminateTest(this.childId, res);
-    }
+    else // Otherwise notify parent I terminated test execution
+      this.parent.onTerminateTest(this.childId);
     //
     // Reset test auto
     this.reset({id: this.id, mode: this.mode});
@@ -606,14 +603,24 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       // For long request (i.e. more than 10 seconds), set delay to 2 * req duration
       nextDelay = (reqDuration >= 10000) ? 2 * reqDuration : nextDelay;
       //
-      this.responseTimeout = setTimeout(function () {
-        if (this.outputLength !== 0 && this.outputLength === this.expectedResponses)
-          this.saveNoResponse();
-        //
+      this.responseTimeout = setTimeout(function (request, timeout) {
         clearTimeout(this.responseTimeout);
         delete this.responseTimeout;
+        //
+        if (this.outputLength !== 0 && this.outputLength === this.expectedResponses) {
+          this.saveNoResponse(request, timeout);
+          //
+          if (this.mode !== Node.TestAuto.ModeMap.stepByStep) {
+            this.parent.onTerminateTest(this.childId);
+            //
+            // Reset test auto
+            this.reset({id: this.id, mode: this.mode});
+            return;
+          }
+        }
+        //
         this.playRequest();
-      }.bind(this), nextDelay);
+      }.bind(this, req, nextDelay), nextDelay);
       //
       // No need to wait for response. Process next request
       if (req.output.length === 0)
@@ -711,6 +718,8 @@ Node.TestAuto.prototype.getRecording = function ()
  * */
 Node.TestAuto.prototype.prepareReplay = function ()
 {
+  this.watchdog();
+  //
   // Set start test time
   this.startTime = new Date().getTime();
   //
@@ -832,26 +841,26 @@ Node.TestAuto.prototype.prepareReplay = function ()
   if ([Node.TestAuto.ModeMap.load, Node.TestAuto.ModeMap.nonReg].indexOf(this.mode) !== -1) {
     this.resultInterval = setInterval(function () {
       // Calculate cpu usage
-      var cpus = Node.os.cpus();
-      var cpuIdleAverage = 0;
-      for (var i = 0, len = cpus.length; i < len; i++) {
-        var cpu = cpus[i], total = 0;
+      Node.Utils.getCPUload(function (cpuUsage) {
+        // Save last 10 cpu usage values
+        if (this.lastCPUValues.length > 10)
+          this.lastCPUValues.splice(0, 1);
         //
-        var cpuKeys = Object.keys(cpu.times);
-        for (var j = 0; j < cpuKeys.length; j++)
-          total += cpu.times[cpuKeys[j]];
+        this.lastCPUValues.push(cpuUsage);
         //
-        cpuIdleAverage += (100 * cpu.times.idle) / total;
-      }
-      var cpuUsage = 100 - (cpuIdleAverage / cpus.length);
-      this.testResult.cpu.push(cpuUsage.toFixed(2));
+        var sum = 0;
+        for (var i = 0; i < this.lastCPUValues.length; i++)
+          sum += this.lastCPUValues[i];
+        //
+        var cpuAvg = Math.round((sum / this.lastCPUValues.length) * 100) / 100;    // 2 dec digits
+        this.testResult.cpu.push(cpuAvg);
+      }.bind(this));
       //
-      var pids = [];
-      for (var i = 0; i < this.app.workers.length; i++)
-        pids.push(this.app.workers[i].child.pid);
-      //
-      // Calculate system load (% memory usage)
-      this.calcSystemLoad(pids);
+      // Calculate memory usage
+      var freeMem = (Node.os.freemem() / (1024 * 1024)).toFixed(2);
+      var totalMem = (Node.os.totalmem() / (1024 * 1024)).toFixed(2);
+      var memoryUsage = ((totalMem - freeMem) * 100 / totalMem).toFixed(2);
+      this.testResult.memory.push(memoryUsage);
       //
       var childrenIds = Object.keys(this.children);
       //
@@ -883,7 +892,9 @@ Node.TestAuto.prototype.reset = function (options)
   this.delays = [];
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [], tagErrors: [],
-    noResponseErrors: [], timesDiff: [], consoleTestErrors: [], totErrors: [], percentageCompleted: 0};
+    noResponseErrors: [], consoleTestErrors: [], totErrors: [],
+    percentageCompleted: 0, nonCreatedSessions: 0};
+  this.lastCPUValues = [];
   this.reqIndex = 0;
   this.startTime = 0;
   this.totalSessionsDuration = 0;
@@ -937,6 +948,14 @@ Node.TestAuto.prototype.createChild = function (test)
   //
   // Create new test session
   var session = this.app.createNewSession();
+  //
+  // If there isn't a session it means numbers of active sessions has reached the maximum number of sessions
+  // server can handle. So it's not possible to create another session
+  if (!session) {
+    this.testResult.nonCreatedSessions++;
+    this.onTerminateTest();
+    return;
+  }
   session.testAutoId = this.id;
   //
   // Create app client
@@ -985,13 +1004,14 @@ Node.TestAuto.prototype.createChild = function (test)
 /**
  * Called by a child when its test is ended
  * @param {String} id - test to execute
- * @param {Object} res - test results
  * */
-Node.TestAuto.prototype.onTerminateTest = function (id, res)
+Node.TestAuto.prototype.onTerminateTest = function (id)
 {
   // Terminate child testauto
-  this.children[id].session.deleteAppClient(this.children[id].appClient);
-  delete this.children[id];
+  if (this.children[id]) {
+    this.children[id].session.deleteAppClient(this.children[id].appClient);
+    delete this.children[id];
+  }
   //
   if (!this.testsEnded)
     this.testsEnded = 0;
@@ -1000,11 +1020,6 @@ Node.TestAuto.prototype.onTerminateTest = function (id, res)
   // Update percentage completed
   if (this.mode === Node.TestAuto.ModeMap.load)
     this.testResult.percentageCompleted = ((this.testsEnded + this.totalChildren) * 100) / (this.maxSessions * 2);
-  //
-  // Calculate times diff percentage for ended session
-  this.totalSessionsDuration += res.duration;
-  var timesDiff = this.totalSessionsDuration / (res.recDuration * this.testsEnded);
-  this.testResult.timesDiff.push(timesDiff.toFixed(2));
   //
   var i;
   //
@@ -1042,7 +1057,6 @@ Node.TestAuto.prototype.onTerminateTest = function (id, res)
       delete this.testResult.cpu;
       delete this.testResult.memory;
       delete this.testResult.activeSessions;
-      delete this.testResult.timesDiff;
       delete this.testResult.totErrors;
     }
     //
@@ -1154,14 +1168,39 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
 
 /**
  * Save a "no response" error
+ * @param {Object} req
+ * @param {Integer} timeout
  * */
-Node.TestAuto.prototype.saveNoResponse = function ()
+Node.TestAuto.prototype.saveNoResponse = function (req, timeout)
 {
   var testAuto = this.parent || this;
+  //
+  // Extract object and operation from req
+  var operation;
+  var object;
+  if (req && req.input) {
+    for (var i = 0; i < req.input.length; i++) {
+      var exit = false;
+      if (req.input[i].content) {
+        for (var j = 0; j < req.input[i].content.length; j++) {
+          operation = req.input[i].content[j].id;
+          object = req.input[i].content[j].obj;
+          exit = true;
+          break;
+        }
+        if (exit)
+          break;
+      }
+      break;
+    }
+  }
   //
   var obj = {};
   obj.requestNumber = this.reqIndex - 1;
   obj.message = "Server didn't respond";
+  obj.operation = operation;
+  obj.object = object;
+  obj.timeout = timeout;
   obj.occurr = 1;
   //
   // Check if need to save this exception
@@ -1182,11 +1221,15 @@ Node.TestAuto.prototype.saveNoResponse = function ()
 /**
  * Save results
  * @param {Object} res
+ * @param {Boolean} overload
  * */
-Node.TestAuto.prototype.saveResults = function (res)
+Node.TestAuto.prototype.saveResults = function (res, overload)
 {
   // Test completed
   res.percentageCompleted = 100;
+  //
+  if (overload)
+    res.overloadError = true;
   //
   // Send response to console
   this.consoleRequest.sendResponse(this.rid, 200, JSON.stringify(res));
@@ -1216,6 +1259,9 @@ Node.TestAuto.prototype.terminate = function ()
   //
   // Reset all (clear and delete all timeouts, reset all properties and so on)
   this.reset({id: this.id, mode: this.mode});
+  //
+  // Stop watchdog
+  this.watchdog(true);
   //
   // Delete test
   if (this.app.testAuto)
@@ -1317,56 +1363,6 @@ Node.TestAuto.prototype.getNewIdFromOldId = function (oldId)
 
 
 /**
- * Calculate memory usage and cpu usage for given processes
- * @param {Array} pids
- * */
-Node.TestAuto.prototype.calcSystemLoad = function (pids)
-{
-  if (!pids || pids.length === 0)
-    return;
-  //
-  var pidsString = "";
-  pids = pids || [];
-  for (var i = 0; i < pids.length; i++)
-    pidsString += pids[i] + " ";
-  //
-  var cmd, cmdParams;
-  if (!/^win/.test(process.platform)) {   // linux
-    cmd = "ps";
-    cmdParams = ["u", "-p", pidsString];
-  }
-  //
-  this.app.server.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {
-    if (err) {
-      this.app.log("ERROR", "Error getting the process memory usage: " + JSON.stringify(stderr || err), "TestAuto.prepareReplay");
-      return;
-    }
-    //
-    if (!/^win/.test(process.platform))    // linux
-      stdout = stdout.split("\n");
-    //
-    // Remove results header from stdout
-    stdout.splice(0, 1);
-    var cpu = 0;
-    var mem = 0;
-    if (stdout) {
-      for (var i = 0; i < stdout.length; i++) {
-        if (stdout[i] === "")
-          continue;
-        //
-        stdout[i] = stdout[i].replace(/\s\s+/g, " ");
-        var values = stdout[i].split(" ");
-        cpu += parseFloat(values[2]);
-        mem += parseFloat(values[3]);
-      }
-    }
-    //
-    this.testResult.memory.push(mem);
-  }.bind(this));
-};
-
-
-/**
  * Get request duration (i.e. time occurred between first input item and last output item)
  * @param {Object} req
  * */
@@ -1383,6 +1379,31 @@ Node.TestAuto.prototype.getReqDuration = function (req)
   var endTimeStamp = lastOutputItem && lastOutputItem.time ? lastOutputItem.time : 0;
   //
   return endTimeStamp - startTimeStamp;
+};
+
+
+/**
+ * Check if server is in a safe status
+ * @param {Boolean} stop
+ * */
+Node.TestAuto.prototype.watchdog = function (stop)
+{
+  if (stop) {
+    clearTimeout(this.watchdogTimeout);
+    return;
+  }
+  //
+  this.watchdogTimeout = setTimeout(function (lastTimeStamp) {
+    clearTimeout(this.watchdogTimeout);
+    //
+    var now = new Date().getTime();
+    //
+    // The server is becoming too slow. Stop the test and send results to console
+    if (now - lastTimeStamp > 1000)
+      this.saveResults(this.testResult, true);
+    else
+      this.watchdog();
+  }.bind(this, new Date().getTime()), 500);
 };
 
 

@@ -70,7 +70,7 @@ Node.Config.prototype.save = function ()
     configGCloudStorage: this.configGCloudStorage, bucketGCloud: this.bucketGCloud,
     nigthlybucketGCloud: this.nigthlybucketGCloud, storage: this.storage,
     dbPort: this.dbPort, dbAddress: this.dbAddress, dbUser: this.dbUser, dbPassword: this.dbPassword,
-    timerSession: this.timerSession,
+    googleAPIKey: this.googleAPIKey, timerSession: this.timerSession,
     timerTokenConsole: this.timerTokenConsole, handleException: this.handleException, minify: this.minify,
     timeBackup: this.timeBackup, daysBackups: this.daysBackups, numMinBackups: this.numMinBackups,
     numHoursSnapshot: this.numHoursSnapshot, numMaxSnapshot: this.numMaxSnapshot, timeSnapshot: this.timeSnapshot,
@@ -120,6 +120,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.dbUser = v.dbUser;
   if (v.dbPassword)
     this.dbPassword = v.dbPassword;
+  if (v.googleAPIKey)
+    this.googleAPIKey = v.googleAPIKey;
   if (v.storage)
     this.storage = v.storage;
   if (v.serverType)
@@ -884,6 +886,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
   // Remove "sensitive data"
   delete result.configGCloudStorage;
   delete result.dbPassword;
+  delete result.googleAPIKey;
   //
   // Add server info
   var srvFile = Node.path.resolve(__dirname + "/../server.js");
@@ -1020,6 +1023,8 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.dbUser = query.dbUser;
   if (query.dbPassword)
     this.dbPassword = query.dbPassword;
+  if (query.googleAPIKey)
+    this.googleAPIKey = query.googleAPIKey;
   if (query.timerSession)
     this.timerSession = parseInt(query.timerSession, 10);
   if (query.timerTokenConsole)

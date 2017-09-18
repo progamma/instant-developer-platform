@@ -86,7 +86,7 @@ Node.IDEAppClient.prototype.init = function (req, res)
   var pthis = this;
   //
   // Get the appid from the url (if given)
-  this.appid = (req.params ? req.params.appid : undefined);
+  this.appid = (req.params ? req.params.appid.replace(/-/g, "/") : undefined);
   this.mode = (req.query ? req.query.mode : undefined);
   //
   // Redirect to the main page

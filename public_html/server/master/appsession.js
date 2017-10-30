@@ -9,7 +9,8 @@ var Node = Node || {};
 
 // Import modules
 Node.zlib = require("zlib");
-//
+Node.cookie = require("cookie");
+
 // Import Classes
 Node.AppClient = require("./appclient");
 Node.Utils = require("../utils");
@@ -256,6 +257,36 @@ Node.AppSession.prototype.terminate = function ()
   //
   for (var i = 0; i < this.appClients.length; i++)
     this.appClients[i].close();
+};
+
+
+/**
+ * Protects the SID
+ * Adds a cookie to the given request in order to protect my SID
+ * @param {HTTPResponse} res
+ * @param {Date} expires - cookie duration
+ */
+Node.AppSession.prototype.protectSID = function (res, expires)
+{
+  // Add another HTTP-only cookie that will "protect" the SID/CID cookie
+  var secure = (!this.config.local && this.config.protocol === "https");
+  this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
+  res.cookie(this.id + "_secureSID", this.secureSID, {expires: expires, path: "/", httpOnly: true, secure: secure});
+};
+
+
+/**
+ * Checks if the SID is invalid (i.e. secureSID cookie is not the expected one)
+ * @param {Socket} socket
+ */
+Node.AppSession.prototype.invalidSID = function (socket)
+{
+  var secureID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
+  if (secureID !== this.secureSID) {
+    this.log("WARN", "Secure SID does not match", "AppSession.invalidSID",
+            {sid: this.id, expectedSecureSID: this.secureID, secureSID: secureID});
+    return true;
+  }
 };
 
 

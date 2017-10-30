@@ -27,6 +27,7 @@ Node.AppClient = function (par)
 
 
 Node.AppClient.msgTypeMap = {
+  redirect: "redirect",
   appmsg: "appmsg"
 };
 
@@ -117,7 +118,7 @@ Node.AppClient.prototype.openConnection = function (socket)
     // I've been invited: if this session has not a master -> that's not allowed
     if (!this.session.masterAppClient) {
       this.log("WARN", "Master, that invited me, is gone", "AppClient.openConnection", {ctoken: ctoken});
-      socket.emit("redirect", "http://www.instantdeveloper.com");
+      socket.emit(Node.AppClient.msgTypeMap.redirect, "http://www.instantdeveloper.com");
       return;
     }
     //
@@ -128,10 +129,17 @@ Node.AppClient.prototype.openConnection = function (socket)
     this.log("DEBUG", "A new client is SLAVE for session", "AppClient.openConnection");
   }
   else {  // I've not been invited
+    // If the SID is invalid
+    if (this.session.invalidSID(socket)) {
+      this.log("WARN", "Invalid SID", "AppClient.openConnection");
+      socket.emit(Node.AppClient.msgTypeMap.redirect, "http://www.instantdeveloper.com");
+      return;
+    }
+    //
     // I've not been invited: if this session has already a master (and it's not me) -> that's not allowed
     if (this.session.masterAppClient && this.session.masterAppClient !== this) {
       this.log("WARN", "Session is busy", "AppClient.openConnection");
-      socket.emit("redirect", "http://www.instantdeveloper.com");
+      socket.emit(Node.AppClient.msgTypeMap.redirect, "http://www.instantdeveloper.com");
       return;
     }
     //

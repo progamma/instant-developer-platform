@@ -393,7 +393,7 @@ Node.Server.prototype.createChilder = function ()
   var pthis = this;
   //
   // Fork the childer process
-  this.childer = Node.child.fork("childer.js");
+  this.childer = Node.child.fork("childer.js", Node.Utils.forkArgs());
   //
   // Childer listener
   this.childer.on("message", function (msg) {

@@ -55,8 +55,14 @@ Node.Logger.prototype.init = function ()
       process.on("uncaughtException", function (err) {
         this.log("ERROR", "Uncaught server exception : " + (err.stack || err), "Logger.init");
         //
-        // Do not exit if the problem was inside gcloud
-        if ((err.stack + "").indexOf("node_modules/gcloud") === -1)
+        var crashAll = true;
+        if ((err.stack + "").indexOf("node_modules/gcloud") !== -1)
+          crashAll = false;   // Do not exit if the problem was inside gcloud
+        else if ((err.stack + "").indexOf("incorrect header check\n    at Zlib._handle.onerror (zlib.js:370:17)") !== -1)
+          crashAll = false;   // Do not exit if the problem is due to an "incorrect header check from the Zlib bugged library"
+        //
+        // If I have to... let's do it!!!
+        if (crashAll)
           process.exit(1);
       }.bind(this));
     }

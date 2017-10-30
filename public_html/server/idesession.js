@@ -12,6 +12,7 @@ var InDe = InDe || {};
 Node.fs = require("fs");
 Node.path = require("path");
 Node.rimraf = require("rimraf");
+Node.cookie = require("cookie");
 
 // Import classes
 Node.Utils = require("./utils");
@@ -63,6 +64,7 @@ Node.IDESession.msgTypeMap = {
   forwardToChild: "fc",
   terminateChild: "tc",
   sessionError: "seser",
+  redirect: "redirect",
   //
   generalChannel: "gc",
   project: "prj",
@@ -226,6 +228,13 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
     // Session has a master and a valid ctoken was received -> accept this connection
   }
   else {  // No ctoken received
+    // If the SID is invalid
+    if (this.invalidSID(socket)) {
+      this.log("WARN", "Invalid SID", "IDESession.openConnection");
+      socket.emit(Node.IDESession.msgTypeMap.redirect, "http://www.instantdeveloper.com");
+      return;
+    }
+    //
     // If this is a reconnect attempt (only for main socket, not for ctokens)
     if (socket.client.request._query.reconnect) {        // Reconnect attempt
       this.log("DEBUG", "Reconnect attempt", "IDESession.openConnection", {masterSOD: this.masterClientSod});
@@ -334,6 +343,35 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
       // (the client can come back until the MASTER is alive)
       pthis.cTokens.push(ctoken);
   });
+};
+
+
+/**
+ * Protects the SID
+ * Adds a cookie to the given request in order to protect my SID
+ * @param {HTTPResponse} res
+ */
+Node.IDESession.prototype.protectSID = function (res)
+{
+  // Add another HTTP-only cookie that will "protect" the SID/CID cookie
+  var secure = (!this.config.local && this.config.protocol === "https");
+  this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
+  res.cookie(this.id + "_secureSID", this.secureSID, {path: "/", httpOnly: true, secure: secure});
+};
+
+
+/**
+ * Checks if the SID is invalid (i.e. secureSID cookie is not the expected one)
+ * @param {Socket} socket
+ */
+Node.IDESession.prototype.invalidSID = function (socket)
+{
+  var secureID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
+  if (secureID !== this.secureSID) {
+    this.log("WARN", "Secure SID does not match", "IDESession.invalidSID",
+            {sid: this.id, expectedSecureSID: this.secureID, secureSID: secureID});
+    return true;
+  }
 };
 
 
@@ -615,7 +653,7 @@ Node.IDESession.prototype.handleOtherMessages = function (msg)
  */
 Node.IDESession.prototype.startRest = function (req, res)
 {
-  var appid = (req.params ? req.params.appid : undefined);
+  var appid = (req.params ? req.params.appid.replace(/-/g, "/") : undefined);
   //
   // Store the request/response objects so that the app can use them
   // (for instance, the app can answer to a REST request using the .restRes property and the app::sendResponse method)

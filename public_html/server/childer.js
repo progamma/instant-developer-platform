@@ -13,6 +13,7 @@ Node.fs = require("fs");
 
 // Import classes
 Node.Logger = require("./logger");
+Node.Utils = require("./utils");
 
 
 /**
@@ -135,7 +136,7 @@ Node.Childer.prototype.createChild = function (m)
   // Fork the ide process with the OS user uid and group gid
   var params = {uid: m.uid ? parseInt(m.uid) : null, gid: m.gid ? parseInt(m.gid) : null};
   process.env.HOME = m.path + "/files/temp";
-  var child = Node.child.fork(__dirname + "/../ide/child.js", params);
+  var child = Node.child.fork(__dirname + "/../ide/child.js", Object.assign(params, Node.Utils.forkArgs()));
   //
   // Store the child in the map
   this.children[m.id] = child;

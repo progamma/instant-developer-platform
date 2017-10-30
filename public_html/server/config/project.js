@@ -349,6 +349,9 @@ Node.Project.prototype.editProject = function (params, callback)
     session = this.server.createSession(this, {openParams: qry});
   }
   //
+  // Protects SID cookie
+  session.protectSID(params.res);
+  //
   // Redirect to the MAIN page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
   //
@@ -374,6 +377,9 @@ Node.Project.prototype.viewProject = function (params, callback)
   // Pass query string params if any
   var qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
   var session = this.server.createSession(this, {readOnly: true, openParams: qry});
+  //
+  // Protects SID cookie
+  session.protectSID(params.res);
   //
   // Redirect to the page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
@@ -1253,6 +1259,9 @@ Node.Project.prototype.openTutorial = function (params, callback)
   //
   // Create a new session for this project (TUTORIAL mode)
   var session = this.server.createSession(this, {type: "tutorial", recFolder: params.req.query.dir, tutorialMode: mode});
+  //
+  // Protects SID cookie
+  session.protectSID(params.res);
   //
   // Redirect to the page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);

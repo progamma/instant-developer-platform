@@ -12,6 +12,7 @@ Node.child = require("child_process");
 
 // Import Classes
 Node.AppSession = require("./appsession");
+Node.Utils = require("../utils");
 
 /*
  * @Class representing an app worker
@@ -122,7 +123,7 @@ Node.Worker.prototype.createChild = function ()
     });
   }
   else
-    this.child = Node.child.fork(apppath);
+    this.child = Node.child.fork(apppath, Node.Utils.forkArgs());
   //
   // Log child creation
   this.log("DEBUG", "Created app child", "Worker.createChild");

@@ -381,6 +381,74 @@ Node.App.prototype.sendSessions = function (params, callback)
 
 
 /**
+ * Start the app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.start = function (params, callback)
+{
+  // Create a dummy worker so that I can check all app DBs
+  var worker = new Node.Worker(this);
+  //
+  // Store a callback in the worker so that it will be called when check is completed
+  worker.installCallback = function (result) {
+    // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
+    // then I have to kill it directly!)
+    if (worker.child)     // Only if it's still alive
+      worker.child.kill();
+    else
+      result.err = result.err || "Child process is dead";
+    //
+    // If there is an error, stop
+    if (result.err) {
+      this.log("WARN", "Error while starting the app: " + result.err, "App.start");
+      return callback("Error while starting the app: " + result.err);
+    }
+    //
+    // Update app's info
+    this.updating = false;  // If the app was updating, from now on it's not
+    this.stopped = false;   // If the app was stopped, from now on it's not
+    this.version = result.appinfo.version;
+    this.date = result.appinfo.date;
+    //
+    // Save config
+    this.config.saveConfig();
+    //
+    // If needed, start app's server session
+    this.startDefaultServerSession();
+    //
+    // Log the operation
+    this.log("INFO", "Application started", "App.start");
+    //
+    // Done!
+    callback();
+  }.bind(this);
+  //
+  // Create the worker and tell him that the app have to be installed
+  worker.createChild();
+  worker.child.send({type: Node.Worker.msgTypeMap.install});
+};
+
+
+/**
+ * Stop the app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.stop = function (params, callback)
+{
+  // App is stopped -> save config
+  this.stopped = true;
+  this.config.saveConfig();
+  //
+  // Log the operation
+  this.log("INFO", "Application stopped", "App.stop");
+  //
+  callback();
+};
+
+
+/**
  * Terminates the app
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -602,50 +670,18 @@ Node.App.prototype.install = function (params, callback)
                   pthis.log("WARN", "Can't delete temporary folder " + path + ".tmp: " + err, "App.install");
               });
               //
-              // Done: the app have been restored from the cloud. Now I need to start it, run it and wait
-              // for it to terminate the database creation/update
-              // Create a dummy worker
-              // I need this because I want to start the app
-              // I'm starting the app because I need to create/update DBs and check if the app is fine
-              var worker = new Node.Worker(pthis);
-              //
-              // Store a callback in the worker so that it will be called when
-              // app install is completed
-              worker.installCallback = function (result) {
-                // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
-                // then I have to kill it directly!)
-                if (worker.child)     // Only if it's still alive
-                  worker.child.kill();
-                else
-                  result.err = result.err || "Child process is dead";
-                //
+              // Done: the app have been restored from the cloud. Now I need to start it
+              pthis.start(null, function (err) {
                 // If there is an error, stop
-                if (result.err)
-                  return errorFnc("Error while installing the app: " + result.err);
-                //
-                // The app is not updating anymore
-                pthis.updating = false;
-                //
-                // Update app's info
-                pthis.version = result.appinfo.version;
-                pthis.date = result.appinfo.date;
-                //
-                // Save config
-                pthis.config.saveConfig();
-                //
-                // If needed, start app's server session
-                pthis.startDefaultServerSession();
+                if (err)
+                  return errorFnc("Error while installing the app: " + err);
                 //
                 // Log the operation
                 pthis.log("INFO", "Application " + (appExisted ? "updated" : "installed"), "App.install");
                 //
                 // Done!
                 callback();
-              };
-              //
-              // Create the worker and tell him that the app have to be installed
-              worker.createChild();
-              worker.child.send({type: Node.Worker.msgTypeMap.install});
+              });
             });
           });
         });
@@ -1040,13 +1076,10 @@ Node.App.prototype.execCommand = function (params, callback)
       this.sendSessions(params, callback);
       break;
     case "start":
-      this.stopped = false;
-      this.startDefaultServerSession();
-      callback();
+      this.start(params, callback);
       break;
     case "stop":
-      this.stopped = true;
-      callback();
+      this.stop(params, callback);
       break;
     case "terminate":
       this.terminate(params, callback);

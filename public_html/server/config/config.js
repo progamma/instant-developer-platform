@@ -403,9 +403,17 @@ Node.Config.prototype.getHostFromReq = function (req)
   // If I've an alias list, use it
   if (this.alias) {
     var aliases = this.alias.split(",");
-    for (var i = 0; i < aliases.length; i++)
-      if (host === aliases[i])
-        return req.headers.host;    // It's good -> use the given host
+    for (var i = 0; i < aliases.length; i++) {
+      var al = aliases[i];
+      //
+      // If the alias contain the default app, clean it up
+      if (al.indexOf("|") !== -1)
+        al = al.substring(0, al.indexOf("|"));
+      //
+      // If host matches, use the given host
+      if (host === al)
+        return req.headers.host;
+    }
   }
 };
 
@@ -587,17 +595,38 @@ Node.Config.prototype.processRun = function (req, res)
       urlParts.pop();
     //
     var userName, appName;
-    if (urlParts.length === 0 && this.defaultApp) {     // {nothing}
-      // Redirect to default app
-      this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
-              {defaultApp: this.defaultApp, url: req.originalUrl});
-      //
-      // Don't use
-      //     this.getUrl() + "/" + this.defaultApp
-      // because I want to reply using the domain used in the request (that is not always equal to the server url
-      // if DNS or custom certificates defines several domains)
-      res.redirect(this.defaultApp);
-      return;
+    if (urlParts.length === 0) {     // {nothing}
+      // If an HOST was provided, try to see if there is a specific app for this host
+      var defApp;
+      if (req.headers.host && this.alias) {
+        var host = req.headers.host.toLowerCase();
+        if (host.indexOf(":") !== -1)
+          host = host.substring(0, host.indexOf(":"));
+        var aliases = this.alias.split(",");
+        for (var i = 0; i < aliases.length; i++) {
+          var al = aliases[i];
+          if (al.indexOf("|") === -1)
+            continue;   // Skip aliases that have no default app
+          //
+          al = al.split("|");   // 0-HOST, 1-DefaultApp
+          if (al[0] === host)
+            defApp = al[1];
+        }
+        //
+        defApp = defApp || this.defaultApp;   // Use server's default app if not found
+        if (defApp) {
+          // Redirect to default app
+          this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
+                  {defaultApp: defApp, url: req.originalUrl});
+          //
+          // Don't use
+          //     this.getUrl() + "/" + this.defaultApp
+          // because I want to reply using the domain used in the request (that is not always equal to the server url
+          // if DNS or custom certificates defines several domains)
+          res.redirect(defApp);
+          return;
+        }
+      }
     }
     else if (urlParts.length === 1) { // [app] and [app]?sid={SID}
       userName = "manager";
@@ -719,6 +748,9 @@ Node.Config.prototype.processRun = function (req, res)
     var expires = new Date(Date.now() + 86400000);
     res.cookie("sid", sid, {expires: expires, path: "/" + app.name});
     res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
+    //
+    // Protects SID cookie
+    session.protectSID(res, expires);
   }
   //
   // Define app request callback
@@ -1484,7 +1516,14 @@ Node.Config.prototype.configureCert = function (params, callback)
         return callback("Invalid cert format (missing SSLDomain, SSLCert, SSLKey or SSLCABundles)");
       }
       //
+      // If the domain exists -> that's an error
       this.customSSLCerts = this.customSSLCerts || [];
+      for (i = 0; i < this.customSSLCerts.length; i++)
+        if (this.customSSLCerts[i].SSLDomain === cert.SSLDomain) {
+          this.logger.log("WARN", "Cert for domain " + cert.SSLDomain + " exists", "Config.configureCert", cert);
+          return callback("Cert for domain " + cert.SSLDomain + " exists");
+        }
+      //
       cert.SSLCert = certPath + cert.SSLCert;
       cert.SSLKey = certPath + cert.SSLKey;
       for (i = 0; i < cert.SSLCABundles.length; i++)
@@ -1501,7 +1540,27 @@ Node.Config.prototype.configureCert = function (params, callback)
           this.logger.log("DEBUG", "Custom certificate revoked", "Config.configureCert", this.customSSLCerts[i]);
           //
           // Found! Remove the certificate
-          this.customSSLCerts.splice(i, 1);
+          var revokedCert = this.customSSLCerts.splice(i, 1)[0];
+          //
+          // Check if some files have become useless and if that's the case, delete them
+          // To check, compute the list of currently used files
+          var usedFiles = [];
+          for (i = 0; i < this.customSSLCerts.length; i++) {
+            var c = this.customSSLCerts[i];
+            usedFiles.push(c.SSLCert);
+            usedFiles.push(c.SSLKey);
+            for (var j = 0; j < (c.SSLCABundles || []).length; j++)
+              usedFiles.push(c.SSLCABundles[j]);
+          }
+          //
+          // Then check if the revoked certificate files are still used
+          if (usedFiles.indexOf(revokedCert.SSLCert) == -1)
+            filesToRemove.push(revokedCert.SSLCert);
+          if (usedFiles.indexOf(revokedCert.SSLKey) == -1)
+            filesToRemove.push(revokedCert.SSLKey);
+          for (var j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
+            if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) == -1)
+              filesToRemove.push(revokedCert.SSLCABundles[j]);
           //
           // If this was the last one, remove the custom SSL array
           if (this.customSSLCerts.length === 0)

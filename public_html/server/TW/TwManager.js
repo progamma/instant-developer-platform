@@ -953,7 +953,7 @@ Node.TwManager.prototype.getBranchList = function (PR)
     if (!PR && bra.type !== Node.Branch.PR)
       list.push({name: bra.name, owner: bra.owner});
     else if (PR && bra.type === Node.Branch.PR)
-      list.push({id: bra.id, name: bra.name, message: bra.message, date: bra.date});
+      list.push({id: bra.id, prid: bra.uid, name: bra.name, message: bra.message, date: bra.date});
   }
   //
   return list;

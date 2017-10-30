@@ -1362,6 +1362,7 @@ Node.User.prototype.addCloudConnector = function (socket, data)
   connector.name = data.name;
   connector.socket = socket;
   connector.dmlist = data.dmlist;
+  connector.fslist = data.fslist;
   connector.callbacks = [];
   //
   // Add the cloudConnector to the owner's list
@@ -1425,20 +1426,29 @@ Node.User.prototype.getUiCloudConnectorsList = function ()
 
 
 /*
- * Get a cloudConnector given its name
- * @param {string} ccName- name of cloud connector
- * @param {string} dmName - name of datamodel
- * @param {string} dmKey - key of datamodel
+ * Get a cloudConnector given info in msg
+ * @param {Object} msg
  * @returns {Object}
  */
-Node.User.prototype.getCloudConnectorByName = function (ccName, dmName, dmKey)
+Node.User.prototype.getCloudConnector = function (msg)
 {
   for (var i = 0; i < this.cloudConnectors.length; i++) {
     var cc = this.cloudConnectors[i];
-    if (cc.name === ccName) {
-      for (var j = 0; j < cc.dmlist.length; j++) {
-        var dm = cc.dmlist[j];
-        if (dm.name === dmName && dm.key === dmKey)
+    if (cc.name === msg.conn) {
+      var list = [];
+      var key = msg.key;
+      var name;
+      if (msg.data.dm) {
+        list = cc.dmlist;
+        name = msg.data.dm;
+      }
+      else if (msg.data.fs) {
+        list = cc.fslist;
+        name = msg.data.fs;
+      }
+      for (var j = 0; j < list.length; j++) {
+        var obj = list[j];
+        if (obj.name === name && obj.key === key)
           return cc;
       }
     }
@@ -1460,15 +1470,29 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       break;
 
     case "remoteCmd":
-      var conn = this.getCloudConnectorByName(msg.conn, msg.data.dm, msg.key);
+      var conn = this.getCloudConnector(msg);
       //
       // Connector not found -> invoke callback with error
       if (!conn) {
-        if (msg.data.cbid)
-          sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
-            cnt: {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, dmid: msg.data.dmid,
-              data: {error: "Remote connector not found"}}});
+        if (msg.data.cbid) {
+          var m = {};
+          m.type = Node.User.msgTypeMap.cloudConnectorMsg;
+          m.cnt = {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, data: {error: "Remote connector not found"}};
+          if (msg.data.fs)
+            m.cnt.fs = true;
+          //
+          sender.sendToChild(m);
+        }
         return;
+      }
+      //
+      // Check if an exadecimal string need to be converted to ArrayBuffer
+      if (msg.data && msg.data.args) {
+        for (var i = 0; i < msg.data.args.length; i++) {
+          var arg = msg.data.args[i];
+          if (arg && typeof arg === "object" && arg._t === "buffer" && arg.data)
+            msg.data.args[i] = Node.Utils.base64ToBuffer(arg.data);
+        }
       }
       //
       // Send message to connector
@@ -1486,6 +1510,10 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           var recipient = cc.callbacks[msg.cbid];
           if (!recipient)
             return false;
+          //
+          // Check if an ArrayBuffer need to be converted to exadecimal string
+          if (msg.data.result instanceof Buffer)
+            msg.data.result = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result)};
           //
           recipient.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: msg});
           delete cc.callbacks[msg.cbid];

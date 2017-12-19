@@ -255,7 +255,7 @@ Node.TwManager.prototype.attachListeners = function ()
     pthis.sendDiffBranch(msg.branch);
   });
   this.doc.onMessage(Node.TwManager.msgTypeMap.requestCommitHistory, this, function (msg) {
-    pthis.sendCommitHistory(msg.id);
+    pthis.sendCommitHistory(msg);
   });
   this.doc.onMessage(Node.TwManager.msgTypeMap.requestCommitHistoryItems, this, function (msg) {
     pthis.sendCommitHistoryItems(msg.commitid);
@@ -415,6 +415,11 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
       // This transaction must be undoed... thus I need to invert each transitem
       for (k = 0; k < tr.transItems.length; k++) {
         ti = tr.transItems[k];
+        //
+        // Relink the item
+        tr.relinkItem(ti, "undo");
+        //
+        // Invert the item
         InDe.Transaction.invertTransItem(ti);
         //
         // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
@@ -460,6 +465,11 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
         // This transaction must be undoed... thus I need to invert each transitem
         for (k = 0; k < tr.transItems.length; k++) {
           ti = tr.transItems[k];
+          //
+          // Relink the item
+          tr.relinkItem(ti, "undo");
+          //
+          // Invert the item
           InDe.Transaction.invertTransItem(ti);
           //
           // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
@@ -498,13 +508,10 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
 
 /**
  * Sends to the client all the commits that contain changes relative to the given object
- * @param {String} objid - id of the object the client is interested to
+ * @param {object} filter - options to be used for commits loading
  */
-Node.TwManager.prototype.sendCommitHistory = function (objid)
+Node.TwManager.prototype.sendCommitHistory = function (filter)
 {
-  var filter = {objid: objid, days: 30};
-  var i;
-  //
   var history = [];
   //
   // Save the result of this method into a local variable so that when the client will ask for
@@ -519,6 +526,34 @@ Node.TwManager.prototype.sendCommitHistory = function (objid)
     // Report error to client
     this.doc.sendMessage({type: Node.TwManager.msgTypeMap.commitHistory, cnt: {err: err}});
   }.bind(this);
+  //
+  // Retrieve all commits and send reply
+  var sendCommits = function () {
+    // Last, retrieve all the commits that have to do with the given object (last 30 days)
+    this.actualBranch.getCommitsTransItemsByID(filter, function (commits, err) {
+      if (err)
+        return errorFnc(err);
+      //
+      // Add all commits to history array
+      // (don't add commits[i] directly because it contains also all trans items)
+      for (var i = 0; i < commits.length; i++) {
+        var com = commits[i];
+        history.push({id: com.id, message: com.message, date: com.date, author: com.author});
+        //
+        this.commitHistory[com.id] = com;
+      }
+      //
+      // Clean up preview
+      (new InDe.Transaction(this.doc.transManager)).cleanupPreview();
+      //
+      // Send the reply to the client
+      this.doc.sendMessage({type: Node.TwManager.msgTypeMap.commitHistory, cnt: {history: history, moreItems: commits.moreItems}});
+    }.bind(this));
+  }.bind(this);
+  //
+  // If the callee asked for a specific "page" of commits, just send that page
+  if (filter.start !== undefined)
+    return sendCommits();
   //
   // First if there are changes inside the working transactions (not saved) that have something to do
   // with the given object, add an item to the history for that
@@ -547,26 +582,8 @@ Node.TwManager.prototype.sendCommitHistory = function (objid)
         this.commitHistory[fakeSavedCom.id] = {transItems: items};
       }
       //
-      // Last, retrieve all the commits that have to do with the given object (last 30 days)
-      this.actualBranch.getCommitsTransItemsByID(filter, function (commits, err) {
-        if (err)
-          return errorFnc(err);
-        //
-        // Add all commits to history array
-        // (don't add commits[i] directly because it contains also all trans items)
-        for (i = 0; i < commits.length; i++) {
-          var com = commits[i];
-          history.push({id: com.id, message: com.message, date: com.date, author: com.author});
-          //
-          this.commitHistory[com.id] = com;
-        }
-        //
-        // Clean up preview
-        (new InDe.Transaction(this.doc.transManager)).cleanupPreview();
-        //
-        // Send the reply to the client
-        this.doc.sendMessage({type: Node.TwManager.msgTypeMap.commitHistory, cnt: {history: history}});
-      }.bind(this));
+      // Send commits
+      sendCommits();
     }.bind(this));
   }.bind(this));
 };

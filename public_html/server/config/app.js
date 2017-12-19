@@ -82,7 +82,8 @@ Node.App.prototype.log = function (level, message, sender, data)
 Node.App.prototype.save = function ()
 {
   var r = {cl: "Node.App", name: this.name, version: this.version, date: this.date,
-    stopped: this.stopped, startSS: this.startSS};
+    stopped: this.stopped, startSS: this.startSS,
+    maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers};
   return r;
 };
 
@@ -98,6 +99,12 @@ Node.App.prototype.load = function (v)
   this.date = v.date;
   this.stopped = v.stopped;
   this.startSS = v.startSS;
+  if (v.maxAppUsers)
+    this.maxAppUsers = v.maxAppUsers;
+  if (v.minAppUsersPerWorker)
+    this.minAppUsersPerWorker = v.minAppUsersPerWorker;
+  if (v.maxAppWorkers)
+    this.maxAppWorkers = v.maxAppWorkers;
 };
 
 
@@ -108,6 +115,15 @@ Node.App.prototype.load = function (v)
 Node.App.prototype.setParent = function (p)
 {
   this.parent = p;
+  //
+  // Load parameters file
+  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
+  Node.Utils.loadObject(filename, function (res, err) {
+    if (err)
+      this.log("WARN", "Error reading app parameters file: " + err, "App.setParent");
+    else
+      this.params = res;
+  }.bind(this));
 };
 
 
@@ -132,12 +148,15 @@ Node.App.prototype.createNewSession = function ()
   //   "maxAppUsers": indicates how many users this app can handle
   //   "minAppUsersPerWorker": indicates the minimum number of users that a worker can handle before the system needs a new worker
   //   "maxAppWorkers": maxmimum number of workers
+  var maxAppUsers = this.maxAppUsers || this.config.maxAppUsers;
+  var minAppUsersPerWorker = this.minAppUsersPerWorker || this.config.minAppUsersPerWorker;
+  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
   //
   // First check if this app can handle this new user
   var i, nusers = 0;
   for (i = 0; i < this.workers.length; i++)
     nusers += this.workers[i].getLoad();
-  if (nusers >= this.config.maxAppUsers)
+  if (nusers >= maxAppUsers)
     return;   // Too many users
   //
   // This app can handle this new user. Choose the worker that will handle the new user
@@ -156,7 +175,7 @@ Node.App.prototype.createNewSession = function ()
   }
   //
   // If I've found a worker but it has already too many users and I can create new workers
-  if (worker && worker.getLoad() >= this.config.minAppUsersPerWorker && this.workers.length < this.config.maxAppWorkers)
+  if (worker && worker.getLoad() >= minAppUsersPerWorker && this.workers.length < maxAppWorkers)
     worker = undefined;   // Create a new worker
   //
   // If I haven't found one, create a new worker
@@ -202,6 +221,11 @@ Node.App.prototype.startServerSession = function (name, request)
             "App.startServerSession", {name: name, request: request});
   //
   var ss = this.createNewSession();
+  //
+  // If a session can't be created -> do nothing
+  if (!ss)
+    return this.log("WARN", "Session can't be created: too many users", "App.startServerSession", {name: name});
+  //
   ss.name = name;
   //
   // If I haven't done it yet create the physical process for the worker
@@ -286,7 +310,7 @@ Node.App.prototype.sendStatus = function (params, callback)
 {
   var pthis = this;
   //
-  var stat = {version: this.version, date: this.date};
+  var stat = {version: this.version, date: this.date, params: this.params};
   if (this.stopped)
     stat.status = "stopped";
   else if (this.updating)
@@ -737,6 +761,48 @@ Node.App.prototype.uninstall = function (params, callback)
 
 
 /**
+ * Handle change app parameter message
+ * @param {Object} msg
+ * @param {boolean} skipSave - if true the params.json file will not be saved
+ */
+Node.App.prototype.handleChangedAppParamMsg = function (msg, skipSave)
+{
+  // Get the new parameter
+  this.params = this.params || {};
+  if (msg.new !== undefined)
+    this.params[msg.par] = msg.new;
+  else
+    delete this.params[msg.par];
+  //
+  // Tell it to every session in every worker
+  for (var i = 0; i < this.workers.length; i++) {
+    var wrk = this.workers[i];
+    //
+    // Skip "dead" workers (i.e. workers with no child process)
+    if (!wrk.child)
+      continue;
+    //
+    wrk.child.send({type: Node.Worker.msgTypeMap.changedAppParam, cnt: msg});
+  }
+  //
+  // If params is empty, forget about it
+  if (Object.keys(this.params).length === 0)
+    delete this.params;
+  //
+  // If I don't need to save, I've done my job
+  if (skipSave)
+    return;
+  //
+  // Save parameter file
+  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
+  Node.Utils.saveObject(filename, this.params, function (err) {
+    if (err)
+      this.log("ERROR", "Can't update app parameters: " + err, "App.handleChangedAppParamMsg", msg);
+  }.bind(this));
+};
+
+
+/**
  * Backup the app
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -892,6 +958,7 @@ Node.App.prototype.handleFileSystem = function (params, callback)
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
  */
+/*jshint maxcomplexity:40 */
 Node.App.prototype.configure = function (params, callback)
 {
   // Compute the array of properties provided via url
@@ -936,6 +1003,79 @@ Node.App.prototype.configure = function (params, callback)
     else if (query.startSS === "true" && !this.startSS) {
       this.startSS = true;
       this.startDefaultServerSession();
+    }
+  }
+  if (query.maxAppUsers !== undefined)
+    this.maxAppUsers = (query.maxAppUsers ? parseInt(query.maxAppUsers, 10) : undefined);
+  if (query.minAppUsersPerWorker !== undefined)
+    this.minAppUsersPerWorker = (query.minAppUsersPerWorker ? parseInt(query.minAppUsersPerWorker, 10) : undefined);
+  if (query.maxAppWorkers !== undefined)
+    this.maxAppWorkers = (query.maxAppWorkers ? parseInt(query.maxAppWorkers, 10) : undefined);
+  if (query.params !== undefined) {
+    var i, newParams = {};
+    if (query.params) {
+      // Callee will send every time all parameters as an array of NAME=VALUE couples
+      try {
+        var paramsArray = JSON.parse(query.params);
+        //
+        // Change from
+        //    ["par1=valuePar1", "par2=valuePar2", ...]
+        // to
+        //    {
+        //     "par1": "valuePar1",
+        //     "par2": "valuePar2",
+        //    }
+        for (i = 0; i < paramsArray.length; i++) {
+          var par = paramsArray[i].split("=");
+          newParams[par[0]] = par[1];
+        }
+      }
+      catch (ex) {
+        this.log("ERROR", "Can't update app parameters: " + ex.message, "App.configure", {newParams: query.params});
+        return callback("Can't update app parameters: " + ex.message);
+      }
+    }
+    else  // No parameters
+      newParams = {};
+    //
+    // Create a new params object if needed
+    this.params = this.params || {};
+    //
+    // Now check new parameters
+    var saveParamFile = false;
+    var parr = Object.keys(Object.assign({}, newParams, this.params));
+    for (i = 0; i < parr.length; i++) {
+      var parName = parr[i];
+      if (newParams[parName] === this.params[parName])
+        continue;   // Value hasn't changed
+      //
+      // Value has changed -> tell every session that a parameter has changed
+      this.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : newParams[parName]}, true);   // SkipSave
+      //
+      // Params file should be saved at the end
+      saveParamFile = true;
+    }
+    //
+    // Update and save the new param object
+    if (saveParamFile) {
+      var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
+      Node.Utils.saveObject(filename, this.params, function (err) {
+        if (err) {
+          this.log("ERROR", "Can't update app parameters: " + err, "App.configure", {newParams: query.params});
+          return callback("Can't update app parameters: " + err);
+        }
+        //
+        // Save the new configuration
+        this.config.saveConfig();
+        //
+        // Log the operation
+        this.log("DEBUG", "Updated app configuration", "App.configure", {config: query});
+        //
+        callback();
+      }.bind(this));
+      //
+      // Wait for param file to be written
+      return;
     }
   }
   //

@@ -450,15 +450,15 @@ Node.Utils.base64ToBuffer = function (base64)
       bufferLength--;
   }
   //
-  var p = 0;
+  var p = 0, i;
   var len = base64.length;
   var arraybuffer = new ArrayBuffer(bufferLength);
   var bytes = new Uint8Array(arraybuffer);
   var lookup = new Uint8Array(256);
   var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-  for (var i = 0; i < chars.length; i++)
+  for (i = 0; i < chars.length; i++)
     lookup[chars.charCodeAt(i)] = i;
-  for (var i = 0; i < len; i += 4) {
+  for (i = 0; i < len; i += 4) {
     var encoded1 = lookup[base64.charCodeAt(i)];
     var encoded2 = lookup[base64.charCodeAt(i + 1)];
     var encoded3 = lookup[base64.charCodeAt(i + 2)];
@@ -493,6 +493,58 @@ Node.Utils.forkArgs = function ()
     });
   };
   return {execArgv: execArgv()};
+};
+
+
+/**
+ * Save an object into a JSON file
+ * @param {string} filename - name to be used
+ * @param {Object} obj - object to be saved
+ * @param {function} callback (err)
+ */
+Node.Utils.saveObject = function (filename, obj, callback)
+{
+  // If there is no object, remove JSON file and return to callee
+  if (!obj)
+    return Node.rimraf(filename, callback);
+  //
+  // There is an object -> I need to write the file
+  var wsFile = Node.fs.createWriteStream(filename);
+  wsFile.on("finish", callback);
+  wsFile.on("error", callback);
+  wsFile.write(JSON.stringify(obj));
+  wsFile.end();
+};
+
+
+/**
+ * Load an object from a JSON file
+ * @param {string} filename - name to be used
+ * @param {Function} callback - function(res, err)
+ */
+Node.Utils.loadObject = function (filename, callback)
+{
+  // Check if the file exists
+  Node.fs.exists(filename, function (exists) {
+    // If does not exist -> return null object
+    if (!exists)
+      return callback();
+    //
+    // File exists -> read it
+    var rsFile = Node.fs.createReadStream(filename);
+    rsFile.read();
+    //
+    var txt = "";
+    rsFile.on("data", function (chunk) {
+      txt += chunk;
+    });
+    rsFile.on("end", function () {
+      callback(txt ? JSON.parse(txt) : {});
+    });
+    rsFile.on("error", function (err) {
+      callback(null, err);
+    });
+  });
 };
 
 

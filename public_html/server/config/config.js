@@ -192,8 +192,29 @@ Node.Config.prototype.saveProperties = function ()
   r.url = this.getUrl();
   r.local = this.local;
   r.version = this.server.version;
+  r.remoteDBurls = this.getRemoteDBUrls();
   //
   return r;
+};
+
+
+/**
+ * Return a map of all remote DB urls (name -> remoteUrl)
+ */
+Node.Config.prototype.getRemoteDBUrls = function ()
+{
+  var remoteDBurls;
+  for (var i = 0; i < (this.users || []).length; i++)
+    for (var j = 0; j < (this.users[i].databases || []).length; j++) {
+      var db = this.users[i].databases[j];
+      if (!db.remoteUrl)
+        continue;
+      //
+      remoteDBurls = remoteDBurls || {};
+      remoteDBurls[db.name] = db.remoteUrl;
+    }
+  //
+  return remoteDBurls;
 };
 
 
@@ -603,7 +624,7 @@ Node.Config.prototype.processRun = function (req, res)
         if (host.indexOf(":") !== -1)
           host = host.substring(0, host.indexOf(":"));
         var aliases = this.alias.split(",");
-        for (var i = 0; i < aliases.length; i++) {
+        for (i = 0; i < aliases.length; i++) {
           var al = aliases[i];
           if (al.indexOf("|") === -1)
             continue;   // Skip aliases that have no default app
@@ -729,7 +750,7 @@ Node.Config.prototype.processRun = function (req, res)
       //
       // If a session can't be created -> do nothing
       if (!session) {
-        this.logger.log("WARN", "Sesion can't be created: too many users", "Config.startApp", {user: app.user.userName, app: app.name});
+        this.logger.log("WARN", "Session can't be created: too many users", "Config.startApp", {user: app.user.userName, app: app.name});
         return res.status(503).send("Too many users");
       }
       //
@@ -1420,7 +1441,7 @@ Node.Config.prototype.update = function (params, callback)
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
  */
-/*jshint maxcomplexity:35 */
+/*jshint maxcomplexity:45 */
 Node.Config.prototype.configureCert = function (params, callback)
 {
   /*
@@ -1467,7 +1488,7 @@ Node.Config.prototype.configureCert = function (params, callback)
     }
   }
   //
-  var i, filesToRemove = [], saveConfig = false;
+  var i, j, filesToRemove = [], saveConfig = false;
   switch (command) {
     case "config":
       // If a new SSLCert has been provided
@@ -1549,17 +1570,17 @@ Node.Config.prototype.configureCert = function (params, callback)
             var c = this.customSSLCerts[i];
             usedFiles.push(c.SSLCert);
             usedFiles.push(c.SSLKey);
-            for (var j = 0; j < (c.SSLCABundles || []).length; j++)
+            for (j = 0; j < (c.SSLCABundles || []).length; j++)
               usedFiles.push(c.SSLCABundles[j]);
           }
           //
           // Then check if the revoked certificate files are still used
-          if (usedFiles.indexOf(revokedCert.SSLCert) == -1)
+          if (usedFiles.indexOf(revokedCert.SSLCert) === -1)
             filesToRemove.push(revokedCert.SSLCert);
-          if (usedFiles.indexOf(revokedCert.SSLKey) == -1)
+          if (usedFiles.indexOf(revokedCert.SSLKey) === -1)
             filesToRemove.push(revokedCert.SSLKey);
-          for (var j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
-            if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) == -1)
+          for (j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
+            if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
               filesToRemove.push(revokedCert.SSLCABundles[j]);
           //
           // If this was the last one, remove the custom SSL array

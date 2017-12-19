@@ -46,7 +46,8 @@ Node.Worker.msgTypeMap = {
   createDBresult: "cdbres",
   serverSession: "serverSession",
   testStartResult: "testres",
-  cTokenOp: "ctop"
+  cTokenOp: "ctop",
+  changedAppParam: "chpar"
 };
 
 
@@ -131,12 +132,13 @@ Node.Worker.prototype.createChild = function ()
   // Initialize app child
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
-    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true});
+    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, params: this.app.params});
   //
   // Tell the app how to connect with the database
   var constring = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort;
   this.child.send({type: Node.Worker.msgTypeMap.connectionDB,
-    username: (this.user.userName === "manager" ? undefined : this.user.userName), constring: constring});
+    username: (this.user.userName === "manager" ? undefined : this.user.userName), constring: constring,
+    remoteDBurls: this.config.getRemoteDBUrls()});
   //
   // Listen for messages
   this.child.on("message", function (msg) {
@@ -301,6 +303,10 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
 
     case Node.Worker.msgTypeMap.serverSession:
       this.handleServerSessionMsg(msg);
+      break;
+
+    case Node.Worker.msgTypeMap.changedAppParam:
+      this.app.handleChangedAppParamMsg(msg.cnt);
       break;
 
     default:

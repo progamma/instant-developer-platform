@@ -75,7 +75,7 @@ Node.Database.prototype.log = function (level, message, sender, data)
  */
 Node.Database.prototype.save = function ()
 {
-  var r = {cl: "Node.Database", name: this.name};
+  var r = {cl: "Node.Database", name: this.name, remoteUrl: this.remoteUrl};
   return r;
 };
 
@@ -87,6 +87,8 @@ Node.Database.prototype.save = function ()
 Node.Database.prototype.load = function (v)
 {
   this.name = v.name;
+  if (v.remoteUrl)
+    this.remoteUrl = v.remoteUrl;
 };
 
 
@@ -292,11 +294,11 @@ Node.Database.prototype.getURL = function ()
  */
 Node.Database.prototype.sendStatus = function (params, callback)
 {
-  var pthis = this;
+  var status = {name: this.name, remoteUrl: this.remoteUrl};
   //
   // If local -> can't compute DB size
   if (this.config.local)
-    return callback({msg: "OK"});
+    return callback({msg: JSON.stringify(status)});
   //
   // Get the size of the db
   var sqlcmd;
@@ -306,13 +308,13 @@ Node.Database.prototype.sendStatus = function (params, callback)
     sqlcmd = "select pg_database_size('" + this.user.userName + "-" + this.name + "')";
   Node.child.execFile("/usr/local/bin/psql", ["--dbname=" + this.getURL(), "-t", "-c", sqlcmd], function (err, stdout, stderr) {   // jshint ignore:line
     if (err) {
-      pthis.log("ERROR", "Error getting the size of user's DB: " + err, "Database.sendStatus", {sqlcmd: sqlcmd});
+      this.log("ERROR", "Error getting the size of user's DB: " + err, "Database.sendStatus", {sqlcmd: sqlcmd});
       return callback("Error getting the size of user's DB folder: " + err);
     }
     //
-    var status = {diskSize: stdout.trim()};
+    status.diskSize = stdout.trim();
     callback({msg: JSON.stringify(status)});
-  });
+  }.bind(this));
 };
 
 
@@ -428,7 +430,7 @@ Node.Database.prototype.query = function (params, callback)
   }
   //
   // Create a new client to communicate with the db
-  var conString = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
+  var conString = this.remoteUrl || "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
           this.config.dbAddress + ":" + this.config.dbPort + "/" + dbName;
   var client = new Node.pg.Client(conString);
   //
@@ -454,6 +456,34 @@ Node.Database.prototype.query = function (params, callback)
       callback({msg: JSON.stringify(result)});
     });
   });
+};
+
+
+/**
+ * Change the app configuration via web commands
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Database.prototype.configure = function (params, callback)
+{
+  // Compute the array of properties provided via url
+  var query = params.req.query;
+  var queryProps = Object.getOwnPropertyNames(query);
+  if (queryProps.length === 0) {
+    this.log("WARN", "No property specified", "Database.configure");
+    return callback("No property specified");
+  }
+  //
+  if (query.remoteUrl !== undefined)
+    this.remoteUrl = query.remoteUrl;
+  //
+  // Save the new configuration
+  this.config.saveConfig();
+  //
+  // Log the operation
+  this.log("DEBUG", "Updated database configuration", "Database.configure", {config: query});
+  //
+  callback();
 };
 
 
@@ -731,6 +761,9 @@ Node.Database.prototype.execCommand = function (params, callback)
       break;
     case "query":
       this.query(params, callback);
+      break;
+    case "config":
+      this.configure(params, callback);
       break;
     case "backup":
       this.backup(params, callback);

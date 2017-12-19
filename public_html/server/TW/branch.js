@@ -211,46 +211,66 @@ Node.Branch.prototype.deleteBranchFolder = function (callback)
 /**
  * Gets all commits that have to do with the given object
  * (each commit contains
- * @param {object} filter - filter to use {objid, days}
+ * @param {object} filter - filter to use {objid, start/end, commitid}
  * @param {function} callback - function (commits, err)
  */
 Node.Branch.prototype.getCommitsTransItemsByID = function (filter, callback)
 {
   var twManager = this.parent;
   //
-  // Calculate the dateLimit
-  var dateLimit = new Date();
-  dateLimit.setDate(dateLimit.getDate() - filter.days);
-  //
-  // Get the list of all commits in the last N-days
-  var commitsLastNdays = this.loadAllCommits();
-  for (var i = 0; i < commitsLastNdays.length; i++) {
-    var com = commitsLastNdays[i];
-    //
-    // If it's too old, remove it from the list
-    var comDate = new Date(com.date);
-    if (comDate < dateLimit)
-      commitsLastNdays.splice(i--, 1);
-  }
-  //
   // Return an array af all commits that contains transactions with trans items that have something
   // to do with the given object
   var result = [];
   //
+  // Compute the requested commits list
+  var allCommits = this.loadAllCommits();
+  var commitsToSend;
+  //
+  // If a commit ID was provided, try to search for that commit
+  if (filter.commitid) {
+    for (var i = 0; i < allCommits.length; i++) {
+      var com = allCommits[i];
+      if (com.id === filter.commitid) {
+        // Remove all commits after the current one
+        commitsToSend = allCommits.slice(i);
+        break;
+      }
+    }
+  }
+  //
+  // If not found (or no commitID was provided) use the requested limits
+  if (!commitsToSend) {
+    // Here I need to use the filter the client gave me. I need to account for the fact that the client counts backwards
+    // Suppose I have 25 commits (from 0 to 24). That is what should happen:
+    // - the client asks for the START=undefined   ->   I have to send the last 10 commits (i.e. commits 15 to 24)
+    // - the client asks for the START=10          ->   I have to send other 10 commits (i.e. commits 5 to 14)
+    // - the client asks for the START=20          ->   I have to send the last 5 commits (i.e. commits 0 to 4)
+    // So, the START filter option indicates (on my side) the last commit to send
+    var lastCommitIdx = (allCommits.length - 1) - (filter.start || 0);
+    var firstCommitIdx = Math.max(lastCommitIdx - 10 + 1, 0);      // pageSize = 10
+    //
+    // Compute the requested commits block to be sent
+    commitsToSend = allCommits.slice(firstCommitIdx, lastCommitIdx + 1);
+    //
+    // Append "more-items" if there are more items to show than the ones sent (i.e. if I've not sent the last commit)
+    if (firstCommitIdx != 0)
+      result.moreItems = true;
+  }
+  //
   // Read each commit and check if it contains changes relative to the given object (do it backwards)
   var readLastCommit = function () {
     // If there are no more commits
-    if (commitsLastNdays.length === 0)
+    if (commitsToSend.length === 0)
       return callback(result);      // Return to callee
     //
     // Read last commit in the list
-    var commit = commitsLastNdays.pop();
+    var commit = commitsToSend.pop();
     var commitPath = twManager.path + "/branches/" + commit.parent.name + "/" + commit.id;
     //
     // Load the commit and check if it contains interesting data
     twManager.readJSONFile(commitPath, function (trlist, err) {
       if (err) {
-        twManager.logger.log("ERROR", "Error reading the file " + commitPath + ": " + err, "Branch.getCommitHistoryByID");
+        twManager.logger.log("ERROR", "Error reading the file " + commitPath + ": " + err, "Branch.getCommitsTransItemsByID");
         return callback(null, err);
       }
       //

@@ -1363,6 +1363,7 @@ Node.User.prototype.addCloudConnector = function (socket, data)
   connector.socket = socket;
   connector.dmlist = data.dmlist;
   connector.fslist = data.fslist;
+  connector.pluginslist = data.pluginslist;
   connector.callbacks = [];
   //
   // Add the cloudConnector to the owner's list
@@ -1446,6 +1447,11 @@ Node.User.prototype.getCloudConnector = function (msg)
         list = cc.fslist;
         name = msg.data.fs;
       }
+      else if (msg.data.plugin) {
+        list = cc.pluginslist;
+        name = msg.data.plugin;
+      }
+      //
       for (var j = 0; j < list.length; j++) {
         var obj = list[j];
         if (obj.name === name && obj.key === key)
@@ -1463,6 +1469,7 @@ Node.User.prototype.getCloudConnector = function (msg)
  */
 Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
 {
+  var i;
   switch (msg.type) {
     case "connectorListRequest":
       sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
@@ -1480,6 +1487,8 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           m.cnt = {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, data: {error: "Remote connector not found"}};
           if (msg.data.fs)
             m.cnt.fs = true;
+          else if (msg.data.plugin)
+            m.cnt.plugin = true;
           //
           sender.sendToChild(m);
         }
@@ -1488,7 +1497,7 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       //
       // Check if an exadecimal string need to be converted to ArrayBuffer
       if (msg.data && msg.data.args) {
-        for (var i = 0; i < msg.data.args.length; i++) {
+        for (i = 0; i < msg.data.args.length; i++) {
           var arg = msg.data.args[i];
           if (arg && typeof arg === "object" && arg._t === "buffer" && arg.data)
             msg.data.args[i] = Node.Utils.base64ToBuffer(arg.data);
@@ -1504,7 +1513,7 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       break;
 
     case "response":
-      for (var i = 0; i < this.cloudConnectors.length; i++) {
+      for (i = 0; i < this.cloudConnectors.length; i++) {
         var cc = this.cloudConnectors[i];
         if (cc.socket === sender) {
           var recipient = cc.callbacks[msg.cbid];

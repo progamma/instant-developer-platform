@@ -317,6 +317,8 @@ Node.Server.prototype.start = function ()
       // http://localhost/Test/server/app.js  ->  [ '', 'test', 'server', 'app.js' ]
       if (pathParts.length > 2 && pathParts[2] === "server")   // Part 0 is app name
         return res.sendStatus(404);
+      else if (pathParts.length > 4 && pathParts.slice(2, 5).join("/") === "server/files/private")   // Part 0 is app name
+        return res.sendStatus(404);
       //
       next();
     });
@@ -707,6 +709,13 @@ Node.Server.prototype.handleDeviceMessage = function (socket, msg)
  */
 Node.Server.prototype.handleSyncMessage = function (socket, msg)
 {
+  // If sync is not enabled, tell it to callee
+  if ((this.config.services || "").split(",").indexOf("sync") === -1) {
+    // TODO: Decidere come fare... (issue #2908) 2 possibilità
+    // - qui calcolo se il messaggio è SYNC-SYNC (non RemoteDO e non Cmd) e decido se rimbalzarlo
+    // - appendo al messaggio msg l'informazione "servizioSyncNonAttivo" poi ci pensa sync.js a bloccare se necessario
+  }
+  //
   // Search the session I've to route this message to
   var session = this.appSessions[msg.sid.sidsrv];
   if (!session) {
@@ -753,6 +762,12 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
       //
       // Ask the app to create a new AppSession
       session = app.createNewSession();
+      //
+      // If a session can't be created -> do nothing
+      if (!session) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Session can't be created: too many users", "Server.handleSyncMessage", msg);
+      }
       //
       // If needed ask the worker to create the physical child process
       if (!session.worker.child)
@@ -807,6 +822,10 @@ Node.Server.prototype.handleCloudConnectorMessage = function (socket, msg)
     //
     socket.emit("indeError", {type: "auth", msg: errmsg});
   }.bind(this);
+  //
+  // If cloud connector is not enabled, tell it to callee
+  if ((this.config.services || "").split(",").indexOf("cc") === -1)
+    return sendErrorToClient("CloudConnector service not enabled");
   //
   // Create list of users recipient from this connector
   var users = [];

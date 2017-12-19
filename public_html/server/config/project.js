@@ -1194,6 +1194,13 @@ Node.Project.prototype.uploadRecFile = function (params, callback)
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/tutorials/";
   var filePath = path + params.req.query.dir;
   //
+  // Get the session that will receive this rec file
+  var session = this.server.getOpenSession(this);
+  if (!session) {
+    this.log("WARN", "No session is waiting for this tutorial rec file", "Project.uploadRecFile");
+    return callback("No session is waiting for this tutorial rec file");
+  }
+  //
   // Listen to request containing files
   var form = new Node.multiparty.Form();
   form.on("part", function (part) {
@@ -1280,6 +1287,13 @@ Node.Project.prototype.updateTutProject = function (params, callback)
 {
   var pthis = this;
   //
+  // Get the session that will receive this rec file
+  var session = this.server.getOpenSession(this);
+  if (!session) {
+    this.log("WARN", "No session is waiting for this tutorial project", "Project.updateTutProject");
+    return callback("No session is waiting for this tutorial project");
+  }
+  //
   // Read project.json
   var prjPath = this.config.directory + "/" + this.user.userName + "/" + this.name + "/project.json";
   Node.fs.readFile(prjPath, {encoding: "utf8"}, function (err, data) {
@@ -1350,6 +1364,12 @@ Node.Project.prototype.execCommand = function (params, callback)
     case "playTutorial":
       this.openTutorial(params, callback);
       break;
+    case "uploadRecFile":
+      this.uploadRecFile(params, callback);
+      break;
+    case "updateTutProject":
+      this.updateTutProject(params, callback);
+      break;
 
     default:
       // If the authorization key is enabled and the given one does not match -> error
@@ -1390,12 +1410,6 @@ Node.Project.prototype.execCommand = function (params, callback)
           break;
         case "filesystem":
           this.handleFileSystem(params, callback);
-          break;
-        case "uploadRecFile":
-          this.uploadRecFile(params, callback);
-          break;
-        case "updateTutProject":
-          this.updateTutProject(params, callback);
           break;
         case "editTutorial":
           this.openTutorial(params, callback);

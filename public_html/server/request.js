@@ -653,5 +653,40 @@ Node.Request.prototype.isUserOnline = function (address, callback)
 };
 
 
+/*
+ * Ask the console to execute a query on a remote server
+ * @param {Object} options
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.executeRemoteQuery = function (options, callback)
+{
+  // Create a form to be sent via post
+  var form = new Node.FormData();
+  form.append("server", options.server);
+  form.append("database", options.database);
+  form.append("sql", options.sql);
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=query&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.executeRemoteQuery",
+              {err: err, code: code, data: data, options: options});
+      callback(undefined, err || "Invalid response");
+    }
+    else
+      callback(data);
+  }.bind(this));
+};
+
+
 // Export module
 module.exports = Node.Request;

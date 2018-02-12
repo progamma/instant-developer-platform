@@ -43,12 +43,15 @@ Node.TestAuto = function (app, options)
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [],
     tagErrors: [], noResponseErrors: [], consoleTestErrors: [], totErrors: [],
-    percentageCompleted: 0, nonCreatedSessions: 0};
+    slownessWarnings: [], percentageCompleted: 0, nonCreatedSessions: 0};
   this.lastCPUValues = [];
   this.reqIndex = 0;
   this.startTime = 0;
   this.totalSessionsDuration = 0;
   this.totalSessionsError = 0;
+  //
+  this.slowTimer = options.slowTimer ? parseInt(options.slowTimer) : null;
+  this.killTimer = options.killTimer ? parseInt(options.killTimer) : null;
   //
   // Map of objects involved in recording. The values of this map are objects having two properties:
   // oldId and newId. Both the two properties represent the auto-generated objects ids
@@ -450,8 +453,10 @@ Node.TestAuto.prototype.getMode = function ()
  * */
 Node.TestAuto.prototype.playRequest = function (stepForward)
 {
-  clearTimeout(this.responseTimeout);
-  delete this.responseTimeout;
+  clearTimeout(this.slowSessionTimeout);
+  delete this.slowSessionTimeout;
+  clearTimeout(this.killSessionTimeout);
+  delete this.killSessionTimeout;
   //
   // Check if test is ended
   var ev;
@@ -466,7 +471,8 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         exceptions: this.testResult.exceptions,
         consoleTestErrors: this.testResult.consoleTestErrors,
         tagErrors: this.testResult.tagErrors,
-        noResponseErrors: this.testResult.noResponseErrors
+        noResponseErrors: this.testResult.noResponseErrors,
+        slownessWarnings: this.testResult.slownessWarnings
       };
       ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: msgContent}}];
       this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
@@ -501,10 +507,13 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
   delay = !this.paused ? this.delays[this.reqIndex] : 0;
   //
   this.playTimeout = setTimeout(function () {
+    // Clear timeouts
     clearTimeout(this.playTimeout);
     delete this.playTimeout;
-    clearTimeout(this.responseTimeout);
-    delete this.responseTimeout;
+    clearTimeout(this.slowSessionTimeout);
+    delete this.slowSessionTimeout;
+    clearTimeout(this.killSessionTimeout);
+    delete this.killSessionTimeout;
     //
     // Get next request
     req = this.requests[this.reqIndex];
@@ -524,7 +533,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     //
     // this.expectedResponses changes every time a response come from server.
     // So I need another property to save total expected responses for each request in order to compare
-    // its value with this.expectedResponses when responseTimeout fired
+    // its value with this.expectedResponses when killSessionTimeout fired
     this.outputLength = this.expectedResponses;
     //
     // Process request
@@ -597,15 +606,35 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       // Set min delay to 1 second
       var nextDelay = Math.max(1000, reqDuration * 5);
       //
-      // Set max delay to 10 seconds
-      nextDelay = Math.min(10000, nextDelay);
+      // Set max delay to 10 seconds (or to reqDuration * 2 if this calculation is greater than 10 seconds)
+      nextDelay = Math.min(Math.max(10000, reqDuration * 2), nextDelay);
       //
       // For long request (i.e. more than 10 seconds), set delay to 2 * req duration
-      nextDelay = (reqDuration >= 10000) ? 2 * reqDuration : nextDelay;
+      nextDelay = (reqDuration >= 10000) ? reqDuration * 2 : nextDelay;
       //
-      this.responseTimeout = setTimeout(function (request, timeout) {
-        clearTimeout(this.responseTimeout);
-        delete this.responseTimeout;
+      // Get slow and kill timer from parent (load or non-reg test) or from test itself (step-by-step test)
+      var st = this.parent ? this.parent.slowTimer : this.slowTimer;
+      var kt = this.parent ? this.parent.killTimer : this.killTimer;
+      //
+      // Calculate delays to notify session slowness or session killing
+      var slowDelay = st ? Math.max(st, nextDelay) : nextDelay;
+      var killDelay = kt ? Math.max(kt, nextDelay) : nextDelay;
+      //
+      // If the dalyes are the same, posticipate killDelay
+      if (slowDelay === killDelay)
+        killDelay = slowDelay + 500;
+      //
+      this.slowSessionTimeout = setTimeout(function (request, timeout) {
+        clearTimeout(this.slowSessionTimeout);
+        delete this.slowSessionTimeout;
+        //
+        if (this.outputLength !== 0 && this.outputLength === this.expectedResponses)
+          this.saveNoResponse(request, timeout, true);
+      }.bind(this, req, slowDelay), slowDelay);
+      //
+      this.killSessionTimeout = setTimeout(function (request, timeout) {
+        clearTimeout(this.killSessionTimeout);
+        delete this.killSessionTimeout;
         //
         if (this.outputLength !== 0 && this.outputLength === this.expectedResponses) {
           this.saveNoResponse(request, timeout);
@@ -620,7 +649,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         }
         //
         this.playRequest();
-      }.bind(this, req, nextDelay), nextDelay);
+      }.bind(this, req, killDelay), killDelay);
       //
       // No need to wait for response. Process next request
       if (req.output.length === 0)
@@ -650,9 +679,11 @@ Node.TestAuto.prototype.pause = function ()
   //
   if (this.mode !== Node.TestAuto.ModeMap.rec) {
     clearTimeout(this.playTimeout);
-    clearTimeout(this.responseTimeout);
+    clearTimeout(this.slowSessionTimeout);
+    clearTimeout(this.killSessionTimeout);
     delete this.playTimeout;
-    delete this.responseTimeout;
+    delete this.slowSessionTimeout;
+    delete this.killSessionTimeout;
   }
   else
     this.pauseTimeStamp = new Date().getTime();
@@ -892,7 +923,7 @@ Node.TestAuto.prototype.reset = function (options)
   this.delays = [];
   this.consoleTest = [];
   this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [], tagErrors: [],
-    noResponseErrors: [], consoleTestErrors: [], totErrors: [],
+    noResponseErrors: [], slownessWarnings: [], consoleTestErrors: [], totErrors: [],
     percentageCompleted: 0, nonCreatedSessions: 0};
   this.lastCPUValues = [];
   this.reqIndex = 0;
@@ -901,12 +932,14 @@ Node.TestAuto.prototype.reset = function (options)
   this.totalSessionsError = 0;
   delete this.desc;
   delete this.needToSave;
-  clearTimeout(this.responseTimeout);
+  clearTimeout(this.slowSessionTimeout);
+  clearTimeout(this.killSessionTimeout);
   clearTimeout(this.playTimeout);
   clearTimeout(this.loadTimeout);
   clearInterval(this.resultInterval);
   clearInterval(this.waitFilesInterval);
-  delete this.responseTimeout;
+  delete this.slowSessionTimeout;
+  delete this.killSessionTimeout;
   delete this.playTimeout;
   delete this.loadTimeout;
   delete this.resultInterval;
@@ -1170,8 +1203,9 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
  * Save a "no response" error
  * @param {Object} req
  * @param {Integer} timeout
+ * @param {String} slowness - true if the reason of no response is session slowness
  * */
-Node.TestAuto.prototype.saveNoResponse = function (req, timeout)
+Node.TestAuto.prototype.saveNoResponse = function (req, timeout, slowness)
 {
   var testAuto = this.parent || this;
   //
@@ -1197,24 +1231,41 @@ Node.TestAuto.prototype.saveNoResponse = function (req, timeout)
   //
   var obj = {};
   obj.requestNumber = this.reqIndex - 1;
-  obj.message = "Server didn't respond";
+  obj.message = slowness ? "Session was slow" : "Server didn't respond";
   obj.operation = operation;
   obj.object = object;
   obj.timeout = timeout;
   obj.occurr = 1;
   //
-  // Check if need to save this exception
+  // Check if need to save this error
+  var i;
   var insert = true;
-  for (var i = 0; i < testAuto.testResult.noResponseErrors.length; i++) {
-    if (testAuto.testResult.noResponseErrors[i].requestNumber === obj.requestNumber) {
+  var arr = slowness ? testAuto.testResult.slownessWarnings : testAuto.testResult.noResponseErrors;
+  for (i = 0; i < arr.length; i++) {
+    if (arr[i].requestNumber === obj.requestNumber) {
       insert = false;
-      testAuto.testResult.noResponseErrors[i].occurr++;
+      arr[i].occurr++;
       break;
     }
   }
   //
   if (insert)
-    testAuto.testResult.noResponseErrors.push(obj);
+    arr.push(obj);
+  //
+  // When I save a no response error I have to remove an occurrencies from slowness warnings
+  // because what was previously a warning is now an error
+  if (!slowness) {
+    for (i = 0; i < testAuto.testResult.slownessWarnings.length; i++) {
+      if (testAuto.testResult.slownessWarnings[i].requestNumber === obj.requestNumber) {
+        testAuto.testResult.slownessWarnings[i].occurr--;
+        //
+        // If there are no more occurrencies for this item, remove it from array
+        if (testAuto.testResult.slownessWarnings[i].occurr === 0)
+          testAuto.testResult.slownessWarnings.splice(i, 1);
+        break;
+      }
+    }
+  }
 };
 
 

@@ -1184,6 +1184,37 @@ Node.Project.prototype.buildProject = function (params, callback)
 
 
 /**
+ * Deletes a build
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Project.prototype.removeBuild = function (params, callback)
+{
+  var prjBuildPath = this.config.directory + "/" + this.user.userName + "/" + this.name + "/build/";
+  var buildVersion = params.req.query.buildVersion;
+  //
+  if (!buildVersion) {
+    this.log("WARN", "Missing buildVersion parameter", "Project.removeBuild");
+    return callback("Missing buildVersion parameter");
+  }
+  if ((buildVersion || "").indexOf("..") !== -1) {
+    this.log("WARN", "Double dot operator (..) not allowed", "Project.removeBuild");
+    return callback("Double dot operator (..) not allowed");
+  }
+  //
+  var fname = prjBuildPath + "project_" + buildVersion + ".json";
+  Node.rimraf(fname, function (err) {
+    if (err) {
+      this.log("ERROR", "Error deleting the build " + fname + ": " + err, "Project.removeBuild");
+      return callback("Error deleting the build " + fname + ": " + err);
+    }
+    //
+    callback();
+  });
+};
+
+
+/**
  * Upload a recording and store it inside the TUTORIALS directory
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -1407,6 +1438,9 @@ Node.Project.prototype.execCommand = function (params, callback)
           break;
         case "build":
           this.buildProject(params, callback);
+          break;
+        case "removeBuild":
+          this.removeBuild(params, callback);
           break;
         case "filesystem":
           this.handleFileSystem(params, callback);

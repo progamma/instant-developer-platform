@@ -66,7 +66,8 @@ Node.Server.msgTypeMap = {
   redirect: "redirect",
   sessionError: "seser",
   execCmdRequest: "exreq",
-  execCmdResponse: "exres"
+  execCmdResponse: "exres",
+  dtt: "dtt",
 };
 
 
@@ -163,44 +164,53 @@ Node.Server.prototype.initServer = function ()
       ].join(":")
     };
     //
-    // If there are custom certificates
-    if (this.config.customSSLCerts) {
-      //   http://stackoverflow.com/questions/12219639/is-it-possible-to-dynamically-return-an-ssl-certificate-in-nodejs#answer-20285934
-      //   https://www.digicert.com/ssl-support/apache-secure-multiple-sites-sni.htm
-      ssl.SNICallback = function (domain, cb) {
-        // If it's the "main" domain, use the ssl object to reply
-        if (domain === this.config.name + "." + this.config.domain)
-          return cb(null, Node.tls.createSecureContext(ssl).context);
+    // Handle custom certificates
+    //   http://stackoverflow.com/questions/12219639/is-it-possible-to-dynamically-return-an-ssl-certificate-in-nodejs#answer-20285934
+    //   https://www.digicert.com/ssl-support/apache-secure-multiple-sites-sni.htm
+    ssl.SNICallback = function (domain, cb) {
+      // If it's the "main" domain, use the ssl object to reply
+      // If there are no custom certicicates use the "main" domain as well
+      if (domain === this.config.name + "." + this.config.domain || !this.config.customSSLCerts)
+        return cb(null, Node.tls.createSecureContext(ssl).context);
+      //
+      // If the domain is a sub-domain of "instantdevelopercloud.com" use the "standard" certificate
+      if (domain.endsWith(".instantdevelopercloud.com"))
+        return cb(null, Node.tls.createSecureContext(ssl).context);
+      //
+      // I need to search the right certificate
+      var certToUse, i;
+      for (i = 0; i < this.config.customSSLCerts.length && !certToUse; i++) {
+        var cert = this.config.customSSLCerts[i];
         //
-        // I need to search the right certificate
-        var certToUse, i;
-        for (i = 0; i < this.config.customSSLCerts.length && !certToUse; i++) {
-          var cert = this.config.customSSLCerts[i];
-          //
-          // If the certificate is a multi-domain certificate check only sub-domain part otherwise check full domain
-          if ((cert.SSLDomain[0] === "*" && cert.SSLDomain.split(".").slice(1).join(".") === domain.split(".").slice(1).join(".")) ||
-                  (cert.SSLDomain[0] !== "*" && cert.SSLDomain === domain))
-            certToUse = cert;
-        }
-        //
-        // If not found
-        if (!certToUse) {
-          this.logger.log("WARN", "No valid certificate for domain " + domain, "Server.initServer");
-          return cb("No valid certificate for domain " + domain);
-        }
-        //
-        // Prepare certificate
-        var cred = {key: Node.fs.readFileSync(certToUse.SSLKey, "utf8"),
-          cert: Node.fs.readFileSync(certToUse.SSLCert, "utf8"),
-          secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
-        cred.ca = [];
-        for (i = 0; i < certToUse.SSLCABundles.length; i++)
-          cred.ca.push(Node.fs.readFileSync(certToUse.SSLCABundles[i], "utf8"));
-        //
-        // Reply with TLS secure context
+        // If the certificate is a multi-domain certificate check only sub-domain part otherwise check full domain
+        if ((cert.SSLDomain[0] === "*" && cert.SSLDomain.split(".").slice(1).join(".") === domain.split(".").slice(1).join(".")) ||
+                (cert.SSLDomain[0] !== "*" && cert.SSLDomain === domain))
+          certToUse = cert;
+      }
+      //
+      // If not found
+      if (!certToUse) {
+        this.logger.log("WARN", "No valid certificate for domain " + domain, "Server.initServer");
+        return cb("No valid certificate for domain " + domain);
+      }
+      //
+      // Prepare certificate
+      var cred = {key: Node.fs.readFileSync(certToUse.SSLKey, "utf8"),
+        cert: Node.fs.readFileSync(certToUse.SSLCert, "utf8"),
+        secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
+      cred.ca = [];
+      for (i = 0; i < certToUse.SSLCABundles.length; i++)
+        cred.ca.push(Node.fs.readFileSync(certToUse.SSLCABundles[i], "utf8"));
+      //
+      // Reply with TLS secure context
+      try {
         cb(null, Node.tls.createSecureContext(cred).context);
-      }.bind(this);
-    }
+      }
+      catch (ex) {
+        this.logger.log("ERROR", "Can't create secure context with given certificate for domain " + domain + ": " + ex, "Server.initServer");
+        return cb(null, Node.tls.createSecureContext(ssl).context);
+      }
+    }.bind(this);
     //
     // Create an https Server
     Node.httpsServer = require("https").createServer(ssl, Node.app);
@@ -564,6 +574,9 @@ Node.Server.prototype.socketListener = function ()
     socket.on(Node.Server.msgTypeMap.cloudConnector, function (m) {
       pthis.handleCloudConnectorMessage(socket, m);
     });
+    socket.on(Node.Server.msgTypeMap.dtt, function (m) {
+      pthis.handleDttMessage(socket, m);
+    });
   });
 };
 
@@ -864,6 +877,46 @@ Node.Server.prototype.handleCloudConnectorMessage = function (socket, msg)
     if (!handled)
       return sendErrorToClient("session not found");
   }
+};
+
+
+/**
+ * Handle DTT message (received by a remote IDE client)
+ * @param {Node.Socket} socket - socket that received the message
+ * @param {Object} msg
+ */
+Node.Server.prototype.handleDttMessage = function (socket, msg)
+{
+  // If it's a live session, ask her to reply (use the appSessions map)
+  var session = this.appSessions[msg.sid];
+  if (session)
+    return session.openDttConnection(socket, msg);
+  //
+  // Not a live session... check if it's a saved session
+  var user = this.config.getUser("manager");
+  if (!user) {
+    socket.disconnect();
+    return this.logger.log("WARN", "DTT message not handled: user not found", "Server.handleDttMessage", msg);
+  }
+  var app = user.getApp(Node.Utils.clearName(msg.appName));
+  if (!app) {
+    socket.disconnect();
+    return this.logger.log("WARN", "DTT message not handled: app not found", "Server.handleDttMessage", msg);
+  }
+  //
+  // Now search the file
+  var fname = this.config.appDirectory + "/apps/" + msg.appName + "/files/private/log/dtt_" + msg.sid + ".json";
+  if (Node.fs.existsSync(fname))
+    return Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, content) {
+      content = "[" + content;
+      content = content.substring(0, content.length - 1) + "]";
+      socket.emit("dtt", content);
+    });
+  //
+  //
+  // Nope... that's bad...
+  socket.disconnect();
+  this.logger.log("WARN", "DTT message not handled: session not found", "Server.handleDttMessage", msg);
 };
 
 

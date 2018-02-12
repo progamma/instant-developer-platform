@@ -807,6 +807,11 @@ Node.TwManager.prototype.saveTrans = function (callback)
     // Remove transMessages... I don't need them
     tr.transMessages = [];
     //
+    // Clear item I don't want to be saved (those changes are not handed by TW)
+    for (var j = 0; j < tr.transItems.length; j++)
+      if (tr.transItems[j].obj instanceof InDe.AMethod && tr.transItems[j].prop === "watches")
+        tr.transItems.splice(j--, 1);
+    //
     // Save transaction
     tr.tw = true;
     TL.push(tr.save());

@@ -47,7 +47,8 @@ Node.Worker.msgTypeMap = {
   serverSession: "serverSession",
   testStartResult: "testres",
   cTokenOp: "ctop",
-  changedAppParam: "chpar"
+  changedAppParam: "chpar",
+  dtt: "dtt",
 };
 
 
@@ -307,6 +308,15 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
 
     case Node.Worker.msgTypeMap.changedAppParam:
       this.app.handleChangedAppParamMsg(msg.cnt);
+      break;
+
+    case Node.Worker.msgTypeMap.dtt:
+      // Send the message to the right app session
+      appsess = this.server.appSessions[msg.sid];
+      if (appsess)
+        appsess.sendDttMessage(msg);
+      else
+        this.log("WARN", "Can't process DTT request: session not found", "Worker.handleAppChildMessage", msg);
       break;
 
     default:

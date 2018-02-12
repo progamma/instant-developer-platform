@@ -96,7 +96,10 @@ Node.IDESession.msgTypeMap = {
   //
   febeMode: "fm",
   //
-  deleteTutorialDBs: "dtdbs"
+  deleteTutorialDBs: "dtdbs",
+  //
+  remoteQuery: "rq",
+  remoteQueryResult: "rqres"
 };
 
 
@@ -486,6 +489,10 @@ Node.IDESession.prototype.processMessage = function (msg)
       this.handleDeleteTutorialDBsMessage(msg.dbNames);
       break;
 
+    case Node.IDESession.msgTypeMap.remoteQuery:
+      this.handleRemoteQueryMessage(msg.options);
+      break;
+
     default:
       this.handleOtherMessages(msg);
       break;
@@ -767,6 +774,18 @@ Node.IDESession.prototype.handleDeleteTutorialDBsMessage = function (dbNames)
       }.bind(this));         // jshint ignore:line
     }
   }.bind(this), this.config.timerSession);
+};
+
+
+/**
+ * Handles a remote query message
+ * @param {Object} options
+ */
+Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
+{
+  this.server.request.executeRemoteQuery(options, function (result, err) {
+    this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, result: result, err: err});
+  }.bind(this));
 };
 
 

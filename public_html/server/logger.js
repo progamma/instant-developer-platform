@@ -95,6 +95,10 @@ Node.Logger.prototype.initLogFile = function ()
   //
   // If day has changed, create a new LOG
   if (this.ISOdate && (new Date()).toISOString().substring(0, 10) !== this.ISOdate) {
+    // If I had an open file better close it
+    if (this.stream)
+      this.stream.end();
+    //
     delete this.ISOdate;
     delete this.stream;
   }

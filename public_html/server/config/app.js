@@ -405,6 +405,160 @@ Node.App.prototype.sendSessions = function (params, callback)
 
 
 /**
+ * Send the list of DTT sessions for this app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.sendDttSessions = function (params, callback)
+{
+  // Reply:
+  //  sessions: [{session 1 details}, {session 2 details}, ...]
+  //
+  // Function that sorts an array of sessions
+  var sortSessions = function (sessArr) {
+    sessArr.sort(function (s1, s2) {
+      if (new Date(s1.start) > new Date(s2.start))
+        return -1;
+      else if (new Date(s1.start) < new Date(s2.start))
+        return 1;
+      else
+        return 0;
+    });
+    //
+    return sessArr;
+  };
+  //
+  // First add live sessions
+  var sessions = [];
+  this.workers.forEach(function (wrk) {
+    wrk.sessions.forEach(function (s) {
+      sessions.push({sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"});
+    });
+  });
+  //
+  // Sort by start date
+  sessions = sortSessions(sessions);
+  //
+  // Then add offline sessions (by loading index.json file)
+  var fname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/index.json";
+  Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, savedSess) {
+    if (!err) {
+      // Parse index.json
+      savedSess = JSON.parse(savedSess);
+      //
+      // File exists: remove online sessions and tag offline sessions
+      for (var i = 0; i < savedSess.length; i++) {
+        var s = savedSess[i];
+        //
+        // Search session inside live sessions array
+        var lives = sessions.find(function (ls) {
+          return (ls.sessionID === s.sessionID);
+        });
+        //
+        // If there is already a live session coupled with this saved session
+        if (lives) {
+          // Remove session from saved list
+          savedSess.splice(i--, 1);
+          //
+          // Copy "data" from saved to online
+          lives.exceptions = s.exceptions;
+          lives.warnings = s.warnings;
+          lives.buildVersion = s.buildVersion;
+          lives.updated = s.updated;
+        }
+        else  // Not there... flag the session as offline
+          s.type = "offline";
+      }
+      //
+      // Sort sessions by start date
+      savedSess = sortSessions(savedSess);
+      //
+      // Concatenate arrays by appending saved to online list
+      sessions = sessions.concat(savedSess);
+    }
+    //
+    // If a date filter was provided, use it
+    if (params.req.query.fromDate) {
+      var fromDate = new Date(params.req.query.fromDate);
+      for (var i = 0; i < sessions.length; i++) {
+        var s = sessions[i];
+        if (s.type === "offline" && s.updated && new Date(s.updated) < fromDate)
+          sessions.splice(i--, 1);
+      }
+    }
+    //
+    // Reply to callee
+    callback({msg: JSON.stringify(sessions)});
+  }.bind(this));
+};
+
+
+/**
+ * Deletes one or more DTT sessions for this app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.deleteDttSessions = function (params, callback)
+{
+  // Check required parameters
+  if (!params.req.query.beforeDate) {
+    this.log("WARN", "Missing beforeDate parameter", "App.deleteDttSessions");
+    return callback("Missing beforeDate parameter");
+  }
+  //
+  // Purge offline sessions (by loading index.json file)
+  var beforeDate = new Date(params.req.query.beforeDate);
+  var fname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/index.json";
+  Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, savedSess) {
+    if (err)
+      return callback({code: 404, msg: "No sessions"});
+    //
+    // File exists: parse it and filter sessions
+    savedSess = JSON.parse(savedSess);
+    var nSess = savedSess.length;
+    for (var i = 0; i < savedSess.length; i++) {
+      var s = savedSess[i];
+      //
+      // If it's older than the filter
+      if (new Date(s.start) < beforeDate) {
+        // Remove from the list
+        savedSess.splice(i--, 1);
+        //
+        // Delete the DTT file
+        var sname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/dtt_" + s.sessionID + ".json";
+        Node.rimraf(sname, function (err) {
+          if (err)
+            return this.log("WARN", "Error while removing DTT file (" + sname + "): " + err, "App.deleteDttSessions");
+        }.bind(this));
+      }
+    }
+    //
+    // If there are no more sessions, delete index
+    if (savedSess.length === 0) {
+      Node.rimraf(fname, function (err) {
+        if (err)
+          return callback("Error while removing DTT index file (" + fname + "): " + err);
+        //
+        // Done!
+        callback();
+      }.bind(this));
+    }
+    else if (nSess !== savedSess.length) { // If something has changed, write sessions list to file
+      Node.fs.writeFile(fname, JSON.stringify(savedSess), {encoding: "utf-8"}, function (err) {
+        if (err)
+          return callback("Error while writing DTT index file: " + err);
+        //
+        // Done!
+        callback();
+      }.bind(this));
+    }
+    else  // There are sessions and total count has not changed -> do nothing
+      return callback();
+  }.bind(this));
+};
+
+
+/**
  * Start the app
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -785,20 +939,42 @@ Node.App.prototype.handleChangedAppParamMsg = function (msg, skipSave)
     wrk.child.send({type: Node.Worker.msgTypeMap.changedAppParam, cnt: msg});
   }
   //
-  // If params is empty, forget about it
-  if (Object.keys(this.params).length === 0)
-    delete this.params;
-  //
   // If I don't need to save, I've done my job
   if (skipSave)
     return;
   //
-  // Save parameter file
-  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
-  Node.Utils.saveObject(filename, this.params, function (err) {
+  // Save parameters to disk
+  this.saveParameters(function (err) {
     if (err)
       this.log("ERROR", "Can't update app parameters: " + err, "App.handleChangedAppParamMsg", msg);
-  }.bind(this));
+  });
+};
+
+
+/**
+ * Save app parameters on disk
+ * @param {function} callback (err)
+ */
+Node.App.prototype.saveParameters = function (callback)
+{
+  // If params is empty, forget about it
+  var par;
+  if (Object.keys(this.params).length === 0)
+    delete this.params;
+  else {
+    // Delete volatile parameters (so that they won't be saved on disk)
+    par = JSON.parse(JSON.stringify(this.params));
+    delete par.enableDtt;
+    delete par.logDttQueries;
+    //
+    // If, beside volatile parameters, there is nothing left, don't save
+    if (Object.keys(par).length === 0)
+      par = undefined;
+  }
+  //
+  // Save parameter file
+  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
+  Node.Utils.saveObject(filename, par, callback);
 };
 
 
@@ -1052,14 +1228,14 @@ Node.App.prototype.configure = function (params, callback)
       // Value has changed -> tell every session that a parameter has changed
       this.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : newParams[parName]}, true);   // SkipSave
       //
-      // Params file should be saved at the end
-      saveParamFile = true;
+      // Don't save volatile (i.e. non permanent) parameters
+      if (["enableDtt", "logDttQueries"].indexOf(parName) === -1)
+        saveParamFile = true; // Params file should be saved at the end
     }
     //
-    // Update and save the new param object
+    // Save param object
     if (saveParamFile) {
-      var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
-      Node.Utils.saveObject(filename, this.params, function (err) {
+      this.saveParameters(function (err) {
         if (err) {
           this.log("ERROR", "Can't update app parameters: " + err, "App.configure", {newParams: query.params});
           return callback("Can't update app parameters: " + err);
@@ -1135,6 +1311,8 @@ Node.App.prototype.test = function (params, callback)
     var pathList = params.req.query.path;
     var rid = params.req.query.rid;
     var device = params.req.query.device || "desktop";
+    var slowTimer = params.req.query.slowTimer;
+    var killTimer = params.req.query.killTimer;
     //
     // Create a new test auto
     var options = {
@@ -1143,7 +1321,9 @@ Node.App.prototype.test = function (params, callback)
       duration: duration,
       pathList: pathList,
       maxSessions: maxSessions,
-      rid: rid
+      rid: rid,
+      slowTimer: slowTimer,
+      killTimer: killTimer
     };
     //
     this.testAuto = this.testAuto || {};
@@ -1214,6 +1394,12 @@ Node.App.prototype.execCommand = function (params, callback)
       break;
     case "sessions":
       this.sendSessions(params, callback);
+      break;
+    case "dttsessions":
+      this.sendDttSessions(params, callback);
+      break;
+    case "deletedttsessions":
+      this.deleteDttSessions(params, callback);
       break;
     case "start":
       this.start(params, callback);

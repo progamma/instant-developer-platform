@@ -23,6 +23,7 @@ Node.Utils = require("../utils");
 Node.AppSession = function (par)
 {
   this.parent = par;
+  this.created = new Date();
   //
   // New SessionID
   this.id = Node.Utils.generateUID36();
@@ -330,13 +331,16 @@ Node.AppSession.prototype.handleSessionParams = function (params)
 {
   this.log("DEBUG", "Session params changed for session", "AppSession.handleSessionParams", params);
   //
-  // Change session timeout
-  if (params.sessionTimeout) {
+  // If param is session timeout
+  if (params.sessionTimeout !== undefined) {
+    // Change session timeout
     this.sessionTimeout = params.sessionTimeout;
     //
     // If this session is a "pure" REST session... I need to "re-schedule" my death
     this.scheduleRESTDeath();
   }
+  else if (params.sessionName !== undefined)    // Session name
+    this.sessionName = params.sessionName;
 };
 
 
@@ -380,6 +384,57 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
   //
   // Send response
   this.restRes.end(msg.text + "");
+};
+
+
+/**
+ * Opens a connection, save the socket on the array, redirect all the socket messages received from
+ * the client to the child
+ * @param {socket} socket
+ * @param {Object} msg
+ */
+Node.AppSession.prototype.openDttConnection = function (socket, msg)     // jshint ignore:line
+{
+  this.dttSocket = socket;
+  //
+  socket.on("disconnect", function () {
+    this.log("DEBUG", "DTT socket disconnected", "AppSession.openDttConnection");
+    //
+    // Forget about the DTT socket
+    delete this.dttSocket;
+    //
+    // Disable DTT for all sessions
+    this.app.handleChangedAppParamMsg({par: "enableDtt"}, true);
+  }.bind(this));
+  //
+  // Enable DTT for this session (and disable DTT for every other session)
+  this.app.handleChangedAppParamMsg({par: "enableDtt", new : msg.sid}, true);
+  //
+  // If I already have cached one or more DTT messages it's the right time to send them (now that I've the socket)
+  if (this.dttCachedMessages) {
+    this.dttCachedMessages.forEach(function (m) {
+      this.dttSocket.emit("dtt", m.content);
+    }.bind(this));
+    //
+    delete this.dttCachedMessages;
+  }
+};
+
+
+/**
+ * Sends a DTT message to an IDE client
+ * @param {object} msg
+ */
+Node.AppSession.prototype.sendDttMessage = function (msg)
+{
+  // If there is a socket, use it
+  if (this.dttSocket)
+    return this.dttSocket.emit("dtt", msg.content);
+  //
+  // No socket... Cache messages... when socket will be available I'll send them
+  this.log("WARN", "No socket connected -> DTT message cached", "AppSession.sendDttMessage");
+  this.dttCachedMessages = this.dttCachedMessages || [];
+  this.dttCachedMessages.push(msg);
 };
 
 

@@ -253,7 +253,7 @@ Node.Branch.prototype.getCommitsTransItemsByID = function (filter, callback)
     commitsToSend = allCommits.slice(firstCommitIdx, lastCommitIdx + 1);
     //
     // Append "more-items" if there are more items to show than the ones sent (i.e. if I've not sent the last commit)
-    if (firstCommitIdx != 0)
+    if (firstCommitIdx !== 0)
       result.moreItems = true;
   }
   //

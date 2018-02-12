@@ -569,7 +569,8 @@ Node.Config.prototype.deleteUser = function (userName, callback)
  * @param {request} req
  * @param {response} res
  */
-/* jshint maxstatements:100 */
+/* jshint maxstatements:120 */
+/* jshint maxcomplexity:40 */
 Node.Config.prototype.processRun = function (req, res)
 {
   // Possible URL formats:
@@ -588,8 +589,8 @@ Node.Config.prototype.processRun = function (req, res)
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
   // Handle only GET or POST
-  if (req.method !== "POST" && req.method !== "GET") {
-    this.logger.log("WARN", "Request not GET nor POST", "Config.processRun",
+  if (["GET", "POST", "OPTIONS"].indexOf(req.method) === -1) {
+    this.logger.log("WARN", "Request not GET nor POST nor OPTIONS", "Config.processRun",
             {meth: req.method, url: req.originalUrl, remoteAddress: req.connection.remoteAddress});
     return res.status(405).end("HTTP method not supported");
   }
@@ -895,6 +896,25 @@ Node.Config.prototype.processRun = function (req, res)
   }
   else if (req.method === "GET")
     newAppReq(req, res, session);
+  else if (req.method === "OPTIONS") {
+    // Accept only "OPTIONS" that comes from a DROPZONE element
+    // (that will send a POST with mode=rest in the query string)
+    var meth = req.headers["access-control-request-method"];
+    if (meth === "POST" && req.originalUrl.indexOf("mode=rest") !== -1) {
+      // That good... reply with 200
+      this.logger.log("DEBUG", "Valid OPTIONS request", "Config.processRun",
+              {meth: req.method, url: req.originalUrl, headers: req.headers});
+      //
+      res.header("Access-Control-Allow-Origin", "*");
+      res.header("Access-Control-Allow-Headers", "Accept, Cache-Control, X-Requested-With");
+      return res.status(200).end();
+    }
+    //
+    // Something is wrong.. better reply with an error
+    this.logger.log("WARN", "Invalid OPTIONS request", "Config.processRun",
+            {meth: req.method, url: req.originalUrl, headers: req.headers});
+    return res.status(405).end("HTTP method not supported");
+  }
 };
 
 
@@ -1594,7 +1614,7 @@ Node.Config.prototype.configureCert = function (params, callback)
       //
       if (!saveConfig) {
         this.logger.log("WARN", "Certificate " + cert + " not found", "Config.configureCert", {cert: cert});
-        return callback("Certificate " + cert + " not found");
+        return callback({code: 404, msg: "Certificate " + cert + " not found"});
       }
       break;
 

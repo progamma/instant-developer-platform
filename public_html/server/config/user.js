@@ -1626,7 +1626,8 @@ Node.User.prototype.processCommand = function (params, callback)
       else if (isAPP) {
         app = this.getApp(objName);
         if (!app) {
-          this.log("WARN", "App not found", "User.processCommand", {cmd: command, app: objName});
+          this.log("WARN", "App not found", "User.processCommand",
+                  {cmd: command, app: objName, url: params.req.originalUrl});
           return callback("App not found");
         }
         //
@@ -1681,7 +1682,8 @@ Node.User.prototype.processCommand = function (params, callback)
       if (isDB) {
         database = this.getDatabase(objName);
         if (!database) {
-          this.log("WARN", "Database not found", "User.processCommand", {cmd: command, database: objName});
+          this.log("WARN", "Database not found", "User.processCommand",
+                  {cmd: command, database: objName, url: params.req.originalUrl});
           return callback({code: 404, err: "Database not found"});
         }
         //
@@ -1690,7 +1692,8 @@ Node.User.prototype.processCommand = function (params, callback)
       else if (isAPP) {
         app = this.getApp(objName);
         if (!app) {
-          this.log("WARN", "App not found", "User.processCommand", {cmd: command, app: objName});
+          this.log("WARN", "App not found", "User.processCommand",
+                  {cmd: command, app: objName, url: params.req.originalUrl});
           return callback({code: 404, err: "App not found"});
         }
         //
@@ -1699,7 +1702,8 @@ Node.User.prototype.processCommand = function (params, callback)
       else {
         project = this.getProject(objName);
         if (!project) {
-          this.log("WARN", "Project not found", "User.processCommand", {cmd: command, project: objName});
+          this.log("WARN", "Project not found", "User.processCommand",
+                  {cmd: command, project: objName, url: params.req.originalUrl});
           return callback({code: 404, err: "Project not found"});
         }
         //

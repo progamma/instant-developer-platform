@@ -630,10 +630,8 @@ Node.IDESession.prototype.handleSyncMessage = function (msg)
   if (!this.syncSocket)
     return;
   //
-  if (msg.cnt.id === "disconnect") {
+  if (msg.cnt.id === "disconnect")
     this.syncSocket.disconnect();
-    delete this.syncSocket;
-  }
   else
     this.syncSocket.emit("sync", msg);
 };

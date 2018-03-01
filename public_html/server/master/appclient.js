@@ -184,6 +184,12 @@ Node.AppClient.prototype.openConnection = function (socket)
     if (pthis.session.masterAppClient === pthis)
       delete pthis.session.masterAppClient;
     //
+    // If the app is updating... die immediately (no wait for reconnect... I'm installing!!!)
+    if (pthis.app.updating) {
+      pthis.log("DEBUG", "App is updating -> delete session", "AppClient.openConnection");
+      return pthis.session.deleteAppClient(pthis);
+    }
+    //
     // Ask my parent to delete me
     // Wait 1 minute (or more/less if app changed session parameter) before actually deleting this session
     // So that if the client has been disconnected and comes back I'm here waiting for him

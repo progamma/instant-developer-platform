@@ -49,6 +49,8 @@ Node.Worker.msgTypeMap = {
   cTokenOp: "ctop",
   changedAppParam: "chpar",
   dtt: "dtt",
+  deleteTraceFiles: "dtf",
+  deleteTraceFilesResult: "dtfr"
 };
 
 
@@ -133,7 +135,7 @@ Node.Worker.prototype.createChild = function ()
   // Initialize app child
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
-    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, params: this.app.params});
+    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this), params: this.app.params});
   //
   // Tell the app how to connect with the database
   var constring = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort;
@@ -319,6 +321,17 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
         this.log("WARN", "Can't process DTT request: session not found", "Worker.handleAppChildMessage", msg);
       break;
 
+    case Node.Worker.msgTypeMap.deleteTraceFilesResult:
+      if (this.app.deleteTraceFilesCallback) {
+        var cb = this.app.deleteTraceFilesCallback;
+        delete this.app.deleteTraceFilesCallback;
+        //
+        cb(msg.cnt);
+      }
+      else
+        this.log("WARN", "Can't handle delete trace result message: no callback", "Worker.handleAppChildMessage", msg);
+      break;
+
     default:
       this.log("WARN", "Unhandled message", "Worker.handleAppChildMessage", msg);
       break;
@@ -335,6 +348,9 @@ Node.Worker.prototype.handleSync = function (msg)
   var session = this.server.appSessions[msg.sid.sidsrv];
   if (!session)
     return this.log("WARN", "Can't handle SYNC message: session not found", "Worker.handleSync", msg);
+  //
+  if (!session.syncSocket)
+    return this.log("WARN", "Can't handle SYNC message: socket disconnected", "Worker.handleSync", msg);
   //
   if (msg.cnt.id === "disconnect")
     session.syncSocket.disconnect();

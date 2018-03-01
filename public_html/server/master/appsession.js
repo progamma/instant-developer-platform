@@ -115,6 +115,7 @@ Node.AppSession.prototype.openSyncConnection = function (socket, msg)     // jsh
   this.syncSocket = socket;
   socket.on("disconnect", function () {
     pthis.sendToChild({type: "sync", sid: {sidsrv: pthis.id}, cnt: {id: "disconnect"}});
+    delete pthis.syncSocket;
   });
 };
 
@@ -248,6 +249,11 @@ Node.AppSession.prototype.terminate = function ()
   //
   // If this session have no clients, terminate it
   if (!this.appClients.length) {
+    if (this.syncSocket) {
+      this.log("DEBUG", "Sync session -> disconnect socket", "AppSession.terminate");
+      this.syncSocket.disconnect();
+    }
+    //
     this.log("DEBUG", "Session has no clients -> terminate", "AppSession.terminate");
     this.worker.deleteSession(this);
     return;

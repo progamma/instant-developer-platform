@@ -771,6 +771,18 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
         return this.logger.log("WARN", "Sync connect not handled: app not found", "Server.handleSyncMessage", msg);
       }
       //
+      // If the app has been stopped
+      if (app.stopped) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: app stopped", "Server.handleSyncMessage", msg);
+      }
+      //
+      // If the app is updating
+      if (app.updating) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: app updating", "Server.handleSyncMessage", msg);
+      }
+      //
       this.logger.log("DEBUG", "A new sync session begins", "Server.handleSyncMessage", msg);
       //
       // Ask the app to create a new AppSession
@@ -905,7 +917,7 @@ Node.Server.prototype.handleDttMessage = function (socket, msg)
   }
   //
   // Now search the file
-  var fname = this.config.appDirectory + "/apps/" + msg.appName + "/files/private/log/dtt_" + msg.sid + ".json";
+  var fname = this.config.appDirectory + "/apps/" + app.name + "/files/private/log/dtt_" + msg.sid + ".json";
   if (Node.fs.existsSync(fname))
     return Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, content) {
       content = "[" + content;

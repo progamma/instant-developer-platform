@@ -1890,7 +1890,8 @@ Node.Config.prototype.processCommand = function (req, res)
     default:
       var user = this.getUser(userName);
       if (!user) {
-        this.logger.log("WARN", "User not found", "Config.processCommand", {cmd: command, user: userName});
+        this.logger.log("WARN", "User not found", "Config.processCommand",
+                {cmd: command, user: userName, url: params.req.originalUrl});
         return sendResponse({code: 404, err: "User not found"});
       }
       //

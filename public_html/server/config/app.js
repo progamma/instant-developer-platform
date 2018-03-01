@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2016
  * All rights reserved
  */
-/* global require, module, process */
+/* global require, module, process, Buffer */
 
 var Node = Node || {};
 
@@ -411,6 +411,11 @@ Node.App.prototype.sendSessions = function (params, callback)
  */
 Node.App.prototype.sendDttSessions = function (params, callback)
 {
+  // If there is a fromDate parameter, parse it
+  var fromDate;
+  if (params.req.query.fromDate)
+    fromDate = new Date(params.req.query.fromDate);
+  //
   // Reply:
   //  sessions: [{session 1 details}, {session 2 details}, ...]
   //
@@ -432,6 +437,9 @@ Node.App.prototype.sendDttSessions = function (params, callback)
   var sessions = [];
   this.workers.forEach(function (wrk) {
     wrk.sessions.forEach(function (s) {
+      if (!s.sessionName)
+        return;   // Skip anonymous sessions
+      //
       sessions.push({sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"});
     });
   });
@@ -439,57 +447,97 @@ Node.App.prototype.sendDttSessions = function (params, callback)
   // Sort by start date
   sessions = sortSessions(sessions);
   //
-  // Then add offline sessions (by loading index.json file)
-  var fname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/index.json";
-  Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, savedSess) {
-    if (!err) {
-      // Parse index.json
-      savedSess = JSON.parse(savedSess);
-      //
-      // File exists: remove online sessions and tag offline sessions
-      for (var i = 0; i < savedSess.length; i++) {
-        var s = savedSess[i];
-        //
-        // Search session inside live sessions array
-        var lives = sessions.find(function (ls) {
-          return (ls.sessionID === s.sessionID);
-        });
-        //
-        // If there is already a live session coupled with this saved session
-        if (lives) {
-          // Remove session from saved list
-          savedSess.splice(i--, 1);
-          //
-          // Copy "data" from saved to online
-          lives.exceptions = s.exceptions;
-          lives.warnings = s.warnings;
-          lives.buildVersion = s.buildVersion;
-          lives.updated = s.updated;
-        }
-        else  // Not there... flag the session as offline
-          s.type = "offline";
-      }
-      //
+  var doneFnc = function (msg, fd) {
+    // If there is a message, dump it
+    if (msg)
+      this.log("WARN", msg, "Node.App.sendDttSessions");
+    //
+    // If there is a FD, close it
+    if (fd)
+      Node.fs.close(fd, function (err) {
+        if (err)
+          this.log("WARN", "Error while closing file (" + fd + "): " + err, "Node.App.sendDttSessions.doneFnc");
+      });
+  }.bind(this);
+  //
+  // Read index file
+  var savedSess = [];
+  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
+  var fpath = this.config.appDirectory + "/apps/" + this.name + "/files/private/log";
+  var readIndexFile = function (idx) {
+    // If I've done -> reply
+    if (idx + 1 > maxAppWorkers) {
       // Sort sessions by start date
       savedSess = sortSessions(savedSess);
       //
       // Concatenate arrays by appending saved to online list
       sessions = sessions.concat(savedSess);
+      //
+      // Reply to callee
+      return callback({msg: JSON.stringify(sessions)});
     }
     //
-    // If a date filter was provided, use it
-    if (params.req.query.fromDate) {
-      var fromDate = new Date(params.req.query.fromDate);
-      for (var i = 0; i < sessions.length; i++) {
-        var s = sessions[i];
-        if (s.type === "offline" && s.updated && new Date(s.updated) < fromDate)
-          sessions.splice(i--, 1);
-      }
-    }
-    //
-    // Reply to callee
-    callback({msg: JSON.stringify(sessions)});
-  }.bind(this));
+    var fname = fpath + "/index" + idx + ".json";
+    Node.fs.open(fname, "r", function (err, fd) {
+      // If there is no index file -> done
+      if (err && err.code === "ENOENT")
+        return readIndexFile(idx + 1);
+      else if (err)    // If there are other errors... log it
+        return doneFnc("Error while opening index file (read: " + fname + "): " + err);
+      //
+      var buff = Buffer.alloc(512);
+      var readBlock = function (pos) {
+        Node.fs.read(fd, buff, 0, buff.length, pos, function (err, bytesRead) {
+          if (err)
+            return doneFnc("Error while reading index file (read: " + fname + "): " + err, fd);
+          //
+          // If I've read nothing -> I've done reading
+          if (bytesRead === 0) {
+            return Node.fs.close(fd, function (err) {
+              if (err)
+                return doneFnc("Error while closing DTT index file (read: " + fname + "): " + err);
+              //
+              readIndexFile(idx + 1);
+            });
+          }
+          //
+          // Load the session
+          var s = JSON.parse(buff.toString().replace(/\0/g, ""));
+          //
+          // If a date filter was provided, use it
+          if (fromDate && s.updated && new Date(s.updated) < fromDate)
+            return readBlock(pos + 512); // Read next block
+          //
+          // Search session inside live sessions array
+          var lives = sessions.find(function (ls) {
+            return (ls.sessionID === s.sessionID);
+          });
+          //
+          // If there is already a live session coupled with this saved session
+          if (lives) {
+            // Copy "data" from saved to online
+            lives.exceptions = s.exceptions;
+            lives.warnings = s.warnings;
+            lives.buildVersion = s.buildVersion;
+            lives.updated = s.updated;
+            lives.start = s.start;
+          }
+          else { // Not there... flag the session as offline
+            s.type = "offline";
+            savedSess.push(s);
+          }
+          //
+          // Read next block
+          readBlock(pos + 512);
+        });
+      };
+      //
+      // Read first block
+      readBlock(0);
+    });
+  };
+  //
+  readIndexFile(0);
 };
 
 
@@ -506,55 +554,37 @@ Node.App.prototype.deleteDttSessions = function (params, callback)
     return callback("Missing beforeDate parameter");
   }
   //
-  // Purge offline sessions (by loading index.json file)
   var beforeDate = new Date(params.req.query.beforeDate);
-  var fname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/index.json";
-  Node.fs.readFile(fname, {encoding: "utf-8"}, function (err, savedSess) {
-    if (err)
-      return callback({code: 404, msg: "No sessions"});
-    //
-    // File exists: parse it and filter sessions
-    savedSess = JSON.parse(savedSess);
-    var nSess = savedSess.length;
-    for (var i = 0; i < savedSess.length; i++) {
-      var s = savedSess[i];
-      //
-      // If it's older than the filter
-      if (new Date(s.start) < beforeDate) {
-        // Remove from the list
-        savedSess.splice(i--, 1);
-        //
-        // Delete the DTT file
-        var sname = this.config.appDirectory + "/apps/" + this.name + "/files/private/log/dtt_" + s.sessionID + ".json";
-        Node.rimraf(sname, function (err) {
-          if (err)
-            return this.log("WARN", "Error while removing DTT file (" + sname + "): " + err, "App.deleteDttSessions");
-        }.bind(this));
-      }
-    }
-    //
-    // If there are no more sessions, delete index
-    if (savedSess.length === 0) {
-      Node.rimraf(fname, function (err) {
-        if (err)
-          return callback("Error while removing DTT index file (" + fname + "): " + err);
-        //
-        // Done!
-        callback();
-      }.bind(this));
-    }
-    else if (nSess !== savedSess.length) { // If something has changed, write sessions list to file
-      Node.fs.writeFile(fname, JSON.stringify(savedSess), {encoding: "utf-8"}, function (err) {
-        if (err)
-          return callback("Error while writing DTT index file: " + err);
-        //
-        // Done!
-        callback();
-      }.bind(this));
-    }
-    else  // There are sessions and total count has not changed -> do nothing
+  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
+  var appPath = this.config.appDirectory + "/apps/" + this.name;
+  var purgeWorkerFile = function (idx) {
+    // If I've done, return to callee
+    if (idx >= maxAppWorkers)
       return callback();
-  }.bind(this));
+    //
+    var nextWrk = function (err) {
+      if (err)
+        return callback(err);
+      //
+      // Next
+      purgeWorkerFile(idx + 1);
+    };
+    //
+    // If the worker is "alive" I ask the worker's child to do the cleaning...
+    // This is needed because all "live" sessions must change their offsets...
+    if (this.workers[idx] && this.workers[idx].child) {
+      this.deleteTraceFilesCallback = nextWrk;
+      return this.workers[idx].child.send({type: Node.Worker.msgTypeMap.deleteTraceFiles, cnt: {beforeDate: beforeDate}});
+    }
+    //
+    // Worker is dead... Purge it directly...
+    var opts = {beforeDate: beforeDate, workerIdx: idx, appPath: appPath, logFn: Node.App.prototype.log.bind(this)};
+    var DTT = require("../../ide/app/server/dtt").DTT;
+    DTT.purgeSessionsInfo(opts, nextWrk);
+  }.bind(this);
+  //
+  // Purge first file
+  purgeWorkerFile(0);
 };
 
 

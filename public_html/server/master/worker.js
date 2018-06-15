@@ -99,6 +99,7 @@ Node.Worker.prototype.log = function (level, message, sender, data)
   data.user = this.user.userName;
   data.workerIdx = this.app.workers.indexOf(this);
   data.totalWorkers = this.app.workers.length;
+  data.options = this.options;
   //
   this.logger.log(level, message, sender, data);
 };
@@ -131,6 +132,14 @@ Node.Worker.prototype.createChild = function ()
   //
   // Log child creation
   this.log("DEBUG", "Created app child", "Worker.createChild");
+
+  // Now, that everything is completed and child is ready, if requested change child process priority excecuting renice command
+  if (this.options && this.options.priority && !/^win/.test(process.platform)) {
+    Node.child.execFile("/usr/bin/renice", [this.options.priority, this.child.pid], function (err, stdout, stderr) {    // jshint ignore:line
+      if (err)
+        pthis.log("WARN", "Can't renice child process: " + err, "Worker.createChild");
+    });
+  }
   //
   // Initialize app child
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
@@ -544,7 +553,6 @@ Node.Worker.prototype.createNewSession = function ()
  */
 Node.Worker.prototype.deleteSession = function (session)
 {
-  var pthis = this;
   this.log("DEBUG", "Delete worker session", "Worker.deleteSession", {sid: session.id});
   //
   // Remove the session from my session list
@@ -559,12 +567,13 @@ Node.Worker.prototype.deleteSession = function (session)
   //
   // If there are no more sessions in this worker, delete it after 10 seconds
   if (this.getLoad() === 0) {
-    pthis.log("DEBUG", "Worker is empty", "Worker.deleteSession");
+    var killTimeout = (this.options ? this.options.idleTimeout : 0) || 5000;      // default: 5 sec
     //
+    this.log("DEBUG", "Worker is empty", "Worker.deleteSession", {killTimeout: killTimeout});
     this.killWorkerTimer = setTimeout(function () {
-      pthis.log("DEBUG", "Worker is empty and timeout expired -> delete it", "Worker.deleteSession");
-      pthis.app.deleteWorker(pthis);
-    }, 5000);  // wait 5 sec
+      this.log("DEBUG", "Worker is empty and timeout expired -> delete it", "Worker.deleteSession", {killTimeout: killTimeout});
+      this.app.deleteWorker(this);
+    }.bind(this), killTimeout);
   }
 };
 
@@ -615,17 +624,40 @@ Node.Worker.prototype.getStatus = function (callback)
     return callback(stat);
   //
   // Add more info (per-process CPU load)
-  Node.child.execFile("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
-    if (err) {
-      this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
-      return callback(null, "Error getting the CPU load: " + (stderr || err));
-    }
-    //
-    stdout = stdout.split("\n")[1];   // Remove headers
-    stat.cpuLoad = parseFloat(stdout);
-    //
-    callback(stat);
-  }.bind(this));
+  if (process.platform === "freebsd") {   // freebsd
+    Node.child.execFile("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
+        return callback(null, "Error getting the CPU load: " + (stderr || err));
+      }
+      //
+      stdout = stdout.split("\n")[1];   // Remove headers
+      stat.cpuLoad = parseFloat(stdout);
+      //
+      callback(stat);
+    }.bind(this));
+  }
+  else if (process.platform === "linux") {   // linux
+    Node.child.execFile("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
+        return callback(null, "Error getting the CPU load: " + (stderr || err));
+      }
+      //
+      stdout = stdout.split("\n").slice(4);   // Remove headers
+      for (var i = 0; i < stdout.length; i++) {
+        // Search right PID
+        var procstat = stdout[i].trim().split(/\s+/);
+        if (parseInt(procstat[0]) === this.child.pid) {
+          stat.cpuLoad = parseFloat(procstat[7].replace("%", ""));
+          return callback(stat);
+        }
+      }
+      //
+      this.log("ERROR", "Error getting the CPU load. PID not found", "Worker.getStatus", {pid: this.child.pid});
+      callback(null, "Error getting the CPU load. PID not found");
+    });
+  }
 };
 
 

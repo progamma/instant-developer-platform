@@ -370,6 +370,9 @@ Node.AppSession.prototype.handleCTokenOpMsg = function (msg)
  */
 Node.AppSession.prototype.handleSendResponseMsg = function (msg)
 {
+  if (!this.restRes)
+    return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)", "AppSession.handleSendResponseMsg", msg);
+  //
   this.log("DEBUG", "Send REST response", "AppSession.handleSendResponseMsg", msg);
   //
   // Convert objects into strings
@@ -383,13 +386,26 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
     msg.code = parseInt(msg.code);      // Change code do INT if needed
   if (!msg.code || msg.code < 100 || msg.code >= 600)
     msg.code = 500;              // Don't send an invalid value (server crashes!!!)
-  if (msg.options.contentType)
-    this.restRes.writeHead(msg.code || 500, {"Content-Type": msg.options.contentType});
-  else
-    this.restRes.status(msg.code || 500);
   //
-  // Send response
-  this.restRes.end(msg.text + "");
+  // Handle content-type
+  if (msg.options.contentType) {
+    msg.options.headers = msg.options.headers || {};
+    msg.options.headers["Content-Type"] = msg.options.contentType;
+  }
+  //
+  try {
+    // Send code and headers
+    if (msg.options.headers && typeof msg.options.headers === "object")
+      this.restRes.writeHead(msg.code, msg.options.headers);
+    else
+      this.restRes.status(msg.code);
+    //
+    // Send response
+    this.restRes.end(msg.text + "");
+  }
+  catch (ex) {
+    this.log("WARN", "Can't send REST response: " + ex, "AppSession.handleSendResponseMsg", msg);
+  }
 };
 
 

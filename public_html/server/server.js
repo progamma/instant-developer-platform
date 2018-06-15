@@ -94,7 +94,6 @@ Node.Server.prototype.initServer = function ()
       srvtype = "prod";
     else
       srvtype = "local";
-    console.log("Current server mode: " + srvtype);
   }
   catch (ex) {
     console.log("Error while detecting server type. Switching to LOCAL mode: " + ex.message);
@@ -105,6 +104,7 @@ Node.Server.prototype.initServer = function ()
   this.config = new Node.Config(this);
   this.config.local = (srvtype === "local");
   this.config.loadConfig();
+  console.log("Current server mode: " + (this.config.local ? "LOCAL" : "PROD"));
   //
   // If local mode or HTTP protocol
   var server;
@@ -256,6 +256,9 @@ Node.Server.prototype.start = function ()
   // Create a new AUTK token and send it (if needed)
   this.config.initTokenTimer();
   //
+  // Initialize tracking (if active)
+  this.config.initTracking();
+  //
   // Start default server session of all apps
   this.startServerSessions();
   //
@@ -286,7 +289,7 @@ Node.Server.prototype.start = function ()
   Node.app.use(Node.BodyParser.urlencoded({extended: true, limit: "5mb"}));
   //
   // Parse various different custom JSON types as JSON
-  Node.app.use(Node.BodyParser.json({type: "application/*+json", limit: "5mb"}));
+  Node.app.use(Node.BodyParser.json({type: "application/json", limit: "5mb"}));
   //
   // Parse various different custom JSON types as JSON
   Node.app.use(Node.BodyParser.text({type: "text/*", limit: "5mb"}));
@@ -325,13 +328,14 @@ Node.Server.prototype.start = function ()
     Node.app.use("/", function (req, res, next) {
       var pathParts = req.path.toLowerCase().split("/");
       // http://localhost/Test/server/app.js  ->  [ '', 'test', 'server', 'app.js' ]
-      if (pathParts.length > 2 && pathParts[2] === "server")   // Part 0 is app name
+      var app = (pathParts.length > 1 ? this.config.getUser("manager").getApp(pathParts[1]) : null);
+      if (pathParts.length > 2 && pathParts[2] === "server" && (!app || !app.params || !app.params.allowOffline))   // Part 1 is app name
         return res.sendStatus(404);
-      else if (pathParts.length > 4 && pathParts.slice(2, 5).join("/") === "server/files/private")   // Part 0 is app name
+      else if (pathParts.length > 4 && pathParts.slice(2, 5).join("/") === "server/files/private")   // Part 1 is app name
         return res.sendStatus(404);
       //
       next();
-    });
+    }.bind(this));
     //
     // Serve APPS directory as static
     Node.app.use(Node.express.static(this.config.appDirectory + "/apps", expOpts));
@@ -359,6 +363,12 @@ Node.Server.prototype.start = function ()
   });
   Node.app.all("/:user/:project/:command/*", function (req, res) {
     pthis.config.processCommand(req, res);
+  });
+  Node.app.all("/:app/:cls", function (req, res) {
+    pthis.config.processRun(req, res);
+  });
+  Node.app.all("/:app/:cls/*", function (req, res) {
+    pthis.config.processRun(req, res);
   });
   //
   // Main error-handler (this should come after all the routes)
@@ -419,7 +429,7 @@ Node.Server.prototype.createChilder = function ()
   //
   // Remove the root privileges of the main process after the childer is born
   // (do it only if it can be done... on windows there is no setgid method)
-  if (!this.config.local && process.setgid) {
+  if (!this.config.local && process.platform === "freebsd" && process.setgid) {
     process.setgid("indert");
     process.setuid("indert");
   }
@@ -476,7 +486,8 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
     case "ChownChmod":
       var OSUser = params[0];
       var path = params[1];
-      this.execFileAsRoot("/usr/sbin/chown", ["-R", OSUser + ":" + OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
+      this.execFileAsRoot((process.platform === "freebsd" ? "/usr/sbin/chown" : "/bin/chown"),
+              ["-R", OSUser + ":" + OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           pthis.logger.log("ERROR", "Error while executing CHOWN: " + (stderr || err), "Server.execFileAsRoot", params);
           return callback(err, stdout, stderr);
@@ -492,7 +503,8 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
 
     case "ChownDBFolder":
       var dbpath = params[0];
-      this.execFileAsRoot("/usr/sbin/chown", ["-R", "pgsql:pgsql", dbpath], function (err, stdout, stderr) {   // jshint ignore:line
+      this.execFileAsRoot((process.platform === "freebsd" ? "/usr/sbin/chown" : "/bin/chown"),
+              ["-R", (process.platform === "freebsd" ? "pgsql:pgsql" : "postgres:postgres"), dbpath], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           pthis.logger.log("ERROR", "Error while executing CHOWN: " + (stderr || err), "Server.execFileAsRoot", params);
           return callback(err, stdout, stderr);
@@ -786,7 +798,7 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
       this.logger.log("DEBUG", "A new sync session begins", "Server.handleSyncMessage", msg);
       //
       // Ask the app to create a new AppSession
-      session = app.createNewSession();
+      session = app.createNewSession({type: "sync"});
       //
       // If a session can't be created -> do nothing
       if (!session) {

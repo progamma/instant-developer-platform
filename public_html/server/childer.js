@@ -110,13 +110,14 @@ Node.Childer.prototype.handleMessage = function (msg)
       switch (msg.cmd) {
         case "reboot":  // Request to reboot server
           if (!/^win/.test(process.platform)) {
-            var txt = "sudo -i pm2 stop inde\n";
+            var sudo = (process.platform === "freebsd" ? "sudo -i " : "");
+            var txt = sudo + "pm2 stop inde\n";
             txt += "rm " + __dirname + "/../log/console.*.log\n";
-            txt += "sudo -i pm2 start " + __dirname + "/inde.json\n";
+            txt += sudo + "pm2 start " + __dirname + "/inde.json\n";
             txt += "rm /root/_reboot";
             Node.fs.writeFileSync("/root/_reboot", txt, {mode: 0777});
             //
-            Node.child.spawn("csh", ["-c", "/root/_reboot"]).unref();
+            Node.child.spawn((process.platform === "freebsd" ? "csh" : "bash"), ["-c", "/root/_reboot"]).unref();
           }
           break;
       }

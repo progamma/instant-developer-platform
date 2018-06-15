@@ -83,7 +83,8 @@ Node.App.prototype.save = function ()
 {
   var r = {cl: "Node.App", name: this.name, version: this.version, date: this.date,
     stopped: this.stopped, startSS: this.startSS,
-    maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers};
+    maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
+    customWorkerConf: this.customWorkerConf};
   return r;
 };
 
@@ -105,6 +106,8 @@ Node.App.prototype.load = function (v)
     this.minAppUsersPerWorker = v.minAppUsersPerWorker;
   if (v.maxAppWorkers)
     this.maxAppWorkers = v.maxAppWorkers;
+  if (v.customWorkerConf)
+    this.customWorkerConf = v.customWorkerConf;
 };
 
 
@@ -140,9 +143,10 @@ Node.App.prototype.initApp = function (name)
 
 /*
  * Creates a new app session
+ * @params {Object} options - used to route session to proper worker
  * @returns {Node.AppSession}
  */
-Node.App.prototype.createNewSession = function ()
+Node.App.prototype.createNewSession = function (options)
 {
   // Uses 3 config parameters:
   //   "maxAppUsers": indicates how many users this app can handle
@@ -151,6 +155,34 @@ Node.App.prototype.createNewSession = function ()
   var maxAppUsers = this.maxAppUsers || this.config.maxAppUsers;
   var minAppUsersPerWorker = this.minAppUsersPerWorker || this.config.minAppUsersPerWorker;
   var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
+  //
+  // Handle optional options
+  options = options || {};
+  options.type = options.type || "web";
+  //
+  // Check if a custom app worker configuration applies
+  var wrkConf = {type: "*"};    // Default server/app configuration: type:ANY, query:NONE
+  if (this.customWorkerConf) {
+    for (var i = 0; i < this.customWorkerConf.length; i++) {
+      var conf = this.customWorkerConf[i];
+      //
+      // If the configuration has nothing to do with what callee asked for
+      if (conf.type !== options.type)
+        continue;
+      //
+      // If the configuration is specific to a particular query string
+      if (conf.query && (!options.query || options.query.indexOf(conf.guery) === -1))
+        continue;
+      //
+      // Found it! Use this custom configuration settings (if given)
+      maxAppUsers = conf.maxAppUsers || maxAppUsers;
+      minAppUsersPerWorker = conf.minAppUsersPerWorker || minAppUsersPerWorker;
+      maxAppWorkers = conf.maxAppWorkers || maxAppWorkers;
+      //
+      wrkConf = conf;     // Custom configuration
+      break;
+    }
+  }
   //
   // First check if this app can handle this new user
   var i, nusers = 0;
@@ -166,8 +198,12 @@ Node.App.prototype.createNewSession = function ()
   var minload;
   for (i = 0; i < this.workers.length; i++) {
     var wrk = this.workers[i];
-    var wrkload = wrk.getLoad();
     //
+    // If this worker is not what I'm looking for -> skip it
+    if (JSON.stringify(wrk.options) !== JSON.stringify(wrkConf))
+      continue;   // Wrong options
+    //
+    var wrkload = wrk.getLoad();
     if (minload === undefined || wrkload < minload) {
       minload = wrkload;
       worker = wrk;
@@ -183,10 +219,15 @@ Node.App.prototype.createNewSession = function ()
     worker = new Node.Worker(this);
     this.workers.push(worker);
     //
-    this.log("DEBUG", "Worker created", "App.createNewSession", {workerIdx: this.workers.indexOf(worker)});
+    // Remember worker's options
+    worker.options = wrkConf;
+    //
+    this.log("DEBUG", "Worker created", "App.createNewSession",
+            {workerIdx: this.workers.indexOf(worker), options: options, wrkConf: wrkConf});
   }
   else
-    this.log("DEBUG", "Reuse worker", "App.createNewSession", {workerIdx: this.workers.indexOf(worker)});
+    this.log("DEBUG", "Reuse worker", "App.createNewSession",
+            {workerIdx: this.workers.indexOf(worker), options: options, wrkConf: wrkConf});
   //
   // Ask the worker I've found/created to create a new session
   return worker.createNewSession();
@@ -220,7 +261,7 @@ Node.App.prototype.startServerSession = function (name, request)
     return this.log("WARN", "Can't start server session: session with same name already exists",
             "App.startServerSession", {name: name, request: request});
   //
-  var ss = this.createNewSession();
+  var ss = this.createNewSession({type: "ss"});
   //
   // If a session can't be created -> do nothing
   if (!ss)
@@ -249,6 +290,20 @@ Node.App.prototype.startDefaultServerSession = function ()
     return;
   //
   this.startServerSession("_default", {});
+  //
+  // Periodically check if the default server session dies... if so, restart it
+  if (!this.defaultSStimeoutID)
+    this.defaultSStimeoutID = setInterval(function () {
+      // If the app is updating or stopped, wait...
+      if (this.updating || this.stopped)
+        return;
+      //
+      var s = this.getServerSession("_default");
+      if (!s) {
+        this.log("WARN", "Default server session evaporated -> start a new one", "App.startDefaultServerSession");
+        this.startDefaultServerSession();   // Resurrect default server session
+      }
+    }.bind(this), 5000);
 };
 
 
@@ -263,6 +318,12 @@ Node.App.prototype.stopDefaultServerSession = function ()
   var s = this.getServerSession("_default");
   if (s)
     s.terminate();
+  //
+  // Stop default server session interval
+  if (this.defaultSStimeoutID) {
+    clearInterval(this.defaultSStimeoutID);
+    delete this.defaultSStimeoutID;
+  }
 };
 
 
@@ -516,11 +577,8 @@ Node.App.prototype.sendDttSessions = function (params, callback)
           // If there is already a live session coupled with this saved session
           if (lives) {
             // Copy "data" from saved to online
-            lives.exceptions = s.exceptions;
-            lives.warnings = s.warnings;
-            lives.buildVersion = s.buildVersion;
-            lives.updated = s.updated;
-            lives.start = s.start;
+            for (var p in s)
+              lives[p] = s[p];
           }
           else { // Not there... flag the session as offline
             s.type = "offline";
@@ -554,21 +612,36 @@ Node.App.prototype.deleteDttSessions = function (params, callback)
     return callback("Missing beforeDate parameter");
   }
   //
+  this.log("INFO", "Delete DTT sessions", "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate});
+  //
+  // Never ever do it more than once at a time!
+  if (this.deletingDttSessions) {
+    this.log("WARN", "Pending delete DTT sessions", "App.deleteDttSessions");
+    return callback("Pending delete DTT sessions");
+  }
+  this.deletingDttSessions = true;
+  //
   var beforeDate = new Date(params.req.query.beforeDate);
   var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
   var appPath = this.config.appDirectory + "/apps/" + this.name;
   var purgeWorkerFile = function (idx) {
     // If I've done, return to callee
-    if (idx >= maxAppWorkers)
+    if (idx >= maxAppWorkers) {
+      delete this.deletingDttSessions;
+      this.log("INFO", "Delete DTT sessions completed", "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate});
       return callback();
+    }
     //
     var nextWrk = function (err) {
-      if (err)
+      if (err) {
+        delete this.deletingDttSessions;
+        this.log("WARN", "Can't delete DTT sessions: " + err, "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate, workerIdx: idx});
         return callback(err);
+      }
       //
       // Next
       purgeWorkerFile(idx + 1);
-    };
+    }.bind(this);
     //
     // If the worker is "alive" I ask the worker's child to do the cleaning...
     // This is needed because all "live" sessions must change their offsets...
@@ -878,6 +951,9 @@ Node.App.prototype.install = function (params, callback)
                   pthis.log("WARN", "Can't delete temporary folder " + path + ".tmp: " + err, "App.install");
               });
               //
+              // Reset cache of WebAPI metadata
+              delete require.cache[require.resolve(path + "/server/webapi/metadata.json")];
+              //
               // Done: the app have been restored from the cloud. Now I need to start it
               pthis.start(null, function (err) {
                 // If there is an error, stop
@@ -1175,6 +1251,8 @@ Node.App.prototype.configure = function (params, callback)
     return callback("No property specified");
   }
   //
+  this.log("INFO", "Update app settings", "App.configure", query);
+  //
   if (query.name) {
     try {
       Node.fs.renameSync(this.config.appDirectory + "/apps/" + this.name, this.config.appDirectory + "/apps/" + query.name);
@@ -1217,6 +1295,15 @@ Node.App.prototype.configure = function (params, callback)
     this.minAppUsersPerWorker = (query.minAppUsersPerWorker ? parseInt(query.minAppUsersPerWorker, 10) : undefined);
   if (query.maxAppWorkers !== undefined)
     this.maxAppWorkers = (query.maxAppWorkers ? parseInt(query.maxAppWorkers, 10) : undefined);
+  if (query.customWorkerConf !== undefined) {
+    try {
+      this.customWorkerConf = (query.customWorkerConf ? JSON.parse(query.customWorkerConf) : undefined);
+    }
+    catch (ex) {
+      this.log("WARN", "Invalid customWorkerConf setting: " + ex.message, "App.configure", {customWorkerConf: query.customWorkerConf});
+      return callback("Invalid customWorkerConf setting: " + ex.message);
+    }
+  }
   if (query.params !== undefined) {
     var i, newParams = {};
     if (query.params) {
@@ -1237,7 +1324,7 @@ Node.App.prototype.configure = function (params, callback)
         }
       }
       catch (ex) {
-        this.log("ERROR", "Can't update app parameters: " + ex.message, "App.configure", {newParams: query.params});
+        this.log("WARN", "Can't update app parameters: " + ex.message, "App.configure", {newParams: query.params});
         return callback("Can't update app parameters: " + ex.message);
       }
     }
@@ -1275,7 +1362,7 @@ Node.App.prototype.configure = function (params, callback)
         this.config.saveConfig();
         //
         // Log the operation
-        this.log("DEBUG", "Updated app configuration", "App.configure", {config: query});
+        this.log("INFO", "App settings updated", "App.configure");
         //
         callback();
       }.bind(this));
@@ -1289,7 +1376,7 @@ Node.App.prototype.configure = function (params, callback)
   this.config.saveConfig();
   //
   // Log the operation
-  this.log("DEBUG", "Updated app configuration", "App.configure", {config: query});
+  this.log("INFO", "App settings updated", "App.configure");
   //
   callback();
 };

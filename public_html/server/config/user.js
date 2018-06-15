@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2016
  * All rights reserved
  */
-/* global require, module */
+/* global require, module, process */
 
 var Node = Node || {};
 
@@ -300,7 +300,7 @@ Node.User.prototype.assignOsUser = function (callback)
     // Now get the first free user
     for (i = 0; i < 300 && !this.OSUser; i++)
       if (array[i])
-        this.OSUser = "indeuser-" + i;
+        this.OSUser = (process.platform === "freebsd" ? "indeuser-" : "user-") + i;
     //
     // If not found...
     if (!this.OSUser) {
@@ -1594,7 +1594,7 @@ Node.User.prototype.processCommand = function (params, callback)
   switch (command) {
     case "create":
       if (isDB)
-        callback("Not supported");
+        this.createDatabase(objName, callback);
       else if (isAPP)
         callback("Not supported");
       else

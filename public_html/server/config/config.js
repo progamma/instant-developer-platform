@@ -174,6 +174,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.minAppUsersPerWorker = v.minAppUsersPerWorker;
   if (v.maxAppWorkers)
     this.maxAppWorkers = v.maxAppWorkers;
+  if (v.local)
+    this.local = true;
 };
 
 
@@ -585,12 +587,37 @@ Node.Config.prototype.processRun = function (req, res)
   var pthis = this;
   var sid, cid, session, i, app;
   var isIDE = (req.params.sid);     // [sid]/[appid]/run
+  var isWebApi = (req.params.cls);  // [app]/[clsid] or [app]/[clsid]/*
+  var isRest = (req.query && req.query.mode === "rest");
   //
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
-  // Handle only GET or POST
-  if (["GET", "POST", "OPTIONS"].indexOf(req.method) === -1) {
-    this.logger.log("WARN", "Request not GET nor POST nor OPTIONS", "Config.processRun",
+  if (req.method === "OPTIONS") {
+    // Accept only "OPTIONS" that comes from webAPI requests or a DROPZONE element
+    // (that will send a POST with mode=rest in the query string)
+    var meth = req.headers["access-control-request-method"];
+    if (["GET", "POST", "DELETE", "PUT", "PATCH"].indexOf(meth) >= 0 && (isRest || isWebApi)) {
+      // That good... reply with 204
+      this.logger.log("DEBUG", "Valid OPTIONS request", "Config.processRun",
+              {meth: req.method, url: req.originalUrl, headers: req.headers});
+      //
+      res.header("Access-Control-Allow-Origin", "*");
+      res.header("Access-Control-Allow-Headers", "Accept, Cache-Control, X-Requested-With, X-HTTP-Method, Content-Type, Prefer, Authorization");
+      res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, PUT, PATCH");
+      res.header("Access-Control-Max-Age", "86400"); // Cache for 24 hours
+      return res.status(204).end();
+    }
+    //
+    // Something is wrong.. better reply with an error
+    this.logger.log("WARN", "Invalid OPTIONS request", "Config.processRun",
+            {meth: req.method, url: req.originalUrl, headers: req.headers});
+    return res.status(405).end("HTTP method not supported");
+  }
+  //
+  // Check methods
+  if ((!isWebApi && ["GET", "POST"].indexOf(req.method) === -1) ||
+          (isWebApi && ["GET", "POST", "PUT", "DELETE", "PATCH"].indexOf(req.method) === -1)) {
+    this.logger.log("WARN", "Request method not allowed", "Config.processRun",
             {meth: req.method, url: req.originalUrl, remoteAddress: req.connection.remoteAddress});
     return res.status(405).end("HTTP method not supported");
   }
@@ -655,6 +682,11 @@ Node.Config.prototype.processRun = function (req, res)
       appName = urlParts[0];
       this.logger.log("DEBUG", "App detected (manager/app form)", "Config.processRun", {userName: userName, app: appName, url: req.originalUrl});
     }
+    else if (isWebApi) {
+      userName = "manager";
+      appName = req.params.app;
+      this.logger.log("DEBUG", "App detected (manager/app/cls form)", "Config.processRun", {userName: userName, app: appName, url: req.originalUrl});
+    }
     else {
       userName = urlParts[0];
       appName = urlParts[1];        // [user]/[app] and [user]/[app]?sid={SID}
@@ -671,6 +703,8 @@ Node.Config.prototype.processRun = function (req, res)
     // Get the user
     var user = this.getUser(userName);
     if (!user) {
+      if (isWebApi)
+        return req.next();
       this.logger.log("WARN", "User not found", "Config.processRun", {user: userName, app: appName, url: req.originalUrl});
       return res.status(500).send("User " + userName + " not found");
     }
@@ -678,6 +712,8 @@ Node.Config.prototype.processRun = function (req, res)
     // Search the app with the given name
     app = user.getApp(appName);
     if (!app) {
+      if (isWebApi)
+        return req.next();
       this.logger.log("WARN", "App not found", "Config.processRun", {user: userName, app: appName, url: req.originalUrl});
       return res.status(404).send("App " + appName + " not found");
     }
@@ -690,7 +726,7 @@ Node.Config.prototype.processRun = function (req, res)
     //
     // If the app is updating
     if (app.updating) {
-      this.logger.log("WARN", "Can't start app because it's updating", "Config.startApp", {user: userName, app: app.name});
+      this.logger.log("WARN", "Can't start app because it's updating", "Config.processRun", {user: userName, app: app.name});
       //
       // return res.redirect("/" + app.name + "/client/updating.html");
       // I could redirect to "upadting.html" file... but then the user would try to hit the REFRESH button
@@ -704,13 +740,19 @@ Node.Config.prototype.processRun = function (req, res)
         stream.pipe(res);
       });
       stream.on("end", function () {
-        pthis.logger.log("DEBUG", "Updating.html sent", "Config.startApp", {user: userName, app: app.name});
+        pthis.logger.log("DEBUG", "Updating.html sent", "Config.processRun", {user: userName, app: app.name});
       });
       stream.on("error", function (err) {
-        pthis.logger.log("WARN", "Error sending the file " + path + " to an updating app: " + err, "Config.startApp",
+        pthis.logger.log("WARN", "Error sending the file " + path + " to an updating app: " + err, "Config.processRun",
                 {user: userName, app: app.name});
       });
       return;
+    }
+    //
+    // If the app has been started in OFFLINE mode and the app CAN be started in offline mode
+    if (req.query.mode === "offline" && app.params && app.params.allowOffline) {
+      this.logger.log("DEBUG", "Start app in OFFLINE mode", "Config.processRun", {user: userName, app: app.name});
+      return res.redirect("/" + app.name + "/" + this.getAppMainFile(req.query.mode));
     }
     //
     // If a SID was provided on the query string, check for it
@@ -720,7 +762,8 @@ Node.Config.prototype.processRun = function (req, res)
       // Search if a session for this SID exists
       session = this.server.appSessions[sid];
       if (!session) {
-        this.logger.log("WARN", "Sesion not found", "Config.startApp", {sid: sid, cid: cid});
+        this.logger.log("WARN", "Session not found", "Config.processRun",
+                {sid: sid, cid: cid, user: app.user.userName, app: app.name});
         return res.status(500).send("Invalid session");
       }
       //
@@ -728,11 +771,12 @@ Node.Config.prototype.processRun = function (req, res)
       if (cid) {
         var client = session.getAppClientById(cid);
         if (!client) {
-          this.logger.log("WARN", "Sesion client not found", "Config.startApp", {sid: sid, cid: cid});
+          this.logger.log("WARN", "Session client not found", "Config.processRun",
+                  {sid: sid, cid: cid, user: app.user.userName, app: app.name});
           return res.status(500).send("Invalid client");
         }
       }
-      else if (req.query.mode !== "rest" && req.query.ctoken) {
+      else if (!isRest && req.query.ctoken) {
         // - SID was provided and is valid and is connected with a master client
         // - Session is not REST
         // - CID was not provided
@@ -742,16 +786,54 @@ Node.Config.prototype.processRun = function (req, res)
         cid = req.query.ctoken;   // Use the CTOKEN as new client ID... it's easier
         session.newCid = cid;
         //
-        this.logger.log("DEBUG", "No CID provided for MASTER session -> grant for telecollaboration", "Config.startApp", {sid: sid, cid: cid});
+        this.logger.log("DEBUG", "No CID provided for MASTER session -> grant for telecollaboration", "Config.processRun",
+                {sid: sid, cid: cid, user: app.user.userName, app: app.name});
       }
     }
     else {
+      if (isWebApi) {
+        // Try to load metadata.json file
+        var metadataPath = this.appDirectory + "/apps/" + appName + "/server/webapi/metadata.json";
+        if (!Node.fs.existsSync(metadataPath))
+          return req.next();
+        //
+        // Read content of metadata.json
+        var metadata = require(metadataPath);
+        //
+        // If metadata is required (by GET) responde with it
+        if (req.params.cls === "$metadata" && req.method === "GET") {
+          var serviceMetadata = require("odata-v4-service-metadata").ServiceMetadata;
+          res.type("text/xml").status(200).end(serviceMetadata.processMetadataJson(metadata).data);
+          return;
+        }
+        //
+        // Verify if cls is a good name of class with WebAPI flag
+        var cls = req.params.cls.split("(")[0];
+        if (!metadata.dataServices.schema.find(function (s) {
+          if (!s.entityContainer)
+            return false;
+          //
+          return s.entityContainer.entitySet.find(function (e) {
+            if (e.name === cls) {
+              req.params.cls = (s.namespace === appName ? "" : s.namespace + ".") + e.name;
+              return true;
+            }
+          }) || s.entityContainer.actionImport.find(function (a) {
+            if (a.name === cls) {
+              req.params.cls = (s.namespace === appName ? "" : s.namespace + ".") + cls.split("__")[0];
+              return true;
+            }
+          });
+        }))
+          return req.next();
+      }
+      //
       // No SID -> create a new session
-      session = app.createNewSession();
+      session = app.createNewSession({type: (isRest ? "rest" : "web"), query: req.originalUrl.split("?")[1]});
       //
       // If a session can't be created -> do nothing
       if (!session) {
-        this.logger.log("WARN", "Session can't be created: too many users", "Config.startApp", {user: app.user.userName, app: app.name});
+        this.logger.log("WARN", "Session can't be created: too many users", "Config.processRun", {user: app.user.userName, app: app.name});
         return res.status(503).send("Too many users");
       }
       //
@@ -766,13 +848,15 @@ Node.Config.prototype.processRun = function (req, res)
               {user: app.user.userName, app: appName, sid: sid, cid: cid, url: req.originalUrl});
     }
     //
-    // Create/update cookies for this session
-    var expires = new Date(Date.now() + 86400000);
-    res.cookie("sid", sid, {expires: expires, path: "/" + app.name});
-    res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
-    //
-    // Protects SID cookie
-    session.protectSID(res, expires);
+    if (!isRest && !isWebApi) {
+      // Create/update cookies for this session
+      var expires = new Date(Date.now() + 86400000);
+      res.cookie("sid", sid, {expires: expires, path: "/" + app.name});
+      res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
+      //
+      // Protects SID cookie
+      session.protectSID(res, expires);
+    }
   }
   //
   // Define app request callback
@@ -783,6 +867,16 @@ Node.Config.prototype.processRun = function (req, res)
       session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, "");
     session.cookies = req.cookies;
     //
+    if (isRest || isWebApi) {
+      session.request.protocol = req.protocol;
+      session.request.host = req.get("host");
+      session.request.url = req.url;
+      session.request.method = req.method;
+      session.request.headers = req.headers;
+      if (isWebApi)
+        session.request.class = req.params.cls;
+    }
+    //
     if (params) {
       var parr = Object.keys(params);
       for (i = 0; i < parr.length; i++)
@@ -790,7 +884,7 @@ Node.Config.prototype.processRun = function (req, res)
     }
     //
     // Start the right request
-    if (req.query && req.query.mode === "rest") {
+    if (isRest || isWebApi) {
       session.startRest(req, res);
       //
       // Restore "original" request
@@ -894,27 +988,8 @@ Node.Config.prototype.processRun = function (req, res)
     else // non-multipart post
       newAppReq(req, res, session);
   }
-  else if (req.method === "GET")
+  else if (req.method === "GET" || (isWebApi && (req.method === "DELETE" || req.method === "PUT" || req.method === "PATCH")))
     newAppReq(req, res, session);
-  else if (req.method === "OPTIONS") {
-    // Accept only "OPTIONS" that comes from a DROPZONE element
-    // (that will send a POST with mode=rest in the query string)
-    var meth = req.headers["access-control-request-method"];
-    if (meth === "POST" && req.originalUrl.indexOf("mode=rest") !== -1) {
-      // That good... reply with 200
-      this.logger.log("DEBUG", "Valid OPTIONS request", "Config.processRun",
-              {meth: req.method, url: req.originalUrl, headers: req.headers});
-      //
-      res.header("Access-Control-Allow-Origin", "*");
-      res.header("Access-Control-Allow-Headers", "Accept, Cache-Control, X-Requested-With");
-      return res.status(200).end();
-    }
-    //
-    // Something is wrong.. better reply with an error
-    this.logger.log("WARN", "Invalid OPTIONS request", "Config.processRun",
-            {meth: req.method, url: req.originalUrl, headers: req.headers});
-    return res.status(405).end("HTTP method not supported");
-  }
 };
 
 
@@ -993,7 +1068,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
     }
     //
     // On linux add NTP info and CPU load
-    if (!/^win/.test(process.platform)) {   // linux
+    if (process.platform === "freebsd") {   // freebsd
       this.server.execFileAsRoot("/usr/bin/ntpq", ["-p"], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           this.logger.log("ERROR", "Error getting NTP info: " + (stderr || err), "Config.sendStatus");
@@ -1008,7 +1083,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
         // Add more info (per-process CPU load)
         this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", process.pid], function (err, stdout, stderr) {   // jshint ignore:line
           if (err) {
-            this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
+            this.logger.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
             return callback(null, "Error getting the CPU load: " + (stderr || err));
           }
           //
@@ -1023,6 +1098,34 @@ Node.Config.prototype.sendStatus = function (params, callback)
           });
         }.bind(this));
       }.bind(this));
+    }
+    else if (process.platform === "linux") {   // linux
+      result.serverInfo.time = {date: new Date()};
+      //
+      // Add more info (per-process CPU load)
+      this.server.execFileAsRoot("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
+        if (err) {
+          this.logger.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
+          return callback(null, "Error getting the CPU load: " + (stderr || err));
+        }
+        //
+        stdout = stdout.split("\n").slice(4);   // Remove headers
+        for (var i = 0; i < stdout.length; i++) {
+          // Search right PID
+          var procstat = stdout[i].trim().split(/\s+/);
+          if (parseInt(procstat[0]) === process.pid) {
+            result.serverInfo.cpuLoad = parseFloat(procstat[7].replace("%", ""));
+            break;
+          }
+        }
+      });
+      //
+      // Finally, get CPU load
+      Node.Utils.getCPUload(function (cpuLoad) {
+        result.serverInfo.globalCpuLoad = cpuLoad;
+        //
+        callback({msg: JSON.stringify(result)});
+      });
     }
     else
       callback({msg: JSON.stringify(result)});
@@ -1150,6 +1253,8 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.server.backupDisk();
   if (query.consoleURL !== undefined || query.timerTokenConsole)
     this.initTokenTimer();
+  if ((query.services || "").split(",").indexOf("track") !== -1)
+    return this.initTracking(callback);
   //
   callback();
 };
@@ -1359,9 +1464,16 @@ Node.Config.prototype.update = function (params, callback)
 {
   // If the file is missing -> can't continue
   if (!params.req.query.file) {
-    this.log("WARN", "Missing FILE parameter", "Config.update");
+    this.logger.log("WARN", "Missing FILE parameter", "Config.update");
     return callback("Missing FILE parameter");
   }
+  //
+  // Check if I'm already updating
+  if (this.isUpdating) {
+    this.logger.log("WARN", "The server is already updating", "Config.update");
+    return callback("The server is already updating");
+  }
+  this.isUpdating = true;
   //
   var pthis = this;
   var foldername = params.req.query.file.substring(0, params.req.query.file.length - 7);      // Remove .tar.gz
@@ -1386,6 +1498,7 @@ Node.Config.prototype.update = function (params, callback)
       if (err1)
         pthis.logger.log("WARN", "Can't remove temporary directory: " + err1, "Config.update", {path: path});
       //
+      delete pthis.isUpdating;
       callback(err);
     });
   };
@@ -1434,6 +1547,7 @@ Node.Config.prototype.update = function (params, callback)
               // LOG the operation
               pthis.logger.log("INFO", "Update succeeded", "Config.update");
               //
+              delete pthis.isUpdating;
               callback({msg: "Update succeeded"});
             };
             //
@@ -1692,91 +1806,94 @@ Node.Config.prototype.checkDataDisk = function (params, callback)
     callback(err);
   }.bind(this);
   //
-  // First compute the "SCSI" disk reading it from dmesg.boot when disk was first detected  (da1 is /mnt/disk)
-  // I'm expecting something like this:
-  //    (da1:vtscsi0:0:2:0): UNMAPPED
-  //    da1 at vtscsi0 bus 0 scbus0 target 2 lun 0
-  //    da1: <Google PersistentDisk 1> Fixed Direct Access SPC-4 SCSI device
-  //    da1: 2937028.393MB/s transfers
-  //    da1: Command Queueing enabled
-  //    da1: 10240MB (20971520 512 byte sectors)
-  Node.child.execFile("/usr/bin/grep", ["da1", "/var/run/dmesg.boot"], function (err, stdout, stderr) {    // jshint ignore:line
-    if (err)
-      return errorFnc("Error while computing SCSI device id: " + (stderr || err));
-    //
-    stdout = stdout.split("\n");      // Split lines
-    var scsiId = stdout[0];           // First row
-    scsiId = scsiId.substring(1, scsiId.indexOf(")"));      // Get part inside ()
-    scsiId = scsiId.split(":");       // Split :
-    scsiId = scsiId.slice(2);         // Remove "(da1:vtscsi0:"
-    scsiId = scsiId.join(":");        // Re-join and get scsiId
-    //
-    // Ask the system to reprobe disk size
-    this.server.execFileAsRoot("/sbin/camcontrol", ["reprobe", scsiId], function (err, stdout, stderr) {   // jshint ignore:line
+  // On FreeBSD
+  if (process.platform === "freebsd") {
+    // First compute the "SCSI" disk reading it from dmesg.boot when disk was first detected  (da1 is /mnt/disk)
+    // I'm expecting something like this:
+    //    (da1:vtscsi0:0:2:0): UNMAPPED
+    //    da1 at vtscsi0 bus 0 scbus0 target 2 lun 0
+    //    da1: <Google PersistentDisk 1> Fixed Direct Access SPC-4 SCSI device
+    //    da1: 2937028.393MB/s transfers
+    //    da1: Command Queueing enabled
+    //    da1: 10240MB (20971520 512 byte sectors)
+    Node.child.execFile("/usr/bin/grep", ["da1", "/var/run/dmesg.boot"], function (err, stdout, stderr) {    // jshint ignore:line
       if (err)
-        return errorFnc("Error while reprobing disk size: " + (stderr || err));
+        return errorFnc("Error while computing SCSI device id: " + (stderr || err));
       //
-      // Get current part status (da1 is /mnt/disk)
-      this.server.execFileAsRoot("/sbin/gpart", ["show", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+      stdout = stdout.split("\n");      // Split lines
+      var scsiId = stdout[0];           // First row
+      scsiId = scsiId.substring(1, scsiId.indexOf(")"));      // Get part inside ()
+      scsiId = scsiId.split(":");       // Split :
+      scsiId = scsiId.slice(2);         // Remove "(da1:vtscsi0:"
+      scsiId = scsiId.join(":");        // Re-join and get scsiId
+      //
+      // Ask the system to reprobe disk size
+      this.server.execFileAsRoot("/sbin/camcontrol", ["reprobe", scsiId], function (err, stdout, stderr) {   // jshint ignore:line
         if (err)
-          return errorFnc("Error while executing GPART: " + (stderr || err));
+          return errorFnc("Error while reprobing disk size: " + (stderr || err));
         //
-        stdout = stdout.split("\n");      // Split lines
-        //
-        // Expected reply:
-        // =>      34  20971453  da1  GPT  (TOTALSIZE)            (eg. 15G)
-        //         34         6       - free -  (3.0K)
-        //         40  20971440    1  freebsd-ufs  (USEDSIZE)     (eg. 10G)
-        //   20971480         7       - free -  (3.5K)
-        //
-        disk.designSize = stdout[0].split(/\s+/)[5];
-        disk.designSize = disk.designSize.substring(1, disk.designSize.length - 1);   // Remove ()
-        //
-        // Now search the "freebsd-ufs" partition (there should be only one!)
-        for (var i = 1; i < stdout.length; i++) {
-          if (stdout[i].indexOf("freebsd-ufs") !== -1) {
-            disk.currSize = stdout[i].split(/\s+/)[5];
-            disk.currSize = disk.currSize.substring(1, disk.currSize.length - 1);    // Remove ()
-            break;
-          }
-        }
-        //
-        // If Size is the same, do nothing
-        if (disk.designSize === disk.currSize)
-          return callback();
-        //
-        // Size is not equal... fix it
-        this.logger.log("INFO", "Fixing data disk", "Config.checkDataDisk", disk);
-        //
-        // Recover partition
-        this.server.execFileAsRoot("/sbin/gpart", ["recover", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+        // Get current part status (da1 is /mnt/disk)
+        this.server.execFileAsRoot("/sbin/gpart", ["show", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
           if (err)
-            return errorFnc("Error while executing GPART RECOVER: " + (stderr || err));
+            return errorFnc("Error while executing GPART: " + (stderr || err));
           //
-          // Out from the box you cannot write to MBR of disk, which is the one FreeBSD boots from.
-          // After setting sysctl kern.geom.debugflags=16 I get allowed to shoot in the foot and write to MBR.
-          this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=16"], function (err, stdout, stderr) {   // jshint ignore:line
+          stdout = stdout.split("\n");      // Split lines
+          //
+          // Expected reply:
+          // =>      34  20971453  da1  GPT  (TOTALSIZE)            (eg. 15G)
+          //         34         6       - free -  (3.0K)
+          //         40  20971440    1  freebsd-ufs  (USEDSIZE)     (eg. 10G)
+          //   20971480         7       - free -  (3.5K)
+          //
+          disk.designSize = stdout[0].split(/\s+/)[5];
+          disk.designSize = disk.designSize.substring(1, disk.designSize.length - 1);   // Remove ()
+          //
+          // Now search the "freebsd-ufs" partition (there should be only one!)
+          for (var i = 1; i < stdout.length; i++) {
+            if (stdout[i].indexOf("freebsd-ufs") !== -1) {
+              disk.currSize = stdout[i].split(/\s+/)[5];
+              disk.currSize = disk.currSize.substring(1, disk.currSize.length - 1);    // Remove ()
+              break;
+            }
+          }
+          //
+          // If Size is the same, do nothing
+          if (disk.designSize === disk.currSize)
+            return callback();
+          //
+          // Size is not equal... fix it
+          this.logger.log("INFO", "Fixing data disk", "Config.checkDataDisk", disk);
+          //
+          // Recover partition
+          this.server.execFileAsRoot("/sbin/gpart", ["recover", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
             if (err)
-              return errorFnc("Error while executing SYSCTL=16: " + (stderr || err));
+              return errorFnc("Error while executing GPART RECOVER: " + (stderr || err));
             //
-            // Resize partition to fill up all the free space
-            this.server.execFileAsRoot("/sbin/gpart", ["resize", "-i", "1", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
+            // Out from the box you cannot write to MBR of disk, which is the one FreeBSD boots from.
+            // After setting sysctl kern.geom.debugflags=16 I get allowed to shoot in the foot and write to MBR.
+            this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=16"], function (err, stdout, stderr) {   // jshint ignore:line
               if (err)
-                return errorFnc("Error while executing GPART RESIZE: " + (stderr || err));
+                return errorFnc("Error while executing SYSCTL=16: " + (stderr || err));
               //
-              // Resize file system and fill up the partition (quiet mode!!!)
-              this.server.execFileAsRoot("/sbin/growfs", ["-y", "/dev/da1p1"], function (err, stdout, stderr) {   // jshint ignore:line
+              // Resize partition to fill up all the free space
+              this.server.execFileAsRoot("/sbin/gpart", ["resize", "-i", "1", "da1"], function (err, stdout, stderr) {   // jshint ignore:line
                 if (err)
-                  return errorFnc("Error while executing GROWFS: " + (stderr || err));
+                  return errorFnc("Error while executing GPART RESIZE: " + (stderr || err));
                 //
-                // Restore flag
-                this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=0"], function (err, stdout, stderr) {   // jshint ignore:line
+                // Resize file system and fill up the partition (quiet mode!!!)
+                this.server.execFileAsRoot("/sbin/growfs", ["-y", "/dev/da1p1"], function (err, stdout, stderr) {   // jshint ignore:line
                   if (err)
-                    return errorFnc("Error while executing SYSCTL=0: " + (stderr || err));
+                    return errorFnc("Error while executing GROWFS: " + (stderr || err));
                   //
-                  // Done!
-                  this.logger.log("INFO", "Data disk fixed", "Config.checkDataDisk");
-                  callback({msg: "Fixed to " + disk.designSize, code: 200});
+                  // Restore flag
+                  this.server.execFileAsRoot("/sbin/sysctl", ["kern.geom.debugflags=0"], function (err, stdout, stderr) {   // jshint ignore:line
+                    if (err)
+                      return errorFnc("Error while executing SYSCTL=0: " + (stderr || err));
+                    //
+                    // Done!
+                    this.logger.log("INFO", "Data disk fixed", "Config.checkDataDisk");
+                    callback({msg: "Fixed to " + disk.designSize, code: 200});
+                  }.bind(this));
                 }.bind(this));
               }.bind(this));
             }.bind(this));
@@ -1784,6 +1901,88 @@ Node.Config.prototype.checkDataDisk = function (params, callback)
         }.bind(this));
       }.bind(this));
     }.bind(this));
+  }
+  else if (process.platform === "linux") {
+    this.server.execFileAsRoot("/usr/sbin/parted", ["-m", "/dev/sdb", "print"], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err)
+        return errorFnc("Error while executing PARTED: " + (stderr || err));
+      //
+      // BYT;
+      // /dev/sdb:23.6GB:scsi:512:4096:loop:Google PersistentDisk:;
+      // 1:0.00B:23.6GB:23.6GB:ext4::;
+      disk.designSize = stdout.split("\n")[1];
+      disk.designSize = disk.designSize.split(":")[1];
+      //
+      // Resize partition to fill up all the free space
+      this.server.execFileAsRoot("/usr/sbin/resize2fs", ["/dev/sdb"], function (err, stdout, stderr) {   // jshint ignore:line
+        if (err)
+          return errorFnc("Error while executing RESIZE2FS: " + (stderr || err));
+        //
+        // If the disk needs nothing
+        if (stderr.indexOf("The filesystem is already") !== -1)
+          return callback();
+        //
+        // Done!
+        this.logger.log("INFO", "Data disk fixed", "Config.checkDataDisk");
+        callback({msg: "Fixed to " + disk.designSize, code: 200});
+      }.bind(this));
+    }.bind(this));
+  }
+  else
+    return errorFnc("Unsupported platform: " + process.platform);
+};
+
+
+/**
+ * Initialize tracking
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Config.prototype.initTracking = function (callback)
+{
+  // At start-up there is no callback
+  callback = callback || function () {
+  };
+  //
+  // If tracking is not active, do nothing
+  if ((this.services || "").split(",").indexOf("track") === -1)
+    return callback();
+  //
+  var Postgres = require("../../ide/app/server/postgres");
+  var trackDB = new Postgres();
+  trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "IssueID", "datatype": "id", "maxlen": 24}, {"id": "SEaiwn+L1Vq6SOn4cKVP2Q==", "name": "IssueCode", "datatype": "i"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}]};
+  trackDB.initDbConString("postgres://" + this.dbUser + ":" + this.dbPassword + "@" + this.dbAddress + ":" + this.dbPort);
+  //
+  // Replace the standard createDb function (normally the updateSchema method is called from a child process
+  // thus the createDb method sends a message to the parent process... but not this time)
+  trackDB.createDb = function (cb) {      // cb - result, error
+    var manager = this.getUser("manager");     // It must exist
+    var db = manager.getDatabase(trackDB.schema.name);
+    if (!db) {
+      // $tracking$ DB is not there -> create one
+      manager.createDatabase(trackDB.schema.name, function (err) {
+        if (err) {
+          this.logger.log("ERROR", "Error while creating " + trackDB.schema.name + " database: " + (err.msg || err), "Config.initTracking");
+          return cb(null, err.msg || err);
+        }
+        //
+        // Now DB exists -> check DB schema
+        cb();
+      }.bind(this));
+    }
+    else
+      cb();
+  }.bind(this);
+  //
+  // Update database's schema
+  trackDB.updateSchema(function (result, error) {
+    if (error) {
+      this.logger.log("ERROR", "Error while updating " + trackDB.schema.name + " schema: " + error, "Config.initTracking");
+      callback("Error while updating " + trackDB.schema.name + " schema: " + error);
+    }
+    else {
+      this.logger.log("DEBUG", trackDB.schema.name + " schema updated", "Config.initTracking");
+      callback();
+    }
   }.bind(this));
 };
 
@@ -1798,11 +1997,8 @@ Node.Config.prototype.processCommand = function (req, res)
   var pthis = this;
   //
   // Handle only GET or POST
-  if (req.method !== "POST" && req.method !== "GET") {
-    this.logger.log("WARN", "Request not GET nor POST", "Config.processCommand",
-            {meth: req.method, url: req.originalUrl, host: req.connection.remoteAddress});
-    return res.status(405).end("HTTP method not supported");
-  }
+  if (req.method !== "POST" && req.method !== "GET")
+    return req.next();
   //
   // Tokenize URL
   var params = {tokens: req.originalUrl.substring(1).split("?")[0].split("/")};
@@ -1889,11 +2085,8 @@ Node.Config.prototype.processCommand = function (req, res)
 
     default:
       var user = this.getUser(userName);
-      if (!user) {
-        this.logger.log("WARN", "User not found", "Config.processCommand",
-                {cmd: command, user: userName, url: params.req.originalUrl});
-        return sendResponse({code: 404, err: "User not found"});
-      }
+      if (!user)
+        return req.next();
       //
       // If the userName is "manager" handle "basic" server commands otherwise handle user commands
       // (http://servername/manager/command)

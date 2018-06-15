@@ -321,6 +321,8 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
   //
   // Listen to disconnect event
   socket.on("disconnect", function () {
+    pthis.log("DEBUG", "IDE socket disconnected", "IDESession.openConnection", msg);
+    //
     // Close all apps started by this session
     // (do it backwards because the "close()" call will close the socket that will send
     // a synchronous message to session that will remove the client from the appClients array)
@@ -585,24 +587,44 @@ Node.IDESession.prototype.handleCreateDBMsg = function (msg)
  */
 Node.IDESession.prototype.handleSendResponseMsg = function (msg)
 {
+  if (!this.restRes)
+    return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)", "IDESession.handleSendResponseMsg", msg);
+  //
   this.log("DEBUG", "Sending REST response", "IDESession.handleSendResponseMsg", msg);
   //
-  // Convert objects into strings
+  // Adapt objects
+  if (typeof msg.code === "object") {   // If someone wrote app.sendResponse({code: 200, text: "ok"})
+    msg.text = msg.text || msg.code.text;
+    msg.code = (msg.code.code || 0);
+  }
   if (typeof msg.text === "object")
     msg.text = JSON.stringify(msg.text);
   //
   // Handle options, if any
   if (typeof msg.code === "string")
-    msg.code = parseInt(msg.code);      // Change code do INT if needed
+    msg.code = parseInt(msg.code);      // Change code to INT if needed
   if (!msg.code || msg.code < 100 || msg.code >= 600)
     msg.code = 500;              // Don't send an invalid value (server crashes!!!)
-  if (msg.options.contentType)
-    this.restRes.writeHead(msg.code || 500, {"Content-Type": msg.options.contentType});
-  else
-    this.restRes.status(msg.code || 500);
   //
-  // Send response
-  this.restRes.end(msg.text + "");
+  // Handle content-type
+  if (msg.options.contentType) {
+    msg.options.headers = msg.options.headers || {};
+    msg.options.headers["Content-Type"] = msg.options.contentType;
+  }
+  //
+  try {
+    // Send code and headers
+    if (msg.options.headers && typeof msg.options.headers === "object")
+      this.restRes.writeHead(msg.code, msg.options.headers);
+    else
+      this.restRes.status(msg.code);
+    //
+    // Send response
+    this.restRes.end(msg.text + "");
+  }
+  catch (ex) {
+    this.log("WARN", "Can't send REST response: " + ex, "IDESession.handleSendResponseMsg", msg);
+  }
 };
 
 
@@ -781,6 +803,35 @@ Node.IDESession.prototype.handleDeleteTutorialDBsMessage = function (dbNames)
  */
 Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
 {
+  // If the server is this one execute a "local" query on a "local" database
+  if (options.server === "localhost") {
+    // Get the user
+    var user = this.config.getUser(options.user || "manager");
+    if (!user) {
+      this.log("WARN", "User not found", "IDESession.handleRemoteQueryMessage", options);
+      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, err: "User not found"});
+    }
+    var db = user.getDatabase(options.database);
+    if (!db) {
+      this.log("WARN", "Database not found", "IDESession.handleRemoteQueryMessage", options);
+      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, err: "Database not found"});
+    }
+    //
+    var params = {req: {query: {query: options.sql}}};
+    db.query(params, function (response) {
+      var result, err;
+      if (response.msg)
+        result = JSON.parse(response.msg);
+      else
+        err = response.err || response;
+      //
+      this.log("DEBUG", "Local query executed", "IDESession.handleRemoteQueryMessage", {result: result, err: err});
+      this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, result: result, err: err});
+    }.bind(this));
+    //
+    return;
+  }
+  //
   this.server.request.executeRemoteQuery(options, function (result, err) {
     this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, result: result, err: err});
   }.bind(this));

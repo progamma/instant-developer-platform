@@ -85,7 +85,7 @@ Node.Project.prototype.log = function (level, message, sender, data)
 Node.Project.prototype.save = function ()
 {
   var r = {cl: "Node.Project", id: this.id, name: this.name, version: this.version, public: this.public,
-    lastSave: this.lastSave, lastSaveID: this.lastSaveID, ivAES: this.ivAES};
+    lastSave: this.lastSave, lastSaveID: this.lastSaveID, ivAES: this.ivAES, ivAESdtt: this.ivAESdtt};
   return r;
 };
 
@@ -103,6 +103,7 @@ Node.Project.prototype.load = function (v)
   this.lastSave = v.lastSave;
   this.lastSaveID = v.lastSaveID;
   this.ivAES = v.ivAES;
+  this.ivAESdtt = v.ivAESdtt;
 };
 
 
@@ -376,6 +377,22 @@ Node.Project.prototype.viewProject = function (params, callback)
   // Create a new session for this project (READONLY mode)
   // Pass query string params if any
   var qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
+  //
+  // If this is an openDTT operation
+  if (qry && qry.showDtt) {
+    // If needed generate key for dtt projects crypting
+    if (!this.ivAESdtt) {
+      this.ivAESdtt = [];
+      for (var i = 0; i < 16; i++)
+        this.ivAESdtt[i] = Math.floor((Math.random() * 256) + 1);
+      //
+      // Save the new configuration
+      this.config.saveConfig();
+    }
+    //
+    // Send them to client so that it can save/load DTT projects
+    qry.ivAESdtt = this.ivAESdtt;
+  }
   var session = this.server.createSession(this, {readOnly: true, openParams: qry});
   //
   // Protects SID cookie

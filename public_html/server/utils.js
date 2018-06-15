@@ -14,6 +14,7 @@ Node.targz = require("tar.gz");
 Node.multiparty = require("multiparty");
 Node.os = require("os");
 Node.child = require("child_process");
+Node.zlib = require("zlib");
 
 /**
  * Utils object class
@@ -298,18 +299,27 @@ Node.Utils.handleFileSystem = function (options, callback)
                 //
                 // If the file needs to be extracted, do it and delete uploaded file
                 if (options.params.req.query.extract) {
-                  new Node.targz().extract(newfile, options.path, function (err) {
+                  // tar.gz uses some junky library that has a problem: if the file has an invalid format
+                  // the extract method crashes in an asynchronous way... thus there is no way of knowing
+                  // if something is wrong... Thus, before I extract the file, I check if it's correct
+                  Node.zlib.gunzip(Node.fs.readFileSync(newfile), function (err, buffer) {
                     if (err)
-                      return callback("Error during the " + newfile + " extraction: " + err);
+                      return callback("Error while checking the " + newfile + ": " + err);
                     //
-                    // Delete the .tar.gz file
-                    Node.rimraf(newfile, function (err) {
+                    // No errors -> extract with buggy method
+                    new Node.targz().extract(newfile, options.path, function (err) {
                       if (err)
-                        return callback("Error deleting the file " + newfile + ": " + err);
+                        return callback("Error during the " + newfile + " extraction: " + err);
                       //
-                      // If it's the last one, report to callee
-                      if (++nfiles === farr.length)
-                        callback();
+                      // Delete the .tar.gz file
+                      Node.rimraf(newfile, function (err) {
+                        if (err)
+                          return callback("Error deleting the file " + newfile + ": " + err);
+                        //
+                        // If it's the last one, report to callee
+                        if (++nfiles === farr.length)
+                          callback();
+                      });
                     });
                   });
                 }

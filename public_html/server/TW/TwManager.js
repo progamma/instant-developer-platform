@@ -444,6 +444,7 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
   var sendResponse = function () {
     // Purge the transaction
 //    trShuttle = InDe.TransManager.purge(trShuttle);
+    trShuttle.purgeAToken();
     //
     pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt: {tr: trShuttle.save()}});
   };

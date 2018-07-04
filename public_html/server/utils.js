@@ -9,12 +9,15 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
+Node.fsExtra = require("fs.extra");
+Node.path = require("path");
 Node.rimraf = require("rimraf");
 Node.targz = require("tar.gz");
 Node.multiparty = require("multiparty");
 Node.os = require("os");
 Node.child = require("child_process");
 Node.zlib = require("zlib");
+Node.yauzl = require("yauzl");
 
 /**
  * Utils object class
@@ -299,29 +302,97 @@ Node.Utils.handleFileSystem = function (options, callback)
                 //
                 // If the file needs to be extracted, do it and delete uploaded file
                 if (options.params.req.query.extract) {
-                  // tar.gz uses some junky library that has a problem: if the file has an invalid format
-                  // the extract method crashes in an asynchronous way... thus there is no way of knowing
-                  // if something is wrong... Thus, before I extract the file, I check if it's correct
-                  Node.zlib.gunzip(Node.fs.readFileSync(newfile), function (err, buffer) {
-                    if (err)
-                      return callback("Error while checking the " + newfile + ": " + err);
-                    //
-                    // No errors -> extract with buggy method
-                    new Node.targz().extract(newfile, options.path, function (err) {
+                  if (newfile.toLowerCase().endsWith(".tar.gz")) {
+                    // tar.gz uses some junky library that has a problem: if the file has an invalid format
+                    // the extract method crashes in an asynchronous way... thus there is no way of knowing
+                    // if something is wrong... Thus, before I extract the file, I check if it's correct
+                    Node.zlib.gunzip(Node.fs.readFileSync(newfile), function (err, buffer) {
                       if (err)
-                        return callback("Error during the " + newfile + " extraction: " + err);
+                        return callback("Error while checking the " + newfile + ": " + err);
                       //
-                      // Delete the .tar.gz file
-                      Node.rimraf(newfile, function (err) {
+                      // No errors -> extract with buggy method
+                      new Node.targz().extract(newfile, options.path, function (err) {
                         if (err)
-                          return callback("Error deleting the file " + newfile + ": " + err);
+                          return callback("Error during the " + newfile + " extraction: " + err);
                         //
-                        // If it's the last one, report to callee
-                        if (++nfiles === farr.length)
-                          callback();
+                        // Delete the .tar.gz file
+                        Node.rimraf(newfile, function (err) {
+                          if (err)
+                            return callback("Error deleting the file " + newfile + ": " + err);
+                          //
+                          // If it's the last one, report to callee
+                          if (++nfiles === farr.length)
+                            callback();
+                        });
                       });
                     });
-                  });
+                  }
+                  else if (newfile.toLowerCase().endsWith(".zip")) {
+                    var ok = false;
+                    Node.yauzl.open(newfile, {lazyEntries: true}, function (err, zipfile) {
+                      if (err)
+                        return callback("Error reading the " + newfile + ": " + err);
+                      //
+                      zipfile.readEntry();
+                      zipfile.on("entry", function (entry) {
+                        if (/\/$/.test(entry.fileName)) {
+                          // Directory file names end with '/'.
+                          Node.fsExtra.mkdirs(options.path + "/" + entry.fileName, function (err) {
+                            if (err)
+                              return callback("Error while extracting the " + entry.fileName + " directory: " + err);
+                            //
+                            zipfile.readEntry();
+                          });
+                        }
+                        else {
+                          // It's a file
+                          zipfile.openReadStream(entry, function (err, readStream) {
+                            if (err)
+                              return callback("Error while extracting the " + entry.fileName + " file (READ): " + err);
+                            //
+                            // Ensure parent directory exists
+                            Node.fsExtra.mkdirs(Node.path.dirname(entry.fileName), function (err) {
+                              if (err)
+                                return cb(err);
+                              //
+                              var output = Node.fs.createWriteStream(options.path + "/" + entry.fileName);
+                              output.on("open", function () {
+                                readStream.pipe(output);
+                              });
+                              output.once("error", function (err) {
+                                return callback("Error while extracting the " + entry.fileName + " file (WRITE): " + err);
+                              });
+                              output.on("close", function () {
+                                zipfile.readEntry();
+                              });
+                            });
+                          });
+                        }
+                      });
+                      zipfile.on("error", function (error) {
+                        return callback("Error while extracting the ZIP file: " + error);
+                      });
+                      zipfile.on("end", function (error) {
+                        ok = true;
+                      });
+                      zipfile.on("close", function () {
+                        if (!ok)
+                          return;
+                        //
+                        // Delete the .zip file
+                        Node.rimraf(newfile, function (err) {
+                          if (err)
+                            return callback("Error deleting the file " + newfile + ": " + err);
+                          //
+                          // If it's the last one, report to callee
+                          if (++nfiles === farr.length)
+                            callback();
+                        });
+                      });
+                    });
+                  }
+                  else
+                    return callback("Error extracting the file " + newfile + ": unsupported file extension");
                 }
                 else { // No extraction
                   // If it's the last one, report to callee
@@ -341,6 +412,32 @@ Node.Utils.handleFileSystem = function (options, callback)
           Node.rimraf(options.path, function (err) {
             if (err)
               return callback("Error while deleting the file: " + err);
+            //
+            callback();
+          }.bind(this));
+          break;
+
+        case "move":
+          // Can't rename the "main" FILES directory
+          if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.substr(-7) === "/files/")
+            return callback("Can't rename FILES directory");
+          //
+          var newName = (options.params.req.query || {}).newname;
+          if (!newName)
+            return callback("Missing newname parameter");
+          //
+          // If the newName path contains .. -> error
+          // (I don't want the callee to mess around. It MUST play inside options.path)
+          if (newName.indexOf("..") !== -1)
+            return callback("Double dot operator (..) not allowed");
+          //
+          // "relocate" new name. The idea is "keep" all path pieces and replace only the pieces inside newName
+          var pathPieces = options.path.split("/");
+          pathPieces.splice(pathPieces.length - newName.split("/").length);
+          newName = pathPieces.join("/") + "/" + newName;
+          Node.fs.rename(options.path, newName, function (err) {
+            if (err)
+              return callback("Error while renaming the file/directory: " + err);
             //
             callback();
           }.bind(this));

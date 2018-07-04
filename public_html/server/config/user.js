@@ -1523,6 +1523,8 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           // Check if an ArrayBuffer need to be converted to exadecimal string
           if (msg.data.result instanceof Buffer)
             msg.data.result = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result)};
+          if (msg.data.result && msg.data.result.body && msg.data.result.body instanceof Buffer)
+            msg.data.result.body = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result.body)};
           //
           recipient.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: msg});
           delete cc.callbacks[msg.cbid];

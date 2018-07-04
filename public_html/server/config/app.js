@@ -951,8 +951,12 @@ Node.App.prototype.install = function (params, callback)
                   pthis.log("WARN", "Can't delete temporary folder " + path + ".tmp: " + err, "App.install");
               });
               //
-              // Reset cache of WebAPI metadata
-              delete require.cache[require.resolve(path + "/server/webapi/metadata.json")];
+              try {
+                // Reset cache of WebAPI metadata
+                delete require.cache[require.resolve(path + "/server/webapi/metadata.json")];
+              }
+              catch (e) {
+              }
               //
               // Done: the app have been restored from the cloud. Now I need to start it
               pthis.start(null, function (err) {

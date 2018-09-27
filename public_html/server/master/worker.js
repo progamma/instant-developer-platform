@@ -374,14 +374,20 @@ Node.Worker.prototype.handleSync = function (msg)
  */
 Node.Worker.prototype.handleSyncBroad = function (msg)
 {
-  for (var i = 0; i < this.app.workers.length; i++) {
-    var wrk = this.app.workers[i];
-    //
-    // Skip "dead" workers (i.e. workers with no child process)
-    if (!wrk.child)
+  // Check if there are other apps to which I have to dispatch the message
+  var appNames = msg.cnt.relApps || [];
+  appNames.unshift(this.app.name);
+  delete msg.cnt.relApps;
+  //
+  for (var a = 0; a < appNames.length; a++) {
+    var app = this.user.getApp(appNames[a]);
+    if (!app) {
+      this.log("WARN", "Can't dispatch message to app " + appNames[a] + ": app not found", "Worker.handleSyncBroad", msg);
       continue;
+    }
     //
-    wrk.child.send({type: Node.Worker.msgTypeMap.syncBroad, cnt: msg.cnt});
+    for (var i = 0; i < app.workers.length; i++)
+      app.workers[i].sendToChild({type: Node.Worker.msgTypeMap.syncBroad, cnt: msg.cnt});
   }
 };
 
@@ -656,7 +662,7 @@ Node.Worker.prototype.getStatus = function (callback)
       //
       this.log("ERROR", "Error getting the CPU load. PID not found", "Worker.getStatus", {pid: this.child.pid});
       callback(null, "Error getting the CPU load. PID not found");
-    });
+    }.bind(this));
   }
 };
 

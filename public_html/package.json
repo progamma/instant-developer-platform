@@ -52,8 +52,9 @@
     "socket.io-client": "2.0.2",
     "stripe": "5.2.0",
     "tar.gz": "0.1.1",
-    "xml2js": "0.4.17",
-    "yauzl": "2.8.0"
+    "xml2js": "0.4.19",
+    "yauzl": "2.8.0",
+    "web-push": "3.3.2"
   },
   "devDependencies": {
     "grunt": "1.0.1",

@@ -351,6 +351,8 @@ Node.Request.prototype.sendExportedComponent = function (userName, projectName, 
   form.append("project", projectName);
   form.append("company", this.config.serverType);
   form.append("componentName", component.name);
+  if (component.description)
+    form.append("componentDescription", component.description);
   form.append("componentID", component.id);
   if (component.version)
     form.append("componentVersion", component.version);

@@ -423,6 +423,10 @@ Node.Config.prototype.getHostFromReq = function (req)
   if (host === this.name + "." + this.domain)
     return req.headers.host;
   //
+  // If I've an external IP address and it's using it use the given host
+  if (this.externalIP && host === this.externalIP)
+    return req.headers.host;
+  //
   // If I've an alias list, use it
   if (this.alias) {
     var aliases = this.alias.split(",");
@@ -436,8 +440,44 @@ Node.Config.prototype.getHostFromReq = function (req)
       // If host matches, use the given host
       if (host === al)
         return req.headers.host;
+      //
+      // Handle 2-level domains (*.domain.com)
+      if (al.indexOf("*") !== -1 && host.indexOf(".") !== -1 &&
+              host.substring(host.indexOf(".")) === al.substring(1))
+        return req.headers.host;
     }
   }
+};
+
+
+/**
+ * Return the server external IP
+ * @returns {String}
+ */
+Node.Config.prototype.getExternalIp = function ()
+{
+  // If I've not yet asked, I'm not local and I'm not on windows
+  if (!this.externalIP && !this.local && !/^win/.test(process.platform)) {
+    // Try to ask google what's my external IP address
+    var options = {
+      protocol: "http:",
+      hostname: "metadata.google.internal",
+      headers: {"Metadata-Flavor": "Google"}
+    };
+    //
+    options.path = "/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip";
+    this.server.request.getRequest(options, function (code, extip, err) {
+      if (code !== 200 || err)
+        return this.logger.log("WARN", "Can't read metadata::external-ip: " + (err || "ResponseCode: " + code),
+                "Config.getExternalIp", options);
+      //
+      // Got it!
+      this.externalIP = extip;
+      this.logger.log("DEBUG", "External IP: " + extip, "Config.getExternalIp");
+    }.bind(this));
+  }
+  //
+  return this.externalIP;
 };
 
 

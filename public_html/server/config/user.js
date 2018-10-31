@@ -1082,11 +1082,6 @@ Node.User.prototype.sendAppSessions = function (params, callback)
     var app = this.apps[i];
     //
     app.sendSessions(undefined, function (app, result) {
-      if (result && !result.msg) {
-        this.log("ERROR", (result.err || result), "User.sendAppSessions");
-        return callback(result.err || result);
-      }
-      //
       // Add app's sessions
       var appdata = JSON.parse(result.msg);
       appsess[app.name] = appdata;

@@ -448,17 +448,9 @@ Node.App.prototype.sendSessions = function (params, callback)
     sessions.sessions += wrk.sessions.length;
     //
     // Add worker status
-    wrk.getStatus(function (result, err) {
-      if (err) {
-        this.log("ERROR", "Error getting worker's status: " + err, "App.sendSessions");
-        return callback("Error getting worker's status: " + err);
-      }
-      //
-      // Add worker's status
-      sessions.workers.push(result);
-      //
-      // If that's the last one, I can reply
-      if (++nwrk === this.workers.length)
+    wrk.getStatus(function (result) {
+      sessions.workers.push(result);        // Add worker's status
+      if (++nwrk === this.workers.length)   // If that's the last one report to callee
         callback({msg: JSON.stringify(sessions)});
     }.bind(this));    // jshint ignore:line
   }

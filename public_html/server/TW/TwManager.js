@@ -1537,6 +1537,9 @@ Node.TwManager.prototype.merge = function (branchName, callback)
     return callback(InDe.rh.t("tw_merge_confl_err", {_b: branchName}));
   }
   //
+  // Compute list of new commits
+  var mergeList = this.actualBranch.getDiffBranch(branch);
+  //
   // Do merge (checking for conflicts)
   branch.merge(true, function (err) {
     if (err) {
@@ -1558,7 +1561,9 @@ Node.TwManager.prototype.merge = function (branchName, callback)
         }
         //
         // Tell the console that a PR has been merged
-        var prInfo = {uid: branch.uid, status: "accepted"};
+        var prInfo = {uid: branch.uid, status: "accepted", commits: []};
+        for (var i = 0; i < mergeList.length; i++)    // Add list of commits that belongs to this PR
+          prInfo.commits.push(mergeList[i].id);
         pthis.child.request.sendTwPrInfo(pthis.child.project.user.userName, pthis.child.project.name, prInfo, function (err) {
           if (err)
             pthis.logger.log("WARN", "Can't send TwPrInfo to console: " + err, "TwManager.merge", {prInfo: prInfo});

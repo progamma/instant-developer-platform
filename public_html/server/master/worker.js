@@ -612,7 +612,7 @@ Node.Worker.prototype.sendToChild = function (msg)
 
 /**
  * Returns the worker's status
- * @param {function} callback - function(result, err)
+ * @param {function} callback - function(status)
  */
 Node.Worker.prototype.getStatus = function (callback)
 {
@@ -634,11 +634,12 @@ Node.Worker.prototype.getStatus = function (callback)
     Node.child.execFile("/bin/ps", ["-o", "pcpu", "-p", this.child.pid], function (err, stdout, stderr) {   // jshint ignore:line
       if (err) {
         this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
-        return callback(null, "Error getting the CPU load: " + (stderr || err));
+        stat.cpuLoad = "Error getting the CPU load: " + (stderr || err);
       }
-      //
-      stdout = stdout.split("\n")[1];   // Remove headers
-      stat.cpuLoad = parseFloat(stdout);
+      else {
+        stdout = stdout.split("\n")[1];   // Remove headers
+        stat.cpuLoad = parseFloat(stdout);
+      }
       //
       callback(stat);
     }.bind(this));
@@ -647,7 +648,8 @@ Node.Worker.prototype.getStatus = function (callback)
     Node.child.execFile("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
       if (err) {
         this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
-        return callback(null, "Error getting the CPU load: " + (stderr || err));
+        stat.cpuLoad = "Error getting the CPU load: " + (stderr || err);
+        return callback(stat);
       }
       //
       stdout = stdout.split("\n").slice(4);   // Remove headers
@@ -661,7 +663,8 @@ Node.Worker.prototype.getStatus = function (callback)
       }
       //
       this.log("ERROR", "Error getting the CPU load. PID not found", "Worker.getStatus", {pid: this.child.pid});
-      callback(null, "Error getting the CPU load. PID not found");
+      stat.cpuLoad = "Error getting the CPU load. PID not found";
+      callback(stat);
     }.bind(this));
   }
 };

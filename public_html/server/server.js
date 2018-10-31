@@ -259,6 +259,9 @@ Node.Server.prototype.start = function ()
   // Initialize tracking (if active)
   this.config.initTracking();
   //
+  // Get external IP (if available)
+  this.config.getExternalIp();
+  //
   // Start default server session of all apps
   this.startServerSessions();
   //

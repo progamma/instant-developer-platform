@@ -89,8 +89,12 @@ Node.AppClient.prototype.init = function (req, res)
   //
   // If requested, send SID and CID via query string
   var qrys = "";
-  if (req.query.addsid !== undefined)
+  if (req.query.addsid !== undefined) {
     qrys = "?" + Node.querystring.stringify({sid: this.session.id, cid: this.id});
+    //
+    // Remember that a new client has been started "unsecured"
+    this.startUnsecured = true;
+  }
   //
   // Redirect to the main page
   res.redirect("/" + this.app.name + "/" + this.config.getAppMainFile(req.query.mode) + qrys);
@@ -130,7 +134,7 @@ Node.AppClient.prototype.openConnection = function (socket)
   }
   else {  // I've not been invited
     // If the SID is invalid
-    if (this.session.invalidSID(socket)) {
+    if (this.session.invalidSID(socket, this)) {
       this.log("WARN", "Invalid SID", "AppClient.openConnection");
       socket.emit(Node.AppClient.msgTypeMap.redirect, "http://www.instantdeveloper.com");
       return;

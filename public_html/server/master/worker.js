@@ -50,7 +50,9 @@ Node.Worker.msgTypeMap = {
   changedAppParam: "chpar",
   dtt: "dtt",
   deleteTraceFiles: "dtf",
-  deleteTraceFilesResult: "dtfr"
+  deleteTraceFilesResult: "dtfr",
+  getStatus: "gst",
+  getStatusResult: "gstr"
 };
 
 
@@ -117,7 +119,7 @@ Node.Worker.prototype.createChild = function ()
   // If I'm installing, get ERRORS from child stderr stream
   var runErrors = [];
   if (this.installCallback) {
-    this.child = Node.child.fork(apppath, [], {silent: true});     // Capture StdErr errors
+    this.child = Node.child.fork(apppath, [], Object.assign({silent: true}, Node.Utils.forkArgs()));     // Capture StdErr errors
     //
     this.child.stderr.on("data", function (err) {
       err += "";      // Convert error into string
@@ -339,6 +341,17 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       }
       else
         this.log("WARN", "Can't handle delete trace result message: no callback", "Worker.handleAppChildMessage", msg);
+      break;
+
+    case Node.Worker.msgTypeMap.getStatusResult:
+      if (this.statusResultCallback) {
+        var cb = this.statusResultCallback;
+        delete this.statusResultCallback;
+        //
+        cb(msg.cnt);      // Call callback attached inside the getStatus method
+      }
+      else
+        this.log("WARN", "Can't handle status result message: no callback", "Worker.handleAppChildMessage", msg);
       break;
 
     default:
@@ -612,15 +625,38 @@ Node.Worker.prototype.sendToChild = function (msg)
 
 /**
  * Returns the worker's status
+ * @param {object} params
  * @param {function} callback - function(status)
  */
-Node.Worker.prototype.getStatus = function (callback)
+Node.Worker.prototype.getStatus = function (params, callback)
 {
   var stat = {sessions: this.sessions.length};
+  //
+  // If a FULL status is requested, replace sessions count with an array of SIDs
+  if (params.req.query.full) {
+    stat.sessions = [];
+    for (var i = 0; i < this.sessions.length; i++)
+      stat.sessions.push(this.sessions[i].id);
+    stat.sessions.sort();
+  }
   //
   // If I've no child, I've nothing more to say
   if (!this.child)
     return callback(stat);
+  //
+  // If a FULL status is requested, replace callback with a new callback so that I can ask the child the
+  // "internal" sessions count
+  if (params.req.query.full) {
+    var cb = callback;
+    this.statusResultCallback = function (status) {
+      stat.childSessions = status.sessions;
+      return cb(stat);
+    };
+    callback = function () {
+      // Ask my child the sessions count
+      this.child.send({type: Node.Worker.msgTypeMap.getStatus});
+    }.bind(this);
+  }
   //
   // Add child's PID
   stat.pid = this.child.pid;

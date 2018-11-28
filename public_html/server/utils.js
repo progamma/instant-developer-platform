@@ -12,7 +12,7 @@ Node.fs = require("fs");
 Node.fsExtra = require("fs.extra");
 Node.path = require("path");
 Node.rimraf = require("rimraf");
-Node.targz = require("tar.gz");
+Node.tar = require("tar");
 Node.multiparty = require("multiparty");
 Node.os = require("os");
 Node.child = require("child_process");
@@ -231,9 +231,10 @@ Node.Utils.handleFileSystem = function (options, callback)
           //
           // If the object is a folder, I need to TARGZ-pit first
           if (pathStats.isDirectory()) {
-            var tarFile = options.tempPath + (options.tempPath.substr(-1) === "/" ? "" : "/") +
-                    options.path.substring(options.path.lastIndexOf("/") + 1) + ".tar.gz";
-            new Node.targz().compress(options.path, tarFile, function (err) {
+            var parentPath = options.path.substring(0, options.path.lastIndexOf("/"));
+            var dirName = options.path.substring(options.path.lastIndexOf("/") + 1);
+            var tarFile = options.tempPath + (options.tempPath.substr(-1) === "/" ? "" : "/") + dirName + ".tar.gz";
+            Node.tar.create({file: tarFile, cwd: parentPath, gzip: true, portable: true}, [dirName], function (err) {
               if (err)
                 return callback("Can't compress path: " + err);
               //
@@ -311,7 +312,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                         return callback("Error while checking the " + newfile + ": " + err);
                       //
                       // No errors -> extract with buggy method
-                      new Node.targz().extract(newfile, options.path, function (err) {
+                      Node.tar.extract({file: newfile, cwd: options.path}, function (err) {
                         if (err)
                           return callback("Error during the " + newfile + " extraction: " + err);
                         //
@@ -591,9 +592,9 @@ Node.Utils.forkArgs = function ()
       if (e.startsWith("--inspect")) {
         var nProcs;
         if (/^win/.test(process.platform))
-          nProcs = parseInt(Node.child.execSync("tasklist /FI \"imagename eq node.exe\" /fo csv | find /c /v \"\"").toString()) - 1;
+          nProcs = parseInt(Node.child.execSync("tasklist /FI \"imagename eq node.exe\" /fo csv | find /c \"node.exe\"").toString());
         else
-          nProcs = parseInt(Node.child.execSync("ps daux | grep node | wc -l").toString()) - 1;
+          nProcs = parseInt(Node.child.execSync("ps aux | grep \"node\\ \" | wc -l").toString()) - 1;
         return "--inspect=" + (9229 + nProcs);
       }
       return e;

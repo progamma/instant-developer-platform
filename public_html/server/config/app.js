@@ -9,7 +9,6 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.targz = require("tar.gz");
 Node.rimraf = require("rimraf");
 Node.ncp = require("../ncp_fixed");
 
@@ -448,7 +447,7 @@ Node.App.prototype.sendSessions = function (params, callback)
     sessions.sessions += wrk.sessions.length;
     //
     // Add worker status
-    wrk.getStatus(function (result) {
+    wrk.getStatus(params, function (result) {
       sessions.workers.push(result);        // Add worker's status
       if (++nwrk === this.workers.length)   // If that's the last one report to callee
         callback({msg: JSON.stringify(sessions)});
@@ -811,7 +810,7 @@ Node.App.prototype.install = function (params, callback)
       // Something have been changed. If the app existed, restore it otherwise delete it
       if (appExisted) {
         // App existed: restore it to previous version
-        pthis.restore({}, function (err2) {
+        pthis.restoreFromDisk({}, function (err2) {
           if (err2) {
             err2 = err2.msg || err2;     // handle object errors
             pthis.log("WARN", "Error while restoring the app after a failed install: " + err2, "App.install");
@@ -871,7 +870,7 @@ Node.App.prototype.install = function (params, callback)
           return errorFnc("Can't terminate the app: " + err);
         //
         // All workers have been terminated, now backup the app
-        pthis.backup({}, function (err) {
+        pthis.backupToDisk({}, function (err) {
           if (err)
             return errorFnc("Error while backing up the app: " + err);
           //
@@ -1085,7 +1084,7 @@ Node.App.prototype.saveParameters = function (callback)
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.backup = function (params, callback)
+Node.App.prototype.backupToDisk = function (params, callback)
 {
   var pthis = this;
   //
@@ -1094,7 +1093,7 @@ Node.App.prototype.backup = function (params, callback)
   var copyFolders = function () {
     // If there are no more folders to copy, backup is completed
     if (folderToCopy.length === 0) {
-      pthis.log("DEBUG", "Backup of the app succeeded", "App.backup");
+      pthis.log("DEBUG", "Backup of the app succeeded", "App.backupToDisk");
       return callback();
     }
     //
@@ -1104,7 +1103,7 @@ Node.App.prototype.backup = function (params, callback)
     var dstPath = pthis.config.appDirectory + "/backups/" + pthis.name + "/" + fld;
     Node.ncp(srcPath, dstPath, function (err) {
       if (err) {
-        pthis.log("WARN", "Error while copying folder " + srcPath + " to " + dstPath + ": " + err, "App.backup");
+        pthis.log("WARN", "Error while copying folder " + srcPath + " to " + dstPath + ": " + err, "App.backupToDisk");
         return callback("Error while copying folder " + srcPath + " to " + dstPath + ": " + err);
       }
       //
@@ -1117,14 +1116,14 @@ Node.App.prototype.backup = function (params, callback)
   // Delete the previous backup (if exists)
   Node.rimraf(this.config.appDirectory + "/backups/" + this.name, function (err) {
     if (err) {
-      pthis.log("WARN", "Can't delete previous backup: " + err, "App.backup");
+      pthis.log("WARN", "Can't delete previous backup: " + err, "App.backupToDisk");
       return callback("Can't delete previous backup: " + err);
     }
     //
     // Create the backup folder
     Node.fs.mkdir(pthis.config.appDirectory + "/backups/" + pthis.name, function (err) {
       if (err) {
-        pthis.log("WARN", "Can't create the backup folder: " + err, "App.backup");
+        pthis.log("WARN", "Can't create the backup folder: " + err, "App.backupToDisk");
         return callback("Can't create the backup folder: " + err);
       }
       //
@@ -1140,7 +1139,7 @@ Node.App.prototype.backup = function (params, callback)
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.restore = function (params, callback)
+Node.App.prototype.restoreFromDisk = function (params, callback)
 {
   var pthis = this;
   //
@@ -1154,12 +1153,12 @@ Node.App.prototype.restore = function (params, callback)
       var dstPath = pthis.config.appDirectory + "/apps/" + pthis.name;
       Node.ncp(srcPath, dstPath, function (err) {
         if (err) {
-          pthis.log("WARN", "Can't restore the backup folder: " + err, "App.restore", {src: srcPath, dest: dstPath});
+          pthis.log("WARN", "Can't restore the backup folder: " + err, "App.restoreFromDisk", {src: srcPath, dest: dstPath});
           return callback("Can't restore the backup folder: " + err);
         }
         //
         // Log the operation
-        pthis.log("DEBUG", "Restore of the app succeeded", "App.restore");
+        pthis.log("DEBUG", "Restore of the app succeeded", "App.restoreFromDisk");
         //
         // Done
         callback();
@@ -1173,7 +1172,7 @@ Node.App.prototype.restore = function (params, callback)
     var path = pthis.config.appDirectory + "/apps/" + pthis.name + "/" + fld;
     Node.rimraf(path, function (err) {
       if (err) {
-        pthis.log("WARN", "Error while deleting folder " + path + ": " + err, "App.restore");
+        pthis.log("WARN", "Error while deleting folder " + path + ": " + err, "App.restoreFromDisk");
         return callback("Error while deleting folder " + path + ": " + err);
       }
       //
@@ -1186,13 +1185,70 @@ Node.App.prototype.restore = function (params, callback)
   Node.fs.exists(this.config.appDirectory + "/backups/" + this.name, function (exists) {
     // If the backup does not exists
     if (!exists) {
-      pthis.log("WARN", "There is no backup for the app", "App.restore");
+      pthis.log("WARN", "There is no backup for the app", "App.restoreFromDisk");
       return callback("There is no backup for the app");
     }
     //
     // Start to delete the target folders and, when finished, do restore
     deleteFolders();
   });
+};
+
+
+/**
+ * Backup the app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.backup = function (params, callback)
+{
+  var pathCloud = "users/" + this.config.serverType + "/apps/" + this.name + ".tar.gz";
+  //
+  this.log("DEBUG", "App backup", "App.backup", {pathCloud: pathCloud});
+  //
+  // Backup the app folder in the cloud
+  var archiver = new Node.Archiver(this.server);
+  archiver.backup(this.config.appDirectory + "/apps/" + this.name, pathCloud, function (err) {
+    if (err) {
+      this.log("ERROR", "Error backing up the files: " + err, "App.backup");
+      return callback("Error backing up the files: " + err);
+    }
+    //
+    // Log the app backup
+    this.log("DEBUG", "App backed up in the cloud", "App.backup");
+    //
+    // Done!
+    callback();
+  }.bind(this));
+};
+
+
+/**
+ * Restore the app
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.restore = function (params, callback)
+{
+  var path = this.config.appDirectory + "/apps/" + this.name;
+  var pathCloud = "users/" + this.config.serverType + "/apps/" + this.name + ".tar.gz";
+  //
+  this.log("DEBUG", "App restore", "App.restore", {pathCloud: pathCloud});
+  //
+  // Restore backup from the cloud
+  var archiver = new Node.Archiver(this.server);
+  archiver.restore(path, pathCloud, function (err) {
+    if (err) {
+      this.log("ERROR", "Error restoring the files: " + err, "App.restore");
+      return callback("Error restoring up the files: " + err);
+    }
+    //
+    // Log the app restore
+    this.log("DEBUG", "App restored from cloud", "App.restore");
+    //
+    // Done!
+    callback();
+  }.bind(this));
 };
 
 

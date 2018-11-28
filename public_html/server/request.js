@@ -63,7 +63,6 @@ Node.Request.prototype.postRequest = function (options, form, callback)
   });
   //
   form.pipe(req);
-  req.end();
 };
 
 
@@ -455,6 +454,40 @@ Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, c
 
 
 /**
+ * Send course information to console
+ * @param {string} RID
+ * @param {string} courseData
+ * @param {function} callback - function(err)
+ */
+Node.Request.prototype.sendCourseInfo = function (RID, courseData, callback)
+{
+  var pthis = this;
+  //
+  var form = new Node.FormData();
+  form.append("courseInfo", courseData);
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=rid&rid=" + RID + "&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendCourseInfo",
+              {err: err, code: code, data: data, options: options});
+      callback(err || "Invalid response");
+    }
+    else
+      callback();
+  });
+};
+
+
+/**
  * Send an http request to a server to backup a branch
  * @param {string} branchName
  * @param {object} parentPrjData - data of the parent project (see getParentProject)
@@ -588,6 +621,7 @@ Node.Request.prototype.listUsers = function (msg, callback)
   form.append("user", msg.user);
   form.append("company", this.config.serverType);
   form.append("matchingString", msg.matchingString);
+  form.append("organizationOnly", (msg.organizationOnly ? 1 : 0));
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {

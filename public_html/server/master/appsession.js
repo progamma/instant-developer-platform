@@ -285,13 +285,23 @@ Node.AppSession.prototype.protectSID = function (res, expires)
 /**
  * Checks if the SID is invalid (i.e. secureSID cookie is not the expected one)
  * @param {Socket} socket
+ * @param {AppClient} client
  */
-Node.AppSession.prototype.invalidSID = function (socket)
+Node.AppSession.prototype.invalidSID = function (socket, client)
 {
-  var secureID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
-  if (secureID !== this.secureSID) {
+  // If there are no cookies and this session was started "unsecured" (see appclient::init)
+  if (!socket.request.headers.cookie && client.startUnsecured) {
+    this.log("INFO", "Missing cookies with ADDSID -> 'unsecure' connection accepted", "AppSession.invalidSID");
+    //
+    // Forget it... it's one shot!
+    delete client.startUnsecured;
+    return false;
+  }
+  //
+  var secureSID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
+  if (secureSID !== this.secureSID) {
     this.log("WARN", "Secure SID does not match", "AppSession.invalidSID",
-            {sid: this.id, expectedSecureSID: this.secureID, secureSID: secureID});
+            {expectedSecureSID: this.secureSID, secureSID: secureSID});
     return true;
   }
 };

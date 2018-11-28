@@ -1081,7 +1081,7 @@ Node.User.prototype.sendAppSessions = function (params, callback)
   for (var i = 0; i < this.apps.length; i++) {
     var app = this.apps[i];
     //
-    app.sendSessions(undefined, function (app, result) {
+    app.sendSessions(params, function (app, result) {
       // Add app's sessions
       var appdata = JSON.parse(result.msg);
       appsess[app.name] = appdata;
@@ -1617,18 +1617,24 @@ Node.User.prototype.processCommand = function (params, callback)
             });
           });
         }
-        else // The database, exists, restore (i.e. overwrite) it
+        else // The database exists -> restore (i.e. overwrite) it
           database.processCommand(params, callback);
       }
       else if (isAPP) {
         app = this.getApp(objName);
         if (!app) {
-          this.log("WARN", "App not found", "User.processCommand",
-                  {cmd: command, app: objName, url: params.req.originalUrl});
-          return callback("App not found");
+          // If the app does not exist, create a new one
+          app = this.createApp(objName);
+          app.processCommand(params, function (err) {
+            // If error -> delete app
+            callback(err);
+            if (err)
+              pthis.deleteApp(objName, function () {
+              });
+          });
         }
-        //
-        app.processCommand(params, callback);
+        else // The app exists -> restore (i.e. overwrite) it
+          app.processCommand(params, callback);
       }
       else {
         this.createProject(objName, function (err) {

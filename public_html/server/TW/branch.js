@@ -561,7 +561,7 @@ Node.Branch.prototype.mergeResources = function (callback)
     // If the file does not exist, there are no resources... go back to the callee
     // otherwise if there are read errors, report the error
     if (err && err.code === "ENOENT")
-      return callback();
+      return callback();      // Source branch has no resources
     else if (err) {
       twManager.logger.log("ERROR", "Error reading the file " + srcBranch + "/resources.json: " + err, "TwManager.mergeResources");
       return callback(err);
@@ -604,6 +604,8 @@ Node.Branch.prototype.mergeResources = function (callback)
           twManager.logger.log("ERROR", "Error reading the file " + srcBranch + "/resources.json (2): " + err, "TwManager.mergeResources");
           return callback(err);
         }
+        else if (err && err.code === "ENOENT")
+          reslistUpd = [];    // Destination branch has no resources
         //
         var toAdd = [];
         for (var i = 0; i < reslist.length; i++) {

@@ -11,7 +11,7 @@ var Node = Node || {};
 Node.Utils = require("./utils");
 
 // Import Modules
-Node.targz = require("tar.gz");
+Node.tar = require("tar");
 Node.archiver = require("archiver");
 Node.AWS = require("aws-sdk");
 Node.rimraf = require("rimraf");
@@ -213,7 +213,9 @@ Node.Archiver.prototype.backup = function (pathServer, pathCloud, callback)
     }
     //
     // Ccompress the file into a tar.gz file
-    new Node.targz().compress(pathServer, fileServer, function (err) {
+    var parentPath = pathServer.substring(0, pathServer.lastIndexOf("/"));
+    var dirName = pathServer.substring(pathServer.lastIndexOf("/") + 1);
+    Node.tar.create({file: fileServer, cwd: parentPath, gzip: true, portable: true}, [dirName], function (err) {
       if (err) {
         pthis.logger.log("ERROR", "Error compressing the directory " + pathServer + ": " + err, "Archiver.backup");
         return callback("Error compressing the directory " + pathServer + ": " + err);
@@ -363,7 +365,7 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
   //
   var extractFile = function () {
     // Extract the file to parent directory (so that it becomes a pathServer sibling)
-    new Node.targz().extract(fileServer, pathServer + "/..", function (err) {
+    Node.tar.extract({file: fileServer, cwd: pathServer + "/.."}, function (err) {
       if (err)
         return errorFnc("Error during the " + fileServer + " extraction: " + err);
       //

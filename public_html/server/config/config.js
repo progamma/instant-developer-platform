@@ -1621,17 +1621,37 @@ Node.Config.prototype.update = function (params, callback)
               callback({msg: "Update succeeded"});
             };
             //
+            // If I'm on Node10 I need to "clean" the inde.json file
+            // TODO: Rimuovere prima o poi....
+            var fixIndeJSON = function () {
+              if (process.platform === "linux" && parseInt(process.versions.node.split(".")[0], 10) >= 10) {
+                pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/--harmony_object_observe//", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
+                  if (err)
+                    return errorFnc("Error while fixing inde.json (1): " + (stderr || err));
+                  //
+                  pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/\\[\\\"\\\"\\]/\\[\\]/", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
+                    if (err)
+                      return errorFnc("Error while fixing inde.json (2): " + (stderr || err));
+                    //
+                    completeUpdate();
+                  });
+                });
+              }
+              else
+                completeUpdate();
+            };
+            //
             // If not skipped, update packages...
             if (!params.req.query.nopackages) {
               pthis.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
                 if (err)
                   return errorFnc("Error updating packages: " + (stderr || err));
                 //
-                completeUpdate();
+                fixIndeJSON();
               });
             }
             else
-              completeUpdate();
+              fixIndeJSON();
           });
         });
       });

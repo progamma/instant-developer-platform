@@ -780,7 +780,7 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
       }
       //
       // Search the app
-      var app = user.getApp(msg.sid.appname);
+      var app = user.getApp(msg.sid.appname.toLowerCase());
       if (!app) {
         socket.disconnect();
         return this.logger.log("WARN", "Sync connect not handled: app not found", "Server.handleSyncMessage", msg);

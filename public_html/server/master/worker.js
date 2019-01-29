@@ -682,6 +682,10 @@ Node.Worker.prototype.getStatus = function (params, callback)
   }
   else if (process.platform === "linux") {   // linux
     Node.child.execFile("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
+      // If the child is gone
+      if (!err && !this.child)
+        err = stderr = "child process is gone";
+      //
       if (err) {
         this.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Worker.getStatus");
         stat.cpuLoad = "Error getting the CPU load: " + (stderr || err);

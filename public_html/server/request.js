@@ -464,7 +464,8 @@ Node.Request.prototype.sendCourseInfo = function (RID, courseData, callback)
   var pthis = this;
   //
   var form = new Node.FormData();
-  form.append("courseInfo", courseData);
+  form.append("text", JSON.stringify({courseData: JSON.parse(courseData)}));
+  form.append("code", "200");
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {

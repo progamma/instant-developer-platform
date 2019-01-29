@@ -553,8 +553,17 @@ Node.App.prototype.sendDttSessions = function (params, callback)
             });
           }
           //
+          // If I've read an empty block -> skip it
+          var buffData = buff.toString().replace(/\0/g, "");
+          if (!buffData) {
+            doneFnc("Error while reading DTT index file (read: " + fname + "): empty block at pos " + pos);
+            //
+            // Read next block
+            return readBlock(pos + 512);
+          }
+          //
           // Load the session
-          var s = JSON.parse(buff.toString().replace(/\0/g, ""));
+          var s = JSON.parse(buffData);
           //
           // If a date filter was provided, use it
           if (fromDate && s.updated && new Date(s.updated) < fromDate)

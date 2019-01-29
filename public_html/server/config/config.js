@@ -68,7 +68,7 @@ Node.Config.prototype.save = function ()
     directory: this.directory, auth: this.auth, editPrjToken: this.editPrjToken,
     consoleURL: this.consoleURL, configS3: this.configS3, bucketS3: this.bucketS3,
     configGCloudStorage: this.configGCloudStorage, bucketGCloud: this.bucketGCloud,
-    nigthlybucketGCloud: this.nigthlybucketGCloud, storage: this.storage,
+    nigthlybucketGCloud: this.nigthlybucketGCloud, storage: this.storage, customPackages: this.customPackages,
     dbPort: this.dbPort, dbAddress: this.dbAddress, dbUser: this.dbUser, dbPassword: this.dbPassword,
     googleAPIKey: this.googleAPIKey, timerSession: this.timerSession,
     timerTokenConsole: this.timerTokenConsole, handleException: this.handleException, minify: this.minify,
@@ -124,6 +124,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.googleAPIKey = v.googleAPIKey;
   if (v.storage)
     this.storage = v.storage;
+  if (v.customPackages)
+    this.customPackages = v.customPackages;
   if (v.serverType)
     this.serverType = v.serverType;
   if (v.consoleURL)
@@ -603,6 +605,79 @@ Node.Config.prototype.deleteUser = function (userName, callback)
       callback();
     });
   });
+};
+
+
+/**
+ * Updates the package.json file with customPackages property
+ * @param {array} toRemove - list of modules to remove
+ * @param {array} toAdd - list of modules to add
+ * @param {function} callback (err)
+ */
+Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
+{
+  // If there is nothing to do, return to callee
+  if (!toRemove && !toAdd)
+    return callback();
+  //
+  var packageJSONfile = __dirname + "/../../package.json";
+  //
+  var errorFnc = function (err) {
+    this.logger.log("ERROR", err, "Config.updatePackageJson");
+    callback(err);
+  }.bind(this);
+  //
+  this.logger.log("DEBUG", "Updating Package.json file", "Config.updatePackageJson", {toRemove: toRemove, toAdd: toAdd});
+  //
+  // First, read package.json file
+  Node.fs.readFile(packageJSONfile, function (err, data) {
+    if (err)
+      return errorFnc("Error reading the package.json file: " + err);
+    //
+    var packageJson = JSON.parse(data);
+    //
+    // First delete all packages to be removed (if any)
+    if (toRemove)
+      toRemove.forEach(function (pack) {
+        delete packageJson.dependencies[pack.split("@")[0]];
+      });
+    //
+    // Then add new packages (if any)
+    if (toAdd)
+      toAdd.forEach(function (pack) {
+        packageJson.dependencies[pack.split("@")[0]] = pack.split("@")[1];
+      });
+    //
+    // Remove the old BACK if present
+    Node.rimraf(packageJSONfile + ".bak", function (err) {
+      if (err)
+        return errorFnc("Error removing the old package.json file " + packageJSONfile + ".bak: " + err);
+      //
+      // Backup the the config file into a .bak file
+      Node.fs.rename(packageJSONfile, packageJSONfile + ".bak", function (err) {
+        if (err)
+          return errorFnc("Error renaming the package.json file " + packageJSONfile + " to " + packageJSONfile + ".bak: " + err);
+        //
+        // Save package.json file
+        Node.fs.writeFile(packageJSONfile, JSON.stringify(packageJson, null, 2), {mode: 0644}, function (err) {     // RW-R-R
+          if (err)
+            return errorFnc("Error while saving the package.json file: " + err);
+          //
+          this.logger.log("DEBUG", "Package.json file saved with success", "Config.updatePackageJson");
+          //
+          // Last: update packages
+          this.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
+            if (err)
+              return errorFnc("Error while updating packages: " + (stderr || err));
+            //
+            // Done
+            this.logger.log("INFO", "Package.json and node_modules updated", "Config.updatePackageJson", {toRemove: toRemove, toAdd: toAdd});
+            callback();
+          }.bind(this));
+        }.bind(this));
+      }.bind(this));
+    }.bind(this));
+  }.bind(this));
 };
 
 
@@ -1303,22 +1378,56 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.minAppUsersPerWorker = parseInt(query.minAppUsersPerWorker, 10);
   if (query.maxAppWorkers)
     this.maxAppWorkers = parseInt(query.maxAppWorkers, 10);
+  if (query.customPackages !== undefined) {
+    // If given
+    var oldcustomPackages = this.customPackages;
+    if (query.customPackages) {
+      try {
+        //  module1@1.0.0,module2@1.0.0,
+        this.customPackages = JSON.parse("[\"" + query.customPackages.replace(/,/g, "\",\"") + "\"]");
+      }
+      catch (ex) {
+        this.logger.log("WARN", "Wrong customPackages parameter: " + ex.message, "Config.configureServer", {customPackages: query.customPackages});
+        return callback("Wrong customPackages parameter: " + ex.message);
+      }
+    }
+    else  // No customPackages
+      delete this.customPackages;
+    //
+    // Update package.json (if needed)
+    this.updatePackageJson(oldcustomPackages, this.customPackages, function (err) {
+      if (err) {
+        this.logger.log("WARN", "Error while updating package.json file: " + err, "Config.configureServer", {customPackages: query.customPackages});
+        return callback("Error while updating package.json file: " + err);
+      }
+      //
+      setImmediate(function () {
+        completeConfigure();
+      });  // Use setImmediate so that I can write the completeConfigure code after this block
+    }.bind(this));
+  }
+  else
+    setImmediate(function () {
+      completeConfigure();
+    });  // Use setImmediate so that I can write the completeConfigure code after this block
   //
-  // Save the new configuration
-  this.saveConfig();
-  //
-  // Log the operation
-  this.logger.log("DEBUG", "Updated server configuration", "Config.configureServer", {config: query});
-  //
-  // If something changed, restart services
-  if (query.numHoursSnapshot !== undefined || query.numMaxSnapshot !== undefined || query.timeSnapshot !== undefined)
-    this.server.backupDisk();
-  if (query.consoleURL !== undefined || query.timerTokenConsole)
-    this.initTokenTimer();
-  if ((query.services || "").split(",").indexOf("track") !== -1)
-    return this.initTracking(callback);
-  //
-  callback();
+  var completeConfigure = function () {
+    // Save the new configuration
+    this.saveConfig();
+    //
+    // Log the operation
+    this.logger.log("DEBUG", "Updated server configuration", "Config.configureServer", {config: query});
+    //
+    // If something changed, restart services
+    if (query.numHoursSnapshot !== undefined || query.numMaxSnapshot !== undefined || query.timeSnapshot !== undefined)
+      this.server.backupDisk();
+    if (query.consoleURL !== undefined || query.timerTokenConsole)
+      this.initTokenTimer();
+    if ((query.services || "").split(",").indexOf("track") !== -1)
+      return this.initTracking(callback);
+    //
+    callback();
+  }.bind(this);
 };
 
 
@@ -1607,51 +1716,57 @@ Node.Config.prototype.update = function (params, callback)
             if (err)
               return errorFnc("Error removing the update folder: " + err);
             //
-            var completeUpdate = function () {
-              // If requested, reboot
-              if (params.req.query.reboot) {
-                pthis.server.childer.send({type: Node.Config.msgTypeMap.execCmd, cmd: "reboot"});
-                pthis.logger.log("INFO", "Reboot requested", "Config.update");
-              }
+            // Update package.json if needed
+            pthis.updatePackageJson(null, pthis.customPackages, function (err) {
+              if (err)
+                return errorFnc("Error while updating package.json file: " + err);
               //
-              // LOG the operation
-              pthis.logger.log("INFO", "Update succeeded", "Config.update");
-              //
-              delete pthis.isUpdating;
-              callback({msg: "Update succeeded"});
-            };
-            //
-            // If I'm on Node10 I need to "clean" the inde.json file
-            // TODO: Rimuovere prima o poi....
-            var fixIndeJSON = function () {
-              if (process.platform === "linux" && parseInt(process.versions.node.split(".")[0], 10) >= 10) {
-                pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/--harmony_object_observe//", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
+              // If not skipped, update packages...
+              if (!params.req.query.nopackages) {
+                pthis.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
                   if (err)
-                    return errorFnc("Error while fixing inde.json (1): " + (stderr || err));
+                    return errorFnc("Error updating packages: " + (stderr || err));
                   //
-                  pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/\\[\\\"\\\"\\]/\\[\\]/", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
-                    if (err)
-                      return errorFnc("Error while fixing inde.json (2): " + (stderr || err));
-                    //
-                    completeUpdate();
-                  });
+                  fixIndeJSON();
                 });
               }
               else
-                completeUpdate();
-            };
-            //
-            // If not skipped, update packages...
-            if (!params.req.query.nopackages) {
-              pthis.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
-                if (err)
-                  return errorFnc("Error updating packages: " + (stderr || err));
+                setImmediate(fixIndeJSON);  // Use setImmediate so that I can write the fixIndeJSON code after this block
+              //
+              // If I'm on Node10 I need to "clean" the inde.json file
+              // TODO: Rimuovere prima o poi....
+              var fixIndeJSON = function () {
+                if (process.platform === "linux" && parseInt(process.versions.node.split(".")[0], 10) >= 10) {
+                  pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/--harmony_object_observe//", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
+                    if (err)
+                      return errorFnc("Error while fixing inde.json (1): " + (stderr || err));
+                    //
+                    pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/\\[\\\"\\\"\\]/\\[\\]/", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
+                      if (err)
+                        return errorFnc("Error while fixing inde.json (2): " + (stderr || err));
+                      //
+                      completeUpdate();
+                    });
+                  });
+                }
+                else
+                  completeUpdate();
+              };
+              //
+              var completeUpdate = function () {
+                // If requested, reboot
+                if (params.req.query.reboot) {
+                  pthis.server.childer.send({type: Node.Config.msgTypeMap.execCmd, cmd: "reboot"});
+                  pthis.logger.log("INFO", "Reboot requested", "Config.update");
+                }
                 //
-                fixIndeJSON();
-              });
-            }
-            else
-              fixIndeJSON();
+                // LOG the operation
+                pthis.logger.log("INFO", "Update succeeded", "Config.update");
+                //
+                delete pthis.isUpdating;
+                callback({msg: "Update succeeded"});
+              };
+            });
           });
         });
       });

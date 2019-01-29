@@ -55,11 +55,5 @@
     "xml2js": "0.4.19",
     "yauzl": "2.8.0",
     "web-push": "3.3.2"
-  },
-  "devDependencies": {
-    "grunt": "1.0.1",
-    "grunt-contrib-cssmin": "2.2.0",
-    "grunt-contrib-uglify": "3.0.1",
-    "grunt-manifest": "0.4.4"
   }
 }

@@ -738,11 +738,8 @@ Node.Server.prototype.handleDeviceMessage = function (socket, msg)
 Node.Server.prototype.handleSyncMessage = function (socket, msg)
 {
   // If sync is not enabled, tell it to callee
-  if ((this.config.services || "").split(",").indexOf("sync") === -1) {
-    // TODO: Decidere come fare... (issue #2908) 2 possibilità
-    // - qui calcolo se il messaggio è SYNC-SYNC (non RemoteDO e non Cmd) e decido se rimbalzarlo
-    // - appendo al messaggio msg l'informazione "servizioSyncNonAttivo" poi ci pensa sync.js a bloccare se necessario
-  }
+  if (msg.cnt.id === "connect" && (!this.config.services || this.config.services.split(",").indexOf("sync") === -1))
+    msg.cnt.serviceDisabled = true;
   //
   // Search the session I've to route this message to
   var session = this.appSessions[msg.sid.sidsrv];

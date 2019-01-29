@@ -501,7 +501,7 @@ Node.Archiver.prototype.readObject = function (pathCloud, callback)
       err = err.message || err;
       txt = null;   // The FINISH event gets fired anyway (see previous handler)
       //
-      pthis.logger.log("ERROR", "Error reading the object from GCloud storage (" + pathCloud + "): " + err, "Archiver.readObject");
+      pthis.logger.log("WARN", "Error reading the object from GCloud storage (" + pathCloud + "): " + err, "Archiver.readObject");
       callback(null, err);
     });
   }
@@ -511,7 +511,7 @@ Node.Archiver.prototype.readObject = function (pathCloud, callback)
     //
     S3.getObject({Bucket: this.config.bucketS3, Key: pathCloud}, function (err, data) {
       if (err)
-        pthis.logger.log("ERROR", "Error reading the object from S3 storage (" + pathCloud + "): " + err, "Archiver.readObject");
+        pthis.logger.log("WARN", "Error reading the object from S3 storage (" + pathCloud + "): " + err, "Archiver.readObject");
       callback((err ? null : data), err);
     });
   }

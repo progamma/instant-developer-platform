@@ -401,6 +401,11 @@ Node.Project.prototype.viewProject = function (params, callback)
   // Redirect to the page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
   //
+  // If it's a course forget about RID (the document will send the "RID" reply when the
+  // project will be closed (see InDe.Document.prototype.sendPrjInfoToConsole))
+  if (qry && qry.course)
+    delete params.req.query.rid;
+  //
   // Done
   callback({skipReply: true});
 };

@@ -87,18 +87,8 @@ Node.createServer = function ()
  */
 Node.Server.prototype.initServer = function ()
 {
-  // Detect server type: production, local
-  var srvtype;
-  try {
-    if (Node.fs.existsSync("/mnt/disk/IndeRT"))
-      srvtype = "prod";
-    else
-      srvtype = "local";
-  }
-  catch (ex) {
-    console.log("Error while detecting server type. Switching to LOCAL mode: " + ex.message);
-    srvtype = "local";
-  }
+  // self is always "prod"
+  var srvtype = "prod";
   //
   // Load the configuration from the json file
   this.config = new Node.Config(this);

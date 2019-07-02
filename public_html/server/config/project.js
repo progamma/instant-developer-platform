@@ -454,7 +454,7 @@ Node.Project.prototype.downloadFile = function (params, callback)
     }
     //
     // Compute the mimetype
-    var mimetype = Node.mime.lookup(filename);
+    var mimetype = Node.mime.getType(filename);
     //
     // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
     var stream;
@@ -520,17 +520,17 @@ Node.Project.prototype.downloadFile = function (params, callback)
  */
 Node.Project.prototype.handleFileSystem = function (params, callback)
 {
-  var prjFilesPath = this.config.directory + "/" + this.user.userName + "/" + this.name + "/files/";
+  var prjFilesPath = this.config.directory + "/" + this.user.userName + "/" + this.name + "/files";
   var objPath = params.req.query.path || "";    // (optional)
   //
-  // Remove first / (it's not needed because prjFilesPath already ends with /)
-  if (objPath[0] === "/")
-    objPath = objPath.substring(1);
+  // Fix objPath (add / if needed)
+  if (objPath && objPath[0] !== "/")
+    objPath = "/" + objPath;
   //
   var options = {
     path: prjFilesPath + objPath,
     command: params.tokens[1],
-    tempPath: prjFilesPath + "temp/"
+    tempPath: prjFilesPath + "/temp/"
   };
   //
   this.logger.log("DEBUG", "Handle file system command", "Project.handleFileSystem", options);
@@ -538,13 +538,55 @@ Node.Project.prototype.handleFileSystem = function (params, callback)
   // Append original params map
   options.params = params;
   //
-  // Handle the command
-  Node.Utils.handleFileSystem(options, function (res) {
-    if (res && (res.err || typeof res === "string"))
-      this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "Project.handleFileSystem");
-    //
-    callback(res);
-  }.bind(this));
+  // Function for fixing permissions
+  var fixPathPermissions = function (cb) {    // cb(err)
+    this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, options.path], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.log("ERROR", "Error changing folder permissions: " + (stderr || err), "Project.handleFileSystem",
+                {OSUser: this.user.OSUser, path: options.path});
+        return cb("Error changing folder permissions: " + (stderr || err));
+      }
+      //
+      cb();
+    }.bind(this));
+  }.bind(this);
+  //
+  // If I'm on a windows machine there are no permissions to fix
+  if (/^win/.test(process.platform))
+    fixPathPermissions = function (cb) {
+      cb();
+    };
+  //
+  // If it's a WRITE operation, I need to fix permissions BEFORE I execute the command
+  if (options.command === "put" || options.command === "del" || options.command === "move") {
+    fixPathPermissions(function (err) {
+      if (err)
+        return callback(err); // Can't continue... I need permissions to be correct for executing the command
+      //
+      // Handle the command
+      Node.Utils.handleFileSystem(options, function (res) {
+        if (res && (res.err || typeof res === "string"))
+          this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "Project.handleFileSystem");
+        //
+        // If it's a PUT operation, fix permissions after I've executed the command
+        if (options.command === "put") {
+          fixPathPermissions(function (err) {
+            callback(err || res);
+          });
+        }
+        else
+          callback(res);
+      }.bind(this));
+    }.bind(this));
+  }
+  else { // No PUT/DEL/MOVE -> execute
+    Node.Utils.handleFileSystem(options, function (res) {
+      if (res && (res.err || typeof res === "string"))
+        this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "Project.handleFileSystem");
+      //
+      callback(res);
+    }.bind(this));
+  }
 };
 
 
@@ -569,7 +611,7 @@ Node.Project.prototype.uploadResource = function (params, callback)
   }
   //
   // Get the session that will receive this resource
-  var session = this.server.getOpenSession(this);
+  var session = this.server.getOpenSession(this, true);
   if (!session) {
     this.log("WARN", "No session is waiting for this resource", "Project.uploadResource");
     return callback("No session is waiting for this resource");
@@ -627,32 +669,36 @@ Node.Project.prototype.sendStatus = function (params, callback)
   //
   var stat = {version: this.version, public: this.public, lastSave: this.lastSave};
   //
-  // If local -> can't compute project dir size
-  if (this.config.local)
+  // If local or Windows -> can't compute dir sizes
+  if (this.config.local || /^win/.test(process.platform))
     return callback({msg: JSON.stringify(stat)});
   //
   // Get the size of the project directory
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name;
-  this.server.execFileAsRoot("/usr/bin/du", ["-sh", path], function (err, stdout, stderr) {   // jshint ignore:line
+  this.server.execFileAsRoot("/usr/bin/du", ["-k", "-a", "-d", "1", path], function (err, stdout, stderr) {   // jshint ignore:line
     if (err) {
       pthis.log("ERROR", "Error getting the size of project folder: " + (stderr || err), "Project.sendStatus", {path: path});
       return callback("Error getting the size of project folder: " + (stderr || err));
     }
     //
-    var size = stdout.split("\t")[0];
-    switch (size.substr(-1)) {
-      case "K":
-        size = Math.ceil(parseFloat(size) * 1024);
-        break;
-      case "M":
-        size = Math.ceil(parseFloat(size) * 1024 * 1024);
-        break;
-      case "G":
-        size = Math.ceil(parseFloat(size) * 1024 * 1024 * 1024);
-        break;
+    stat.pathSizes = {};
+    var sizes = stdout.split("\n");
+    for (var i = 0; i < sizes.length - 1; i++) {                        // Last one is an empty row
+      var size = Math.ceil(parseFloat(sizes[i].split("\t")[0]) * 1024);
+      var dir = sizes[i].split("\t")[1].substring(path.length + 1);     // Remove path
+      if (["branches", "trans", "TwConfig.json", "TwConfig.json.bak"].indexOf(dir) !== -1)
+        stat.pathSizes.twSize = (stat.pathSizes.twSize || 0) + size;
+      else if (dir === "project.json")
+        stat.pathSizes.prjSize = size;
+      else if (dir === "build")
+        stat.pathSizes.buildSize = size;
+      else if (dir === "files")
+        stat.pathSizes.filesSize = size;
+      else if (dir === "resources")
+        stat.pathSizes.resSize = size;
+      else if (dir === "")
+        stat.diskSize = size;
     }
-    //
-    stat.diskSize = size;
     callback({msg: JSON.stringify(stat)});
   });
 };
@@ -1075,8 +1121,17 @@ Node.Project.prototype.resetTW = function (params, callback)
         // Log the operation
         pthis.log("INFO", "TeamWorks cleared", "Project.resetTW");
         //
-        // Done
-        callback();
+        // Fix branches directory (it's created by me... I'm not the OSUser)
+        pthis.server.execFileAsRoot("ChownChmod", [pthis.user.OSUser, path + "/branches"], function (err, stdout, stderr) {   // jshint ignore:line
+          if (err) {
+            pthis.log("ERROR", "Error changing branches folder permissions: " + (stderr || err), "Project.resetTW",
+                    {OSUser: pthis.user.OSUser, path: path});
+            return callback("Error changing branches folder permissions: " + (stderr || err));
+          }
+          //
+          // Done
+          callback();
+        });
       });
       //
       return;
@@ -1248,7 +1303,7 @@ Node.Project.prototype.uploadRecFile = function (params, callback)
   var filePath = path + params.req.query.dir;
   //
   // Get the session that will receive this rec file
-  var session = this.server.getOpenSession(this);
+  var session = this.server.getOpenSession(this, true);
   if (!session) {
     this.log("WARN", "No session is waiting for this tutorial rec file", "Project.uploadRecFile");
     return callback("No session is waiting for this tutorial rec file");

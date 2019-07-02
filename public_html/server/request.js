@@ -725,5 +725,108 @@ Node.Request.prototype.executeRemoteQuery = function (options, callback)
 };
 
 
+/*
+ * Ask to console to manage the notification of an issue
+ * @param {Object} msg
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.notifyIssueCommand = function (msg, callback)
+{
+  var pthis = this;
+  //
+  // Create a form to be sent via post
+  var form = new Node.FormData();
+  var cmd = msg.cmd;
+  switch (cmd) {
+    case "changeIssueNotification":
+      form.append("username", msg.username);
+      form.append("company", this.config.serverType);
+      form.append("projectName", msg.projectName);
+      form.append("projectID", msg.projectJSONID);
+      form.append("issueID", msg.issueID);
+      form.append("enabled", msg.enabled ? 1 : 0);
+      if (msg.forkChainID)
+        form.append("forkChainID", msg.forkChainID);
+      break;
+
+    case "notifyIssue":
+      form.append("issuesJSON", JSON.stringify(msg.issuesJSON));
+      break;
+
+    case "checkIssueNotification":
+      form.append("username", msg.username);
+      form.append("company", this.config.serverType);
+      form.append("projectName", msg.projectName);
+      form.append("projectID", msg.projectJSONID);
+      form.append("issuesID", msg.issuesID);
+      if (msg.forkChainID)
+        form.append("forkChainID", msg.forkChainID);
+      break;
+  }
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=" + cmd + "&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.notifyIssueCommand",
+              {err: err, code: code, data: data, options: options});
+      callback(undefined, err || "Invalid response");
+    }
+    else {
+      try {
+        callback(JSON.parse(data));
+      }
+      catch (ex) {
+        pthis.logger.log("ERROR", "GET reply error", "Request.notifyIssueCommand", {data: data, code: code, options: options});
+        callback(null, "Invalid response");
+      }
+    }
+  });
+};
+
+
+/*
+ * Ask to console users list
+ * @param {Object} msg
+ * @param {function} callback - function(data, err)
+ */
+Node.Request.prototype.notifyFeedback = function (msg, callback)
+{
+  var pthis = this;
+  //
+  // Create a form to be sent via post
+  var form = new Node.FormData();
+  form.append("issuesJSON", JSON.stringify(msg));
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL);
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=notifyIssue&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.notifyFeedback",
+              {err: err, code: code, data: data, options: options});
+      callback(undefined, err || "Invalid response");
+    }
+    else
+      callback(data);
+  });
+};
+
+
 // Export module
 module.exports = Node.Request;

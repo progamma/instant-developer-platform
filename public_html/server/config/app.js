@@ -489,9 +489,6 @@ Node.App.prototype.sendDttSessions = function (params, callback)
   var sessions = [];
   this.workers.forEach(function (wrk) {
     wrk.sessions.forEach(function (s) {
-      if (!s.sessionName)
-        return;   // Skip anonymous sessions
-      //
       sessions.push({sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"});
     });
   });
@@ -525,8 +522,8 @@ Node.App.prototype.sendDttSessions = function (params, callback)
       // Concatenate arrays by appending saved to online list
       sessions = sessions.concat(savedSess);
       //
-      // Reply to callee
-      return callback({msg: JSON.stringify(sessions)});
+      // Now filter online sessions
+      return filterOnlineSessionsAndReturn(sessions);
     }
     //
     var fname = fpath + "/index" + idx + ".json";
@@ -595,6 +592,38 @@ Node.App.prototype.sendDttSessions = function (params, callback)
     });
   };
   //
+  // Filter online sessions
+  var traceFlt = (this.params ? this.params["filterDttTrace"] : null);
+  var filterOnlineSessionsAndReturn = function (sessions) {
+    // Use the same "filter" schema (see dtt::canTraceSession)
+    for (var i = 0; i < sessions.length; i++) {
+      var s = sessions[i];
+      if (s.type !== "online")
+        continue; // I have to filter online sessions only
+      //
+      var delSession = false;
+      if (!s.sessionName)
+        delSession = true;  // If App has no session Name, can't apply filter -> don't trace
+      else if (!s.exceptions && !s.warnings && traceFlt) {  // If there are errors or warnings -> trace always
+        delSession = true;    // I'll delete this session (unless it matches filter criteria)
+        traceFlt = traceFlt.toLowerCase().split(",");
+        for (var j = 0; j < traceFlt.length && delSession; j++) {
+          var flt = traceFlt[j];
+          //
+          // If sessionName contains the i-th filter, trace session
+          if (s.sessionName.toLowerCase().indexOf(flt) !== -1)
+            delSession = false;
+        }
+      }
+      //
+      if (delSession)
+        sessions.splice(i--, 1);
+    }
+    //
+    // Reply to callee
+    callback({msg: JSON.stringify(sessions)});
+  };
+  //
   readIndexFile(0);
 };
 
@@ -652,7 +681,7 @@ Node.App.prototype.deleteDttSessions = function (params, callback)
     //
     // Worker is dead... Purge it directly...
     var opts = {beforeDate: beforeDate, workerIdx: idx, appPath: appPath, logFn: Node.App.prototype.log.bind(this)};
-    var DTT = require("../../ide/app/server/dtt").DTT;
+    var DTT = require(appPath + "/server/dtt").DTT;
     DTT.purgeSessionsInfo(opts, nextWrk);
   }.bind(this);
   //
@@ -862,12 +891,12 @@ Node.App.prototype.install = function (params, callback)
   this.updating = true;
   //
   // Check if the app exists
-  Node.fs.exists(this.config.appDirectory + "/apps/" + this.name, function (exists) {
+  Node.fs.access(this.config.appDirectory + "/apps/" + this.name, function (err) {
     // Remember if the app existed (needed if the app install fails)
-    appExisted = exists;
+    appExisted = (err ? false : true);
     //
     // If the app does not exist it's easy: just start install
-    if (!exists)
+    if (err)
       appInstall();
     else {
       // App exists -> first terminate every session and wait for the workers to terminate
@@ -1191,9 +1220,9 @@ Node.App.prototype.restoreFromDisk = function (params, callback)
     });
   };
   //
-  Node.fs.exists(this.config.appDirectory + "/backups/" + this.name, function (exists) {
+  Node.fs.access(this.config.appDirectory + "/backups/" + this.name, function (err) {
     // If the backup does not exists
-    if (!exists) {
+    if (err) {
       pthis.log("WARN", "There is no backup for the app", "App.restoreFromDisk");
       return callback("There is no backup for the app");
     }
@@ -1268,17 +1297,17 @@ Node.App.prototype.restore = function (params, callback)
  */
 Node.App.prototype.handleFileSystem = function (params, callback)
 {
-  var appFilesPath = this.config.appDirectory + "/apps/" + this.name + "/files/";
+  var appFilesPath = this.config.appDirectory + "/apps/" + this.name + "/files";
   var objPath = params.req.query.path || "";    // (optional)
   //
-  // Remove first / (it's not needed because appFilesPath already ends with /)
-  if (objPath[0] === "/")
-    objPath = objPath.substring(1);
+  // Fix objPath (add / if needed)
+  if (objPath && objPath[0] !== "/")
+    objPath = "/" + objPath;
   //
   var options = {
     path: appFilesPath + objPath,
     command: params.tokens[1],
-    tempPath: appFilesPath + "temp/"
+    tempPath: appFilesPath + "/temp/"
   };
   //
   this.log("DEBUG", "Handle file system command", "App.handleFileSystem", options);

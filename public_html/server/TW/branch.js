@@ -638,10 +638,10 @@ Node.Branch.prototype.mergeResources = function (callback)
     // user wants to merge a local branch with the master one.
     // In the later case the resources folder is not inside the branch... if that's the case
     // I don't need to copy resources at all... I just need to merge the resources.json files...
-    Node.fs.exists(srcBranch + "/resources/", function (exists) {
+    Node.fs.access(srcBranch + "/resources/", function (err) {
       // So, if the resources directory does not exists, jump to updateList function (i.e. merge resources.json)
       // Otherwise start with the first one (that will continue with the next one) and when finisced continue with updateList function
-      if (!exists)
+      if (err)
         updateList();
       else
         copyResource(0);

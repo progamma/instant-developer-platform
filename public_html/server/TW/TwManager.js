@@ -20,6 +20,7 @@ Node.Utils = require("../utils");
 InDe.Transaction = require("../../ide/model/Transaction");
 InDe.TransManager = require("../../ide/model/TransManager");
 InDe.rh = require("../../ide/common/resources");
+InDe.Document = require("../../ide/model/Document");
 InDe.AMethod = require("../../ide/model/objects/AMethod");
 InDe.AQuery = require("../../ide/model/objects/AQuery");
 
@@ -311,6 +312,13 @@ Node.TwManager.prototype.check = function ()
   // Check if all branches have their branch folder (don't wait for completion)
   for (var i = 0; i < this.branches.length; i++)
     this.branches[i].createBranchFolder(emptyfun);
+  //
+  // Create HEAD if needed (only for "true" normal IDE sessions)
+  if (this.child.options.type === "ide")
+    this.saveHEAD({}, function (err) {
+      if (err)
+        this.logger.log("WARN", "Error while creating HEAD: " + err, "TwManager.check");
+    }.bind(this));
 };
 
 
@@ -332,27 +340,12 @@ Node.TwManager.prototype.sendSavedModifications = function ()
   var pthis = this;
   //
   // Get all saved modifications
-  this.getAllSavedModifications(function (trans, err) {
+  this.getAllSavedModifications({}, function (trans, err) {
     if (err)
       return pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.savedModifications, cnt: {err: err}});
     //
-    // Cerate a Shuttle transaction (used to send the transitems to the callee)
-    var trShuttle = new InDe.Transaction(pthis.doc.transManager);
-    trShuttle.tw = true;
-    //
-    for (var i = 0; i < trans.length; i++) {
-      var tr = new InDe.Transaction(pthis.doc.transManager);
-      tr.load(trans[i]);
-      //
-      // Merge this transaction inside the shuttle transaction
-      trShuttle.transItems = trShuttle.transItems.concat(tr.transItems);
-    }
-    //
-    // Purge the transaction
-//    trShuttle = InDe.TransManager.purge(trShuttle);
-    //
     // Send the shuttle transaction to the client
-    pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.savedModifications, cnt: {tr: trShuttle.save()}});
+    pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.savedModifications, cnt: {tr: trans.save()}});
   });
 };
 
@@ -451,41 +444,26 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
   //
   // If the branch is NOT a PR, add saved and memory modifications to the undo list
   if (branch.type !== Node.Branch.PR) {
-    pthis.getAllSavedModifications(function (trans, err) {
+    pthis.getAllSavedModifications({backward: true}, function (trans, err) {
       if (err) {
         pthis.logger.log("WARN", "Error while retrieving the saved modifications: " + err, "TwManager.sendDiffBranch");
         return this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt:
                   {err: InDe.rh.t("tw_diffbranch_err", {_b: branchName})}});
       }
       //
-      // Load all saved transactions
-      for (j = 0; j < trans.length; j++) {
-        tr = new InDe.Transaction(pthis.doc.transManager);
-        tr.load(trans[j]);
-        //
-        // This transaction must be undoed... thus I need to invert each transitem
-        for (k = 0; k < tr.transItems.length; k++) {
-          ti = tr.transItems[k];
-          //
-          // Relink the item
-          tr.relinkItem(ti, "undo");
-          //
-          // Invert the item
-          InDe.Transaction.invertTransItem(ti);
-          //
-          // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
-          trShuttle.transItems.unshift(ti);
-        }
-      }
+      // Add all items into shuttle transaction
+      // (this is an UNDO item, thus I add it backward)
+      trans.transItems.forEach(function (ti) {
+        InDe.Transaction.invertTransItem(ti);
+        trShuttle.transItems.unshift(ti);
+      });
       //
       // Last: add memory modifications
       var translist = pthis.doc.transManager.translist;
       for (i = 0; i < translist.length; i++) {
         tr = translist[i];
-        //
-        // If this transaction is inside the saved modifications, skip it
-        if (trans.indexOf(tr.id) !== -1)
-          continue;
+        if (tr.saved)
+          continue;   // Skip saved transactions
         //
         // I need to invert the tr's items, thus I can't just use the "original" one. Thus I need a clone
         var newtr = tr.clone();
@@ -689,8 +667,8 @@ Node.TwManager.prototype.sendTWstatus = function ()
   var status = {};
   //
   // TRUE if there are saved modifications
-  Node.fs.exists(this.path + "/trans/save.json", function (exists) {
-    status.savedModif = exists;
+  Node.fs.access(this.path + "/trans/save.json", function (err) {
+    status.savedModif = (err ? false : true);
     this.doc.sendMessage({type: Node.TwManager.msgTypeMap.TWstatus, cnt: status});
   }.bind(this));
   //
@@ -768,6 +746,88 @@ Node.TwManager.prototype.sendTWstatus = function ()
     status.nConfl = countConfl(this.actualBranch.conflictTrans.transItems);
     this.doc.sendMessage({type: Node.TwManager.msgTypeMap.TWstatus, cnt: status});
   }
+};
+
+
+/**
+ * Save the HEAD
+ * @param {object} options - {overwrite: if true HEAD must be overwritten, branchName: use this instead of actualBranch)
+ * @param {function} callback - function(err)
+ */
+Node.TwManager.prototype.saveHEAD = function (options, callback)
+{
+  var srcFile = this.path + "/project.json";
+  var tgtFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
+  //
+  // If a source or a target branch were provided, use them
+  if (options.srcBranch)
+    srcFile = this.path + "/branches/" + options.srcBranch + "/project.json";
+  if (options.tgtBranch)
+    tgtFile = this.path + "/branches/" + options.tgtBranch + "/project.json";
+  //
+  // Check if HEAD exists
+  Node.fs.access(tgtFile, function (err) {
+    // If HEAD exists (!err) I've done, unless I need to overwrite it...
+    // In this case procede with file copy
+    if (!err && !options.overwrite) {
+      this.logger.log("DEBUG", "HEAD exists -> skip", "TwManager.saveHEAD", {tgtFile: tgtFile, options: options});
+      return callback();
+    }
+    //
+    // HEAD does not exist... I need to copy it
+    this.copyFile(srcFile, tgtFile, function (err) {
+      if (err) {
+        this.logger.log("ERR", "Error while saving HEAD: " + err, "TwManager.saveHEAD",
+                {srcFile: srcFile, tgtFile: tgtFile, options: options});
+        return callback(err);
+      }
+      //
+      // Log the HEAD creation
+      this.logger.log("DEBUG", "HEAD created", "TwManager.saveHEAD", {tgtFile: tgtFile, options: options});
+      //
+      // Done!
+      callback();
+    }.bind(this));
+  }.bind(this));
+};
+
+
+/**
+ * Restore HEAD (i.e. copy HEAD over project.json)
+ * @param {object} options - {branchName: use this instead of actualBranch)
+ * @param {function} callback - function(err)
+ */
+Node.TwManager.prototype.restoreHEAD = function (options, callback)
+{
+  // If this is a dummy operation -> do nothing
+  if (options.noCopy)
+    return callback();
+  //
+  var headFile = this.path + "/branches/" + (options.branchName || this.actualBranch.name) + "/project.json";
+  var tgtFile = this.path + "/project.json";
+  //
+  // Check if HEAD exists
+  Node.fs.access(headFile, function (err) {
+    // If HEAD does not exist I've a problem
+    if (err) {
+      this.logger.log("ERR", "HEAD does not exist", "TwManager.restoreHEAD", {headFile: headFile, options: options});
+      return callback(err);
+    }
+    //
+    // HEAD does not exist... I need to copy it
+    this.copyFile(headFile, tgtFile, function (err) {
+      if (err) {
+        this.logger.log("ERR", "Error while restoring HEAD: " + err, "TwManager.restoreHEAD", {headFile: headFile, tgtFile: tgtFile, options: options});
+        return callback(err);
+      }
+      //
+      // Log the HEAD creation
+      this.logger.log("DEBUG", "HEAD restored", "TwManager.restoreHEAD", {headFile: headFile, options: options});
+      //
+      // Done!
+      callback();
+    }.bind(this));
+  }.bind(this));
 };
 
 
@@ -1042,14 +1102,22 @@ Node.TwManager.prototype.createBranch = function (newBranchName, callback)
         return callback(InDe.rh.t("tw_branch_create_err"));
       }
       //
-      // Inform the client that a branch has been created
-      pthis.sendBranchesList();
-      //
-      // Log the branch creation
-      pthis.logger.log("DEBUG", "Branch created", "TwManager.createBranch", {branch: newBranchName});
-      //
-      // Operation completed
-      callback();
+      // Create HEAD
+      pthis.saveHEAD({srcBranch: pthis.actualBranch.name, tgtBranch: newBranchName}, function (err) {
+        if (err) {
+          pthis.logger.log("WARN", "Error while creating HEAD: " + err, "TwManager.createBranch");
+          return callback(InDe.rh.t("tw_branch_create_err"));
+        }
+        //
+        // Inform the client that a branch has been created
+        pthis.sendBranchesList();
+        //
+        // Log the branch creation
+        pthis.logger.log("DEBUG", "Branch created", "TwManager.createBranch", {branch: newBranchName});
+        //
+        // Operation completed
+        callback();
+      });
     });
   };
   //
@@ -1089,8 +1157,8 @@ Node.TwManager.prototype.createBranch = function (newBranchName, callback)
         // Last, copy resource.json file from the original branch (if exists)
         var srcRes = pthis.path + "/branches/" + pthis.actualBranch.name + "/resources.json";
         var dstRes = pthis.path + "/branches/" + newBranchName + "/resources.json";
-        Node.fs.exists(srcRes, function (exists) {
-          if (exists) {
+        Node.fs.access(srcRes, function (err) {
+          if (!err) {
             pthis.copyFile(srcRes, dstRes, function (err) {
               if (err) {
                 pthis.logger.log("WARN", "Error while copying resources.json between branches: " + err, "TwManager.createBranch",
@@ -1252,8 +1320,6 @@ Node.TwManager.prototype.renameBranch = function (branchName, newBranchName, cal
  */
 Node.TwManager.prototype.switchBranch = function (branchName, callback)
 {
-  var pthis = this;
-  //
   // First, check if the branch exists
   var branch = this.getBranchByName(branchName);
   if (!branch) {
@@ -1273,69 +1339,68 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
     return callback(InDe.rh.t("tw_switch_confl_err", {_n: branchName}));
   }
   //
-  // Get the list of commits to execute in order to switch from current branch to the requested one
-  var commits = this.getDiffBranchSwitch(branchName);
-  //
-  // If there are local modifications and there is something to do I can't switch... I would have to undo the local modifications as well
-  // But if there is nothing to be done (the new branch is aligned with the current branch) I can switch like Git does
-  if (this.localModif() && (commits.undoList.length || commits.redoList.length)) {
-    this.logger.log("WARN", "Can't switch: there are local modifications", "TwManager.switchBranch", {branch: branchName});
-    return callback(InDe.rh.t("tw_switch_locmod_err"));
+  // If there are local modifications
+  var skipRestore = undefined;
+  if (this.localModif()) {
+    // I can switch only if the new branch's HEAD and old branch's HEAD are the same
+    var oldFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
+    var newFile = this.path + "/branches/" + branchName + "/project.json";
+    var oldFileStat = Node.fs.statSync(oldFile);
+    var newFileStat = Node.fs.statSync(newFile);
+    if (oldFileStat.mtime.getTime() !== newFileStat.mtime.getTime()) {
+      this.logger.log("WARN", "Can't switch: there are local modifications and HEAD's does not match", "TwManager.switchBranch",
+              {oldFile: {name: oldFile, stat: oldFileStat.mtime, statTime: oldFileStat.mtime.getTime()},
+                newFile: {name: newFile, stat: newFileStat.mtime, statTime: newFileStat.mtime.getTime()}});
+      return callback(InDe.rh.t("tw_switch_locmod_err"));
+    }
+    //
+    // HEADs are the same. :-)
+    // But I don't want to restore HEAD file... project.json has changed and I would
+    // loose all local modifications if I restore HEAD from new branch... I can keep the current
+    // project.json because the two HEADs (old and new branch) are equal.
+    skipRestore = true;
   }
   //
-  // Undo the commits that have to be undoed (backward)
-  for (var i = commits.undoList.length - 1; i >= 0; i--)
-    commits.undoList[i].undo(true);   // Handle conflicts (i.e. missing objects)
-  //
-  // Redo the commits that have to be redoed
-  for (var j = 0; j < commits.redoList.length; j++)
-    commits.redoList[j].redo(false);  // Handle any conflict (but don't report them)
-  //
-  // Now the actual branch has changed
-  this.actualBranch = this.getBranchByName(branchName);
-  //
-  // Function that completes the operation: save config & update UI
-  var completeSwitch = function () {
-    pthis.saveConfig(function (err) {
+  // Restore HEAD
+  this.restoreHEAD({branchName: branchName, noCopy: skipRestore}, function (err) {
+    if (err) {
+      this.logger.log("ERR", "Error while restoring HEAD: " + err, "TwManager.switchBranch", {branch: branchName});
+      return callback(InDe.rh.t("tw_switch_err"));
+    }
+    //
+    // Switch to the new branch
+    this.actualBranch = this.getBranchByName(branchName);
+    //
+    // Remove all transactions and save the document
+    this.emptyTransList();
+    //
+    // Reload document (both server-side and client-side)
+    this.doc.reload();
+    //
+    // Invalidate list of parent commits... I've changed branch and the list must be refreshed using
+    // the new branch as parameter
+    delete this.parentCommits;
+    //
+    // Update UI
+    this.sendTWstatus();
+    //
+    // Done -> complete switch
+    this.saveConfig(function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Error while saving config file: " + err, "TwManager.switchBranch", {branch: branchName});
+        this.logger.log("WARN", "Error while saving config file: " + err, "TwManager.switchBranch", {branch: branchName});
         return callback(InDe.rh.t("tw_switch_err"));
       }
       //
       // Send the updated branch list to the client
-      pthis.sendBranchesList();
+      this.sendBranchesList();
       //
       // Log the branch switch
-      pthis.logger.log("DEBUG", "Switched branch", "TwManager.switchBranch", {branch: branchName});
+      this.logger.log("DEBUG", "Switched branch", "TwManager.switchBranch", {branch: branchName});
       //
       // Operation completed
       callback();
-    });
-  };
-  //
-  // If I've done something
-  if (commits.undoList.length || commits.redoList.length) {
-    // Remove all transactions and save the document
-    this.emptyTransList();
-    this.saveDocument(function (err) {
-      if (err) {
-        pthis.logger.log("WARN", "Error while saving document: " + err, "TwManager.switchBranch", {branch: branchName});
-        return callback(InDe.rh.t("tw_switch_err"));
-      }
-      //
-      // Invalidate list of parent commits... I've changed branch and the list must be refreshed using
-      // the new branch as parameter
-      delete pthis.parentCommits;
-      //
-      // Update UI
-      pthis.sendTWstatus();
-      //
-      // Done -> complete switch
-      completeSwitch();
-    });
-  }
-  else  // Nothing changed -> complete switch
-    completeSwitch();
+    }.bind(this));
+  }.bind(this));
 };
 
 
@@ -1434,73 +1499,184 @@ Node.TwManager.prototype.commit = function (message, callback)
   //
   // Create a new commit with the given message
   var newCommit = pthis.actualBranch.createCommit(message);
+
+
+
+
+
+  // TODO: Eliminare quando TW sarà a posto
+  if (this.child.config.serverType === "pro-gamma-test") {
+    if (!Node.fs.existsSync(this.child.config.directory + "/_backup/"))
+      Node.fs.mkdirSync(this.child.config.directory + "/_backup/");
+    //
+    Node.tar = require("tar");
+    var taropt = {
+      file: this.child.config.directory + "/_backup/" + this.child.project.user.userName + "_" + this.child.project.name + "_commit_" + newCommit.id + ".tar.gz",
+      cwd: this.path,
+      gzip: true,
+      portable: true,
+      sync: true
+    };
+    var tarlist = ["trans", "project.json", "branches/" + this.actualBranch.name + "/project.json"];
+    try {
+      Node.tar.create(taropt, tarlist);
+    }
+    catch (ex) {
+      this.logger.log("ERROR", "Error while backing up TRANS directory: " + ex, "TwManager.commit");
+      return callback(InDe.rh.t("tw_commit_err"));
+    }
+  }
+
+
+
+
   //
   // Copy the staging area inside the new commit
   var pathCommit = pthis.path + "/branches/" + pthis.actualBranch.name + "/" + newCommit.id;
-  pthis.getAllSavedModifications(function (trans, err) {
+  pthis.getAllSavedModifications({}, function (trans, err) {
     if (err) {
       pthis.logger.log("WARN", "Error while getting local modifications: " + err, "TwManager.commit");
       return callback(InDe.rh.t("tw_commit_err"));
     }
     //
-    pthis.writeJSONFile(pathCommit, trans, function (err) {
+    pthis.writeJSONFile(pathCommit, [trans.save()], function (err) {
       if (err) {
         pthis.logger.log("ERROR", "Error writing to the file" + pathCommit + ": " + err, "TwManager.commit");
         return callback(InDe.rh.t("tw_commit_err"));
       }
       //
       // Compute work-days
-      newCommit.workdays = pthis.doc.transManager.computeWorkDays(trans);
-      //
-      // OK. Now let's take care of resources
-      pthis.getWorkingResources(function (resources, err) {
-        if (err)
+      pthis.computeWorkDays(function (workDays, err) {
+        if (err) {
+          pthis.logger.log("ERROR", "Error while computing work days: " + err, "TwManager.commit");
           return callback(InDe.rh.t("tw_commit_err"));
+        }
         //
-        // Ask the branch to "merge" the resources that are in the staging area inside the branch
-        // (the resources array have been filtered thus only the used ones are actually in there)
-        pthis.actualBranch.saveResources(resources, function (err) {
+        newCommit.workdays = workDays;
+        //
+        // OK. Now let's take care of resources
+        pthis.getWorkingResources(function (resources, err) {
           if (err)
             return callback(InDe.rh.t("tw_commit_err"));
           //
-          // Remove staging area
-          Node.rimraf(pthis.path + "/trans", function (err) {
-            if (err) {
-              pthis.logger.log("ERROR", "Error removing the staging area " + pthis.path + "/trans: " + err, "TwManager.commit");
+          // Ask the branch to "merge" the resources that are in the staging area inside the branch
+          // (the resources array have been filtered thus only the used ones are actually in there)
+          pthis.actualBranch.saveResources(resources, function (err) {
+            if (err)
               return callback(InDe.rh.t("tw_commit_err"));
-            }
             //
-            // Clear the resources array for this sessions
-            pthis.doc.resources = [];
-            //
-            // Now, that everything if fine, save the list of the commits in the branch
-            pthis.actualBranch.saveCommitsList(function (err) {
+            // Remove staging area
+            Node.rimraf(pthis.path + "/trans", function (err) {
               if (err) {
-                pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.commit");
+                pthis.logger.log("ERROR", "Error removing the staging area " + pthis.path + "/trans: " + err, "TwManager.commit");
                 return callback(InDe.rh.t("tw_commit_err"));
               }
               //
-              // Empty the list of in-memory changes
-              pthis.emptyTransList();
+              // Clear the resources array for this sessions
+              pthis.doc.resources = [];
               //
-              // Update UI
-              pthis.sendTWstatus();
-              //
-              // Invalidate list of parent commits... Now that I've committed it's the right time to re-check
-              // if I can fetch changes from the parent project
-              delete pthis.parentCommits;
-              //
-              // Log the commit
-              pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
-              //
-              // Operation completed
-              callback();
+              // Now, that everything if fine, save the list of the commits in the branch
+              pthis.actualBranch.saveCommitsList(function (err) {
+                if (err) {
+                  pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.commit");
+                  return callback(InDe.rh.t("tw_commit_err"));
+                }
+                //
+                // Last, align HEAD (i.e. with overwrite)
+                pthis.saveHEAD({overwrite: true}, function (err) {
+                  if (err) {
+                    pthis.logger.log("WARN", "Error while re-creating HEAD: " + err, "TwManager.commit");
+                    return callback(InDe.rh.t("tw_commit_err"));
+                  }
+                  //
+                  // Empty the list of in-memory changes
+                  pthis.emptyTransList();
+                  //
+                  // Update UI
+                  pthis.sendTWstatus();
+                  //
+                  // Invalidate list of parent commits... Now that I've committed it's the right time to re-check
+                  // if I can fetch changes from the parent project
+                  delete pthis.parentCommits;
+                  //
+                  // Log the commit
+                  pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
+                  //
+                  // Operation completed
+                  callback();
+                });
+              });
             });
           });
         });
       });
     });
   });
+};
+
+
+/*
+ * Compute the number of work-days in the staging area
+ * @param {function} callback - function(workDays, err)
+ */
+Node.TwManager.prototype.computeWorkDays = function (callback)
+{
+  // Read the SAVE.json file and list all transactions in all sessions
+  var pathSave = this.path + "/trans/save.json";
+  Node.fs.access(pathSave, function (err) {
+    if (err && err.code === "ENOENT") {
+      this.logger.log("DEBUG", "No staging area -> workDays = 0", "TwManager.computeWorkDays");
+      return callback(0);
+    }
+    else if (err) {
+      this.logger.log("ERROR", "Can't access the file " + pathSave + ": " + err, "TwManager.computeWorkDays");
+      return callback(null, err);
+    }
+    //
+    // Read the file
+    this.readJSONFile(pathSave, function (sessions, err) {
+      if (err) {
+        this.logger.log("ERROR", "Error reading the file " + pathSave + ": " + err, "TwManager.computeWorkDays");
+        return callback(null, err);
+      }
+      //
+      // Concat all the transactions for all sessions
+      var trans = [];
+      var addSession = function (i) {
+        // If there are no more sessions -> I've done
+        if (i >= sessions.length) {
+          // I need to know how many "different-days" there are inside the list
+          // Use an object as a dictionary to compute the "union" of all dates
+          var dates = {};
+          for (var j = 0; j < trans.length; j++) {
+            var tr = new InDe.Transaction(this);
+            tr.load(trans[j]);
+            dates[tr.date.substring(0, 10)] = true;   // Log this date
+          }
+          //
+          // Return the number of different days
+          var wd = Object.keys(dates).length;
+          this.logger.log("DEBUG", "Read " + sessions.length + " sessions: working days = " + wd, "TwManager.computeWorkDays");
+          return callback(wd);
+        }
+        //
+        var pathSession = this.path + "/trans/" + sessions[i].id;
+        this.readJSONFile(pathSession, function (trlist, err) {
+          if (err) {
+            this.logger.log("ERROR", "Error reading the file " + pathSession + ": " + err, "TwManager.computeWorkDays");
+            return callback(null, err);
+          }
+          //
+          trans = trans.concat(trlist);
+          //
+          addSession(i + 1);   // Next one
+        }.bind(this));
+      }.bind(this);
+      //
+      // Start with the first session
+      addSession(0);
+    }.bind(this));
+  }.bind(this));
 };
 
 
@@ -1579,30 +1755,43 @@ Node.TwManager.prototype.merge = function (branchName, callback)
   var mergeCompleted = function () {
     // Remove all transactions and save the document
     pthis.emptyTransList();
-    pthis.saveDocument();
-    //
-    // Save the list of commits (new commits have been added to the actual branch)
-    pthis.actualBranch.saveCommitsList(function (err) {
+    pthis.saveDocument(function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.merge");
+        pthis.logger.log("WARN", "Error while saving the document after merge: " + err, "TwManager.merge");
         return callback(InDe.rh.t("tw_merge_err"));
       }
       //
-      // Save the configuration file
-      pthis.saveConfig(function (err) {
+      // Save the list of commits (new commits have been added to the actual branch)
+      pthis.actualBranch.saveCommitsList(function (err) {
         if (err) {
-          pthis.logger.log("WARN", "Error while saving config: " + err, "TwManager.merge");
+          pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.merge");
           return callback(InDe.rh.t("tw_merge_err"));
         }
         //
-        // Update UI (there could be conflicts)
-        pthis.sendTWstatus();
-        //
-        // Log the branch merge
-        pthis.logger.log("DEBUG", "Branch merged", "TwManager.merge", {branch: branchName});
-        //
-        // Operation completed
-        callback();
+        // Last, align HEAD (i.e. with overwrite)
+        pthis.saveHEAD({overwrite: true}, function (err) {
+          if (err) {
+            pthis.logger.log("WARN", "Error while re-creating HEAD: " + err, "TwManager.merge");
+            return callback(InDe.rh.t("tw_merge_err"));
+          }
+          //
+          // Save the configuration file
+          pthis.saveConfig(function (err) {
+            if (err) {
+              pthis.logger.log("WARN", "Error while saving config: " + err, "TwManager.merge");
+              return callback(InDe.rh.t("tw_merge_err"));
+            }
+            //
+            // Update UI (there could be conflicts)
+            pthis.sendTWstatus();
+            //
+            // Log the branch merge
+            pthis.logger.log("DEBUG", "Branch merged", "TwManager.merge", {branch: branchName});
+            //
+            // Operation completed
+            callback();
+          });
+        });
       });
     });
   };
@@ -1647,31 +1836,36 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
   var rebaseCompleted = function () {
     // Remove all transactions and save the document
     pthis.emptyTransList();
-    pthis.saveDocument();
-    //
-    // Save the list of commits (new commits have been added to this branch)
-    pthis.actualBranch.saveCommitsList(function (err) {
+    pthis.saveDocument(function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.rebase");
-        return callback(InDe.rh.t("tw_merge_err"));
+        pthis.logger.log("WARN", "Error while saving the document after rebase: " + err, "TwManager.rebase");
+        return callback(InDe.rh.t("tw_rebase_err"));
       }
       //
-      // Save the configuration file
-      pthis.saveConfig(function (err) {
+      // Save the list of commits (new commits have been added to this branch)
+      pthis.actualBranch.saveCommitsList(function (err) {
         if (err) {
-          pthis.logger.log("WARN", "Can't save config: " + err, "TwManager.rebase");
-          return callback(InDe.rh.t("tw_merge_err"));
+          pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.rebase");
+          return callback(InDe.rh.t("tw_rebase_err"));
         }
         //
-        // If the branch was a PR, update UI
-        if (branch.type === Node.Branch.PR)
-          pthis.sendTWstatus();
-        //
-        // Log the branch merge
-        pthis.logger.log("DEBUG", "Actual branch rebased", "TwManager.rebase", {actBranch: pthis.actualBranch.name, branch: branchName});
-        //
-        // Operation completed
-        callback();
+        // Save the configuration file
+        pthis.saveConfig(function (err) {
+          if (err) {
+            pthis.logger.log("WARN", "Can't save config: " + err, "TwManager.rebase");
+            return callback(InDe.rh.t("tw_rebase_err"));
+          }
+          //
+          // If the branch was a PR, update UI
+          if (branch.type === Node.Branch.PR)
+            pthis.sendTWstatus();
+          //
+          // Log the branch merge
+          pthis.logger.log("DEBUG", "Actual branch rebased", "TwManager.rebase", {actBranch: pthis.actualBranch.name, branch: branchName});
+          //
+          // Operation completed
+          callback();
+        });
       });
     });
   };
@@ -1680,7 +1874,7 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
   this.actualBranch.rebase(branch, function (err) {
     if (err) {
       pthis.logger.log("WARN", "Rebase failed: " + err, "TwManager.rebase", {actBranch: pthis.actualBranch.name, branch: branchName});
-      return callback(InDe.rh.t("tw_merge_err"));
+      return callback(InDe.rh.t("tw_rebase_err"));
     }
     //
     // If the source branch was a PR, remove it
@@ -1688,7 +1882,7 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
       pthis.deleteBranch(branch.name, function (err) {
         if (err) {
           pthis.logger.log("WARN", "Can't delete a PR branch: " + err, "TwManager.rebase", {branch: branchName});
-          return callback(InDe.rh.t("tw_merge_err"));
+          return callback(InDe.rh.t("tw_rebase_err"));
         }
         //
         rebaseCompleted();
@@ -1700,51 +1894,49 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
 
 
 /**
- * Get all saved transactions
- * @param {function} callback - function(trans, err)
+ * Get all changes between HEAD and current project
+ * @param {object} options - (backward: indicates the direction of computation)
+ * @param {function} callback - function(tr, err)
  */
-Node.TwManager.prototype.getAllSavedModifications = function (callback)
+Node.TwManager.prototype.getAllSavedModifications = function (options, callback)
 {
-  var pthis = this;
+  var result;
   //
-  // Read the SAVE.json file and list all transactions in all sessions
-  var pathSave = this.path + "/trans/save.json";
-  Node.fs.exists(pathSave, function (exists) {
-    if (exists) {
-      // Read the file
-      pthis.readJSONFile(pathSave, function (sessions, err) {
-        if (err) {
-          pthis.logger.log("ERROR", "Error reading the file " + pathSave + ": " + err, "TwManager.getAllSavedModifications");
-          return callback(null, err);
-        }
-        //
-        // Concat all the transactions for all sessions
-        var trans = [];
-        var addSession = function (i) {
-          // If there are no more sessions -> I've done
-          if (i >= sessions.length)
-            return callback(trans);
-          //
-          var pathSession = pthis.path + "/trans/" + sessions[i].id;
-          pthis.readJSONFile(pathSession, function (trlist, err) {
-            if (err) {
-              pthis.logger.log("ERROR", "Error reading the file " + pathSession + ": " + err, "TwManager.getAllSavedModifications");
-              return callback(null, err);
-            }
-            //
-            trans = trans.concat(trlist);
-            //
-            addSession(i + 1);   // Next one
-          });
-        };
-        //
-        // Start with the first session
-        addSession(0);
-      });
+  // Load HEAD and compute differences between HEAD and current project
+  var headFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
+  Node.fs.readFile(headFile, {encoding: "utf8"}, function (err, file) {
+    if (err) {
+      this.logger.log("ERROR", "Error reading HEAD file " + headFile + ": " + err, "TwManager.getAllSavedModifications");
+      return callback(null, err);
     }
-    else
-      callback([]);
-  });
+    //
+    // Load document
+    var start = new Date();
+    var head = new InDe.Document(this.child);
+    head.load(file);
+    this.logger.log("DEBUG", "HEAD loaded in " + (new Date() - start) + " ms", "TwManager.getAllSavedModifications");
+    //
+    // Compute difference between HEAD and doc
+    start = new Date();
+    try {
+      var src = (!options.backward ? head : this.doc);
+      var dst = (!options.backward ? this.doc : head);
+      result = InDe.Document.computeDifference(src, dst);
+      //
+      result.tw = true;
+      result.status = InDe.Transaction.Status.COMMITTED;
+    }
+    catch (ex) {
+      this.logger.log("ERROR", "Error while computing difference with HEAD: " + ex, "TwManager.getAllSavedModifications",
+              {options: options, stack: ex.stack});
+      return callback(null, ex);
+    }
+    //
+    // Done!
+    this.logger.log("DEBUG", "Difference with head computed: " + result.transItems.length + " items in " + (new Date() - start) + " ms",
+            "TwManager.getAllSavedModifications", options);
+    callback(result);
+  }.bind(this));
 };
 
 
@@ -1788,8 +1980,8 @@ Node.TwManager.prototype.getAllSavedTransItemsById = function (objid, callback)
   var trSaved = new InDe.Transaction(this.doc.transManager);
   //
   var pathSave = this.path + "/trans/save.json";
-  Node.fs.exists(pathSave, function (exists) {
-    if (exists) {
+  Node.fs.access(pathSave, function (err) {
+    if (!err) {
       // Read all transactions and get only relevant items
       this.readJSONFile(pathSave, function (sessions, err) {
         if (err) {
@@ -1867,40 +2059,18 @@ Node.TwManager.prototype.reset = function (callback)
   }
   //
   var pathSave = this.path + "/trans/save.json";
-  Node.fs.exists(pathSave, function (exists) {
+  Node.fs.access(pathSave, function (err) {
     // If there are no saved modifications and no local modifications, do nothing
-    if (!exists && pthis.doc.transManager.translist.length === 0) {
+    if (err && pthis.doc.transManager.translist.length === 0) {
       pthis.logger.log("INFO", "Nothing to reset", "TwManager.reset");
       return callback(InDe.rh.t("tw_no_reset"));
     }
     //
-    // First undo all local modifications (backward)
-    var translist = pthis.doc.transManager.translist;
-    for (var i = translist.length - 1; i >= 0; i--)
-      translist[i].undo();
-    //
-    // Then undo all saved modifications (backward)
-    pthis.getAllSavedModifications(function (trans, err) {
+    // Restore project.json from HEAD file
+    pthis.restoreHEAD({}, function (err) {
       if (err) {
-        pthis.logger.log("WARN", "Error while retrieving the saved modifications: " + err, "TwManager.reset");
+        pthis.logger.log("ERROR", "Error while restoring HEAD: " + err, "TwManager.reset");
         return callback(InDe.rh.t("tw_reset_err"));
-      }
-      //
-      for (var j = trans.length - 1; j >= 0; j--) {
-        var tr = new InDe.Transaction(pthis.doc.transManager);
-        tr.load(trans[j]);
-        //
-        // Check if this is inside the local modifications list (that I've already undoed before)
-        var skip = false;
-        for (var i = 0; i < translist.length && !skip; i++) {
-          if (tr.id === translist[i].id)
-            skip = true;
-        }
-        if (!skip) {
-          // Inform the client that this transaction can be UNDOED even if he does not have it
-          tr.twOperation = true;
-          tr.undo();
-        }
       }
       //
       // Remove the saved modifications folder
@@ -1910,22 +2080,19 @@ Node.TwManager.prototype.reset = function (callback)
           return callback(InDe.rh.t("tw_reset_err"));
         }
         else {
-          // Remove all transactions and save the document
+          // Remove all transactions
           pthis.emptyTransList();
-          pthis.saveDocument(function (err) {
-            if (err) {
-              pthis.logger.log("WARN", "Error while saving the document after reset: " + err, "TwManager.reset");
-              return callback(InDe.rh.t("tw_reset_err"));
-            }
-            //
-            // Log the reset
-            pthis.logger.log("DEBUG", "Project resetted", "TwManager.reset");
-            //
-            callback();
-            //
-            // Update TW status (now there is nothing more to commit)
-            pthis.sendTWstatus();
-          });
+          //
+          // Reload document (both server-side and client-side)
+          pthis.doc.reload();
+          //
+          // Log the reset
+          pthis.logger.log("DEBUG", "Project resetted", "TwManager.reset");
+          //
+          callback();
+          //
+          // Update TW status (now there is nothing more to commit)
+          pthis.sendTWstatus();
         }
       });
     });
@@ -1967,13 +2134,21 @@ Node.TwManager.prototype.revert = function (options, callback)
           return callback(InDe.rh.t("tw_revert_err"));
         }
         //
-        // Log the reset
-        this.logger.log("DEBUG", "Project reverted", "TwManager.revert");
-        //
-        callback();
-        //
-        // Update TW status (now there is nothing more to commit)
-        this.sendTWstatus();
+        // Last, align HEAD (i.e. with overwrite)
+        this.saveHEAD({overwrite: true}, function (err) {
+          if (err) {
+            this.logger.log("WARN", "Error while re-creating HEAD: " + err, "TwManager.revert");
+            return callback(InDe.rh.t("tw_revert_err"));
+          }
+          //
+          // Log the reset
+          this.logger.log("DEBUG", "Project reverted", "TwManager.revert");
+          //
+          callback();
+          //
+          // Update TW status (now there is nothing more to commit)
+          this.sendTWstatus();
+        }.bind(this));
       }.bind(this));
     }.bind(this));
   }.bind(this));
@@ -1989,8 +2164,8 @@ Node.TwManager.prototype.getWorkingResources = function (callback)
   var pthis = this;
   //
   var pathTrans = this.path + "/trans/save.json";
-  Node.fs.exists(pathTrans, function (exists) {
-    if (exists) {
+  Node.fs.access(pathTrans, function (err) {
+    if (!err) {
       var resources = [];
       pthis.readJSONFile(pathTrans, function (sess, err) {
         if (err) {
@@ -2368,9 +2543,8 @@ Node.TwManager.prototype.saveDocument = function (callback)
     if (!err)
       pthis.doc.regenerateSaveKeys();
     //
-    // Report to callee (if any)
-    if (callback)
-      callback(err);
+    // Report to callee
+    callback(err);
   });
 };
 
@@ -2509,7 +2683,19 @@ Node.TwManager.prototype.copyFile = function (srcFile, dstFile, callback)
     callback(null, err);
   });
   wstream.on("finish", function () {
-    callback();
+    // Now copy lastWriteTime so that files are the same
+    Node.fs.stat(srcFile, function (err, stat) {
+      if (err)
+        return callback(err);
+      //
+      Node.fs.utimes(dstFile, stat.atime, stat.mtime, function (err) {
+        if (err)
+          return callback(null, err);
+        //
+        // Done
+        callback();
+      });
+    });
   });
 };
 

@@ -826,14 +826,14 @@ Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
         err = response.err || response;
       //
       this.log("DEBUG", "Local query executed", "IDESession.handleRemoteQueryMessage", {result: result, err: err});
-      this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, result: result, err: err});
+      this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, result: result, err: err});
     }.bind(this));
     //
     return;
   }
   //
   this.server.request.executeRemoteQuery(options, function (result, err) {
-    this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, result: result, err: err});
+    this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, result: result, err: err});
   }.bind(this));
 };
 

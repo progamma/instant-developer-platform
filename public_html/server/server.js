@@ -87,8 +87,18 @@ Node.createServer = function ()
  */
 Node.Server.prototype.initServer = function ()
 {
-  // self is always "prod"
-  var srvtype = "prod";
+  // Detect server type: production, local
+  var srvtype;
+  try {
+    if (Node.fs.existsSync("/mnt/disk/IndeRT"))
+      srvtype = "prod";
+    else
+      srvtype = "local";
+  }
+  catch (ex) {
+    console.log("Error while detecting server type. Switching to LOCAL mode: " + ex.message);
+    srvtype = "local";
+  }
   //
   // Load the configuration from the json file
   this.config = new Node.Config(this);
@@ -209,7 +219,7 @@ Node.Server.prototype.initServer = function ()
   }
   //
   // Set peerjs server
-  Node.app.use("/peerjs", Node.expressPeerServer(server));
+//  Node.app.use("/peerjs", Node.expressPeerServer(server));    // Collide con socket.io:2.2.0
   Node.app.use(function (req, res, next) {
     res.header("Access-Control-Allow-Origin", "*");
     res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
@@ -486,10 +496,17 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
           return callback(err, stdout, stderr);
         }
         //
-        pthis.execFileAsRoot("/bin/chmod", ["-R", "770", path], function (err, stdout, stderr) {   // jshint ignore:line
-          if (err)
-            pthis.logger.log("ERROR", "Error while executing CHMOD: " + (stderr || err), "Server.execFileAsRoot", params);
-          callback(err, stdout, stderr);
+        pthis.execFileAsRoot("/usr/bin/find", [path, "-type", "d", "-exec", "/bin/chmod", "770", "{}", "+"], function (err, stdout, stderr) {   // jshint ignore:line
+          if (err) {
+            pthis.logger.log("ERROR", "Error while executing CHMOD for DIR: " + (stderr || err), "Server.execFileAsRoot", params);
+            return callback(err, stdout, stderr);
+          }
+          //
+          pthis.execFileAsRoot("/usr/bin/find", [path, "-type", "f", "-exec", "/bin/chmod", "660", "{}", "+"], function (err, stdout, stderr) {   // jshint ignore:line
+            if (err)
+              pthis.logger.log("ERROR", "Error while executing CHMOD for FILES: " + (stderr || err), "Server.execFileAsRoot", params);
+            callback(err, stdout, stderr);
+          });
         });
       });
       break;
@@ -637,12 +654,12 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
   if (msg.acid) {   // IDE case
     session = this.IDESessions[msg.sid];
     if (!session)
-      return this.logger.log("WARN", "Session not found", "Server.handleSessionASID", {sid: msg.sid});
+      return this.logger.log("WARN", "Session not found", "Server.handleSessionASID", msg);
     //
     // Get the app client for the received acid
     appcli = session.getAppClientById(msg.acid);
     if (!appcli)
-      return this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", {sid: msg.sid, acid: msg.acid});
+      return this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", msg);
     //
     // Connect this socket with the app client
     appcli.openConnection(socket);
@@ -651,7 +668,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     // If the session is not valid, redirect to app entry point (i.e. app main url)
     session = this.appSessions[msg.sid];
     if (!session) {
-      this.logger.log("WARN", "Session not found", "Server.handleSessionASID", {sid: msg.sid});
+      this.logger.log("WARN", "Session not found", "Server.handleSessionASID", msg);
       socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
@@ -659,14 +676,14 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     // Get the app client for the received cid
     appcli = session.getAppClientById(msg.cid);
     if (!appcli) {
-      this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", {sid: msg.sid, cid: msg.cid});
+      this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", msg);
       socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }
     //
     // If the app client is already connected with someone else, refuse connection
     if (appcli.socket) {
-      this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", {sid: msg.sid, cid: msg.cid});
+      this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
       socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
       return;
     }

@@ -68,7 +68,7 @@ Node.Utils.generateUID24 = function ()
           String.fromCharCode(d3 >> 16 & 0xff) + String.fromCharCode(d3 >> 24 & 0xff);
   //
   // btoa does not work in node therefore we use a function toBase64 defined below
-  return (new Buffer(s || "", "ascii")).toString("base64");
+  return (Buffer.from(s || "", "ascii")).toString("base64");
 };
 
 
@@ -159,9 +159,9 @@ Node.Utils.handleFileSystem = function (options, callback)
     return callback("Double dot operator (..) not allowed");
   //
   // Check if the path exists
-  Node.fs.exists(options.path, function (exists) {
+  Node.fs.access(options.path, function (err) {
     // If the path does not exist and the command is not PUT (that could add that path)
-    if (!exists && options.command !== "put")
+    if (err && options.command !== "put")
       return callback({err: "Path does not exist", code: 404});
     //
     // Retrieve path statistics
@@ -522,7 +522,7 @@ Node.Utils.clearName = function (str)
 Node.Utils.bufferToBase64 = function (buffer)
 {
   if (module)
-    return new Buffer(buffer).toString("base64");
+    return Buffer.from(buffer).toString("base64");
   //
   var base64 = "";
   var bytes = new Uint8Array(buffer);
@@ -633,9 +633,9 @@ Node.Utils.saveObject = function (filename, obj, callback)
 Node.Utils.loadObject = function (filename, callback)
 {
   // Check if the file exists
-  Node.fs.exists(filename, function (exists) {
+  Node.fs.access(filename, function (err) {
     // If does not exist -> return null object
-    if (!exists)
+    if (err)
       return callback();
     //
     // File exists -> read it

@@ -49,10 +49,14 @@ Node.Worker.msgTypeMap = {
   cTokenOp: "ctop",
   changedAppParam: "chpar",
   dtt: "dtt",
+  log: "log",
   deleteTraceFiles: "dtf",
   deleteTraceFilesResult: "dtfr",
   getStatus: "gst",
-  getStatusResult: "gstr"
+  getStatusResult: "gstr",
+  notifyFeedbackToConsole: "nftc",
+  eval: "eval",
+  evalResult: "evalResult",
 };
 
 
@@ -147,6 +151,27 @@ Node.Worker.prototype.createChild = function ()
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
     publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this), params: this.app.params});
+  //
+  // HACK per back-compatibilità con app 19.0 o precedenti su server 19.5 o successivi (dove pg è aggiornato ed ha una breaking change sulla connect)
+  // TODO: RIMUOVERE PRIMA O POI...)
+  if (!require("pg").connect) {
+    var txt = "\
+App.pg = require('pg');\
+App.pg.connect = function (opt, cb) {\
+  if (!App._PgPools)\
+    App._PgPools = {};\
+  var config = typeof opt === 'string' ? {connectionString: opt} : opt;\
+  var poolName = JSON.stringify(config);\
+  var pool = App._PgPools[poolName];\
+  if (!pool) {\
+    pool = new App.pg.Pool(config);\
+    App._PgPools[poolName] = pool;\
+  }\
+  pool.connect(cb);\
+}";
+    var evobj = {id: Math.floor(Math.random() * 1000000), text: txt};
+    this.child.send({type: Node.Worker.msgTypeMap.eval, cnt: evobj});
+  }
   //
   // Tell the app how to connect with the database
   var constring = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort;
@@ -332,6 +357,10 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
         this.log("WARN", "Can't process DTT request: session not found", "Worker.handleAppChildMessage", msg);
       break;
 
+    case Node.Worker.msgTypeMap.log:
+      this.log(msg.level, msg.message, msg.sender, msg.data);
+      break;
+
     case Node.Worker.msgTypeMap.deleteTraceFilesResult:
       if (this.app.deleteTraceFilesCallback) {
         var cb = this.app.deleteTraceFilesCallback;
@@ -352,6 +381,18 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       }
       else
         this.log("WARN", "Can't handle status result message: no callback", "Worker.handleAppChildMessage", msg);
+      break;
+
+    case Node.Worker.msgTypeMap.notifyFeedbackToConsole:
+      this.server.request.notifyFeedback(msg.cnt, function (data, err) {
+        if (err)
+          this.log("WARN", "Can't send feedback notification to console: " + err, "Worker.handleAppChildMessage", msg);
+      }.bind(this));
+      break;
+
+    case Node.Worker.msgTypeMap.evalResult:
+      if (msg.cnt.error)
+        this.log("WARN", "Error while executing EVAL: " + msg.cnt.error, "Worker.handleAppChildMessage", msg);
       break;
 
     default:
@@ -440,6 +481,7 @@ Node.Worker.prototype.handleCreateDBMsg = function (msg)
 Node.Worker.prototype.handleServerSessionMsg = function (msg)
 {
   var name = msg.cnt.name;
+  var request = msg.cnt.request;
   var ss = this.app.getServerSession(name);
   //
   switch (msg.cnt.cmd) {
@@ -447,7 +489,7 @@ Node.Worker.prototype.handleServerSessionMsg = function (msg)
       if (ss)
         return this.log("WARN", "Can't start server session: session with same name already exists", "Worker.handleServerSessionMsg", msg);
       //
-      this.app.startServerSession(name);
+      this.app.startServerSession(name, request);
       break;
 
     case "stop":
@@ -459,7 +501,7 @@ Node.Worker.prototype.handleServerSessionMsg = function (msg)
 
     case "running":
       var ev = {id: "serverSessionCB", content: {cbId: msg.cnt.cbId, running: !!ss}, master: true};
-      this.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: msg.cnt.sid, content: [ev], request: msg.cnt.request});
+      this.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: msg.cnt.sid, content: [ev], request: request});
       break;
   }
 };

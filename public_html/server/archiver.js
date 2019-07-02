@@ -314,9 +314,9 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
       //
       // If the path existed, I need to restore the one I've backed up
       if (pathExists) {
-        Node.fs.exists(pathServer + ".$$$", function (exists) {
+        Node.fs.access(pathServer + ".$$$", function (err) {
           // If the ".$$$" exists
-          if (exists) {
+          if (!err) {
             // First, try to remove the old directory
             Node.rimraf(pathServer, function (err1) {
               if (err1)
@@ -342,8 +342,8 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
   };
   //
   // Check if the pathServer exists
-  Node.fs.exists(pathServer, function (exists) {
-    pathExists = exists;
+  Node.fs.access(pathServer, function (err) {
+    pathExists = (err ? false : true);
     //
     // Download the file from the cloud
     pthis.download(pathCloud, fileServer, function (err) {

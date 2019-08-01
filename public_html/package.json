@@ -50,7 +50,7 @@
     "sendgrid": "5.2.3",
     "socket.io": "2.2.0",
     "socket.io-client": "2.2.0",
-    "stripe": "7.2.0",
+    "stripe": "7.5.0",
     "tar": "4.4.8",
     "xml2js": "0.4.19",
     "yauzl": "2.10.0",

@@ -458,7 +458,7 @@ Node.Project.prototype.downloadFile = function (params, callback)
     //
     // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
     var stream;
-    if ((mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
+    if (mimetype && (mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
       var positions = params.req.headers.range.replace(/bytes=/, "").split("-");
       //
       Node.fs.stat(path, function (err, stats) {
@@ -1287,7 +1287,7 @@ Node.Project.prototype.removeBuild = function (params, callback)
     }
     //
     callback();
-  });
+  }.bind(this));
 };
 
 

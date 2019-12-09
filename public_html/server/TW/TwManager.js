@@ -399,6 +399,7 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
     commits = this.getDiffBranchSwitch(branchName);                       // Normal -> UNDO until common point then REDO of other transactions
   //
   // Load all the commits that have to be undoed
+  var objMapItemsToDelete = [];
   for (i = 0; i < commits.undoList.length; i++) {
     var ullist = commits.undoList[i].loadCommit();
     for (j = 0; j < ullist.length; j++) {
@@ -406,20 +407,35 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
       tr.load(ullist[j]);
       //
       // This transaction must be undoed... thus I need to invert each transitem
-      for (k = 0; k < tr.transItems.length; k++) {
+      for (k = tr.transItems.length - 1; k >= 0; k--) {
         ti = tr.transItems[k];
         //
         // Relink the item
         tr.relinkItem(ti, "undo");
         //
         // Invert the item
-        InDe.Transaction.invertTransItem(ti);
+        var items = InDe.Transaction.invertTransItem(ti);
         //
         // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
-        trShuttle.transItems.unshift(ti);
+        for (var k1 = 0; k1 < items.length; k1++) {
+          var newit = items[k1];
+          trShuttle.transItems.push(newit);
+          //
+          // I'm not executing this item... but then I've a problem...
+          // All new objects are not added in the global map... thus later items can't link with them
+          // because the object is not there... I need to "hack" the object map... and clear it when I'm done
+          if (newit.ac && !this.doc.objMap[newit.ac.id]) {
+            this.doc.objMap[newit.ac.id] = newit.ac;
+            objMapItemsToDelete.push(newit.ac.id);
+          }
+        }
       }
     }
   }
+  //
+  // Clean up map
+  for (i = 0; i < objMapItemsToDelete.length; i++)
+    delete this.doc.objMap[objMapItemsToDelete[i]];
   //
   // Load all the commits that have to be redoed
   for (i = 0; i < commits.redoList.length; i++) {
@@ -454,8 +470,9 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
       // Add all items into shuttle transaction
       // (this is an UNDO item, thus I add it backward)
       trans.transItems.forEach(function (ti) {
-        InDe.Transaction.invertTransItem(ti);
-        trShuttle.transItems.unshift(ti);
+        var items = InDe.Transaction.invertTransItem(ti);
+        for (var k1 = items.length - 1; k1 >= 0; k1--)
+          trShuttle.transItems.unshift(items[k1]);
       });
       //
       // Last: add memory modifications
@@ -469,10 +486,11 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
         var newtr = tr.clone();
         for (k = 0; k < tr.transItems.length; k++) {
           ti = newtr.transItems[k];
-          InDe.Transaction.invertTransItem(ti);
+          var items = InDe.Transaction.invertTransItem(ti);
           //
           // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
-          trShuttle.transItems.unshift(ti);
+          for (var k1 = items.length - 1; k1 >= 0; k1--)
+            trShuttle.transItems.unshift(items[k1]);
         }
       }
       //
@@ -1347,7 +1365,7 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
     var newFile = this.path + "/branches/" + branchName + "/project.json";
     var oldFileStat = Node.fs.statSync(oldFile);
     var newFileStat = Node.fs.statSync(newFile);
-    if (oldFileStat.mtime.getTime() !== newFileStat.mtime.getTime()) {
+    if (oldFileStat.mtime.getTime() !== newFileStat.mtime.getTime() || oldFileStat.size !== newFileStat.size) {
       this.logger.log("WARN", "Can't switch: there are local modifications and HEAD's does not match", "TwManager.switchBranch",
               {oldFile: {name: oldFile, stat: oldFileStat.mtime, statTime: oldFileStat.mtime.getTime()},
                 newFile: {name: newFile, stat: newFileStat.mtime, statTime: newFileStat.mtime.getTime()}});
@@ -1499,37 +1517,6 @@ Node.TwManager.prototype.commit = function (message, callback)
   //
   // Create a new commit with the given message
   var newCommit = pthis.actualBranch.createCommit(message);
-
-
-
-
-
-  // TODO: Eliminare quando TW sarà a posto
-  if (this.child.config.serverType === "pro-gamma-test") {
-    if (!Node.fs.existsSync(this.child.config.directory + "/_backup/"))
-      Node.fs.mkdirSync(this.child.config.directory + "/_backup/");
-    //
-    Node.tar = require("tar");
-    var taropt = {
-      file: this.child.config.directory + "/_backup/" + this.child.project.user.userName + "_" + this.child.project.name + "_commit_" + newCommit.id + ".tar.gz",
-      cwd: this.path,
-      gzip: true,
-      portable: true,
-      sync: true
-    };
-    var tarlist = ["trans", "project.json", "branches/" + this.actualBranch.name + "/project.json"];
-    try {
-      Node.tar.create(taropt, tarlist);
-    }
-    catch (ex) {
-      this.logger.log("ERROR", "Error while backing up TRANS directory: " + ex, "TwManager.commit");
-      return callback(InDe.rh.t("tw_commit_err"));
-    }
-  }
-
-
-
-
   //
   // Copy the staging area inside the new commit
   var pathCommit = pthis.path + "/branches/" + pthis.actualBranch.name + "/" + newCommit.id;
@@ -2460,15 +2447,23 @@ Node.TwManager.prototype.pullBranch = function (branchName, options, callback)
                 return callback("Error while deleting the merged branch " + branch.name + ": " + err);
               }
               //
-              // Something has been fetched from my parent server...
-              // Now I need nothing from my parent
-              delete pthis.parentCommits;
-              //
-              // Update the client status
-              pthis.sendTWstatus();
-              //
-              // Operation completed
-              callback();
+              // Last, align HEAD (i.e. with overwrite)
+              pthis.saveHEAD({overwrite: true}, function (err) {
+                if (err) {
+                  pthis.logger.log("WARN", "Error while re-creating HEAD: " + err, "TwManager.pullBranch", {branch: branch.name});
+                  return callback("Error while re-creating HEAD: " + err);
+                }
+                //
+                // Something has been fetched from my parent server...
+                // Now I need nothing from my parent
+                delete pthis.parentCommits;
+                //
+                // Update the client status
+                pthis.sendTWstatus();
+                //
+                // Operation completed
+                callback();
+              });
             });
           });
         }

@@ -120,12 +120,12 @@ Node.App.prototype.setParent = function (p)
   //
   // Load parameters file
   var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
-  Node.Utils.loadObject(filename, function (res, err) {
-    if (err)
-      this.log("WARN", "Error reading app parameters file: " + err, "App.setParent");
-    else
-      this.params = res;
-  }.bind(this));
+  //
+  // I need to do it synchronously because I need to do it before starting the ServerSession (if enabled)
+  if (Node.fs.existsSync(filename)) {
+    var json = Node.fs.readFileSync(filename);
+    this.params = JSON.parse(json);
+  }
 };
 
 
@@ -183,19 +183,13 @@ Node.App.prototype.createNewSession = function (options)
     }
   }
   //
-  // First check if this app can handle this new user
-  var i, nusers = 0;
-  for (i = 0; i < this.workers.length; i++)
-    nusers += this.workers[i].getLoad();
-  if (nusers >= maxAppUsers)
-    return;   // Too many users
-  //
-  // This app can handle this new user. Choose the worker that will handle the new user
+  // Choose the worker that will handle the new user
   var worker;
   //
-  // First locate the worker that have that has less users (i.e. the unloaded one)
-  var minload;
-  for (i = 0; i < this.workers.length; i++) {
+  // Locate the worker that have that has less users (i.e. the unloaded one)
+  // and, while doing that, check if there are too many users for this worker type
+  var minload, nusers = 0;
+  for (var i = 0; i < this.workers.length; i++) {
     var wrk = this.workers[i];
     //
     // If this worker is not what I'm looking for -> skip it
@@ -207,6 +201,16 @@ Node.App.prototype.createNewSession = function (options)
       minload = wrkload;
       worker = wrk;
     }
+    //
+    // Compute total worker-type load (i.e. the sum of all sessions for all workers of wkrConf type)
+    nusers += wrkload;
+  }
+  //
+  // First check if this app can handle this new user
+  if (nusers >= maxAppUsers) {
+    this.log("DEBUG", "Too many users", "App.createNewSession",
+            {options: options, wrkConf: wrkConf, numUsers: nusers});
+    return;   // Too many users
   }
   //
   // If I've found a worker but it has already too many users and I can create new workers
@@ -489,7 +493,13 @@ Node.App.prototype.sendDttSessions = function (params, callback)
   var sessions = [];
   this.workers.forEach(function (wrk) {
     wrk.sessions.forEach(function (s) {
-      sessions.push({sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"});
+      var sinfo = {sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"};
+      //
+      // If session has at least one client but there is no MasterClient, it means that he's gone
+      if (s.appClients.length && !s.masterAppClient)
+        sinfo.toOffline = true;   // Session will move to offline soon
+      //
+      sessions.push(sinfo);
     });
   });
   //
@@ -594,6 +604,7 @@ Node.App.prototype.sendDttSessions = function (params, callback)
   //
   // Filter online sessions
   var traceFlt = (this.params ? this.params["filterDttTrace"] : null);
+  traceFlt = (traceFlt ? traceFlt.toLowerCase().split(",") : null);
   var filterOnlineSessionsAndReturn = function (sessions) {
     // Use the same "filter" schema (see dtt::canTraceSession)
     for (var i = 0; i < sessions.length; i++) {
@@ -606,7 +617,6 @@ Node.App.prototype.sendDttSessions = function (params, callback)
         delSession = true;  // If App has no session Name, can't apply filter -> don't trace
       else if (!s.exceptions && !s.warnings && traceFlt) {  // If there are errors or warnings -> trace always
         delSession = true;    // I'll delete this session (unless it matches filter criteria)
-        traceFlt = traceFlt.toLowerCase().split(",");
         for (var j = 0; j < traceFlt.length && delSession; j++) {
           var flt = traceFlt[j];
           //
@@ -1322,6 +1332,49 @@ Node.App.prototype.handleFileSystem = function (params, callback)
     //
     callback(res);
   }.bind(this));
+};
+
+
+/*
+ * Send to the console the feedback collected by the app
+ * @returns {undefined}
+ */
+Node.App.prototype.handleFeedbackMsgToConsole = function (msg)
+{
+  this.feedbackToSend = this.feedbackToSend || [];
+  this.feedbackToSend.push(msg.cnt);
+  if (!this.notifyFeedbackTimeout) {
+    this.notifyFeedbackTimeout = setTimeout(function () {
+      var error;
+      //
+      // Get the feedback collected
+      var fb = this.feedbackToSend.splice(0, this.feedbackToSend.length);
+      while (fb.length > 0) {
+        // Send the feedback to the console in groups of 100
+        var chunk = fb.length > 100 ? 100 : fb.length;
+        this.server.request.notifyFeedback(fb.splice(0, chunk), function (data, err) {
+          if (err) {
+            error = true;
+            this.log("WARN", "Can't send feedback notification to console: " + err, "Worker.handleAppChildMessage", msg);
+          }
+        }.bind(this));
+        //
+        if (error) {
+          clearTimeout(this.notifyFeedbackTimeout);
+          delete this.notifyFeedbackTimeout;
+          delete this.feedbackToSend;
+          return;
+        }
+      }
+      //
+      // If there aren't any other feedback to send, clear the timer
+      if (this.feedbackToSend.length === 0) {
+        clearTimeout(this.notifyFeedbackTimeout);
+        delete this.notifyFeedbackTimeout;
+        delete this.feedbackToSend;
+      }
+    }.bind(this), 120000);
+  }
 };
 
 

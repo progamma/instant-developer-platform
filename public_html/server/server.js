@@ -87,8 +87,18 @@ Node.createServer = function ()
  */
 Node.Server.prototype.initServer = function ()
 {
-  // Set server type: production
+  // Detect server type: production, local
   var srvtype = "prod";
+  /*try {
+    if (Node.fs.existsSync("/mnt/disk/IndeRT"))
+      srvtype = "prod";
+    else
+      srvtype = "local";
+  }
+  catch (ex) {
+    console.log("Error while detecting server type. Switching to LOCAL mode: " + ex.message);
+    srvtype = "local";
+  }*/
   //
   // Load the configuration from the json file
   this.config = new Node.Config(this);
@@ -231,6 +241,13 @@ Node.Server.prototype.start = function ()
   // Create the childer
   this.createChilder();
   //
+  // Remove the root privileges of the main process after the childer is born
+  // (on FreeBSD we use 8081/8082 thus we do not need ROOT to be able to start HTTP/HTTPS listener)
+  if (!this.config.local && process.platform === "freebsd") {
+    process.setgid("indert");
+    process.setuid("indert");
+  }
+  //
   // Create a new Logger
   this.logger = new Node.Logger(this, "SERVER");
   //
@@ -290,13 +307,13 @@ Node.Server.prototype.start = function ()
   // Parse various different custom JSON types as JSON
   Node.app.use(Node.BodyParser.raw({limit: "5mb"})); // it will only parse application/octet-stream, could do application/*
   //
-  // App cache manifest
-  this.createManifest();
-  Node.app.get("/application.manifest", function (req, res) {
-    pthis.sendManifest(req, res);
+  // App service worker
+  this.createServiceWorker();
+  Node.app.get("/serviceWorker.js", function (req, res) {
+    pthis.sendServiceWorker(req, res);
   });
-  Node.app.get("/:app/client/application.manifest", function (req, res) {
-    pthis.sendManifest(req, res);
+  Node.app.get("/:app/client/serviceWorker.js", function (req, res) {
+    pthis.sendServiceWorker(req, res);
   });
   //
   // Inizialize static file management for express with maxAge=5min (not for local servers)
@@ -318,14 +335,23 @@ Node.Server.prototype.start = function ()
       };
     //
     // Protect SERVER's directories (for every app) before EXPRESS-STATIC kicks in
+    // Protect APP's private files directoriy (for every app) before EXPRESS-STATIC kicks in
+    // Protect PROJECT's private files directoriy (for every user/project) before EXPRESS-STATIC kicks in
     Node.app.use("/", function (req, res, next) {
       var pathParts = req.path.toLowerCase().split("/");
-      // http://localhost/Test/server/app.js  ->  [ '', 'test', 'server', 'app.js' ]
       var app = (pathParts.length > 1 ? this.config.getUser("manager").getApp(pathParts[1]) : null);
-      if (pathParts.length > 2 && pathParts[2] === "server" && (!app || !app.params || !app.params.allowOffline))   // Part 1 is app name
-        return res.sendStatus(404);
-      else if (pathParts.length > 4 && pathParts.slice(2, 5).join("/") === "server/files/private")   // Part 1 is app name
-        return res.sendStatus(404);
+      if (pathParts.length > 2 && pathParts[2] === "server" && (!app || !app.params || !app.params.allowOffline)) {
+        this.logger.log("WARN", "Access to app's server folder denied", "Server.start", {url: req.path, app: (app ? app.name : "<NULL>")});
+        return res.sendStatus(404); // http://server/MyApp/server/app.js  ->  [ '', 'MyApp', 'server', 'app.js' ]
+      }
+      else if (pathParts.length > 4 && pathParts.slice(2, 4).join("/") === "files/private") {
+        this.logger.log("WARN", "Access to app's private folder denied", "Server.start", {url: req.path, app: (app ? app.name : "<NULL>")});
+        return res.sendStatus(404); // http://server/MyApp/files/private/file.png  ->  [ '', 'MyApp', 'files', 'private', 'file.png' ]
+      }
+      else if (pathParts.length > 5 && pathParts.slice(3, 5).join("/") === "files/private") {
+        this.logger.log("WARN", "Access to project's private folder denied", "Server.start", {url: req.path, app: (app ? app.name : "<NULL>")});
+        return res.sendStatus(404); // http://server/lucabaldini/testprj/files/private/file.png  ->  [ '', 'lucabaldini', 'testprj', 'files', 'private', 'file.png' ]
+      }
       //
       next();
     }.bind(this));
@@ -333,6 +359,9 @@ Node.Server.prototype.start = function ()
     // Serve APPS directory as static
     Node.app.use(Node.express.static(this.config.appDirectory + "/apps", expOpts));
   }
+  //
+  // Handle letsencrypt challenge files
+  Node.app.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
   //
   // Handle commands (config class does everything)
   Node.app.all("", function (req, res) {
@@ -394,6 +423,15 @@ Node.Server.prototype.start = function ()
     Node.httpServer.listen(this.config.portHttp);
   }
   //
+  // Remove the root privileges of the main process after done with childer and HTTP/HTTPS listen
+  // (on Docker we use 80/443 thus we need ROOT to be able to listen to ports below 1024)
+  if (!this.config.local && process.platform === "linux") {
+    process.setgid("indert");
+    process.setuid("indert");
+    //
+    this.setOwnerToIndert();
+  }
+  //
   // Start socket listener
   this.socketListener();
 };
@@ -419,13 +457,6 @@ Node.Server.prototype.createChilder = function ()
     pthis.logger.log("WARN", "Childer is dead -> restart server", "Server.createChilder");
     process.exit(-1);
   });
-  //
-  // Remove the root privileges of the main process after the childer is born
-  // (do it only if it can be done... on windows there is no setgid method)
-  if (!this.config.local && process.platform === "freebsd" && process.setgid) {
-    process.setgid("indert");
-    process.setuid("indert");
-  }
 };
 
 
@@ -468,11 +499,16 @@ Node.Server.prototype.handleChilderMessage = function (msg)
  * Executes a file (command) as ROOT
  * @param {string} cmd - command to be executed
  * @param {array} params - command parameters
+ * @param {object} options - Node createChild options
  * @param {function} callback - function(err, stdout, stderr)
  */
-Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
+Node.Server.prototype.execFileAsRoot = function (cmd, params, options, callback)
 {
   var pthis = this;
+  //
+  // If options was not provided and it's a function -> it's the callback
+  if (callback === undefined && typeof options === "function")
+    callback = options;
   //
   // Handle "SPECIAL" commands
   switch (cmd) {
@@ -520,7 +556,7 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
 
     case "UpdNodePackages":
       var nodeModulesPath = Node.path.resolve(__dirname + "/../") + "/";
-      this.execFileAsRoot("/usr/local/bin/npm", ["--prefix", nodeModulesPath, "update"], function (err, stdout, stderr) {   // jshint ignore:line
+      this.execFileAsRoot("/usr/local/bin/npm", ["--prefix", nodeModulesPath, "update", "--unsafe-perm=true"], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           pthis.logger.log("ERROR", "Error while executing NPM UPDATE: " + (stderr || err), "Server.execFileAsRoot", params);
           return callback(err, stdout, stderr);
@@ -530,7 +566,8 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
         if (stdout)
           pthis.logger.log("INFO", "Package updated: " + stdout, "Server.execFileAsRoot");
         //
-        pthis.execFileAsRoot("/usr/local/bin/npm", ["--prefix", nodeModulesPath, "prune"], function (err, stdout, stderr) {   // jshint ignore:line
+        // NPM PRUNE does not handle the --previx param... (https://github.com/npm/npm/issues/16337)
+        pthis.execFileAsRoot("/usr/local/bin/npm", ["prune"], {cwd: nodeModulesPath}, function (err, stdout, stderr) {   // jshint ignore:line
           if (err)
             pthis.logger.log("ERROR", "Error while executing NPM PRUNE: " + (stderr || err), "Server.execFileAsRoot", params);
           //
@@ -556,7 +593,7 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, callback)
       };
       //
       // Ask the childer (that runs as ROOT) to execute the command
-      this.childer.send({type: Node.Server.msgTypeMap.execCmdRequest, cmdid: cmdid, cmd: cmd, params: params});
+      this.childer.send({type: Node.Server.msgTypeMap.execCmdRequest, cmdid: cmdid, cmd: cmd, params: params, options: options});
       break;
   }
 };
@@ -1392,84 +1429,56 @@ Node.Server.prototype.backupDisk = function (scheduled)
 
 
 /**
- * Generates a new application.manifest file
- * @param {string} manifType - (if undefined create both)
+ * Generates a new serviceWorker.json file
  */
-Node.Server.prototype.createManifest = function (manifType)
+Node.Server.prototype.createServiceWorker = function ()
 {
-  // If type was not given, create both manifests
-  if (manifType === undefined) {
-    this.createManifest("ide");
-    this.createManifest("ideapp");
-    return;
-  }
-  //
   var i;
-  var basePath, indexPath;
-  if (manifType === "ide") {
-    basePath = Node.path.resolve(__dirname + "/../ide");
-    indexPath = basePath + "/index2.html";
-  }
-  else if (manifType === "ideapp") {
-    basePath = Node.path.resolve(__dirname + "/../ide/app/client");
-    indexPath = basePath + "/index.html";
-  }
-  //
-  if (!Node.fs.existsSync(basePath))
-    return;
-  //
-  // If manifest exists, delete it
-  if (Node.fs.existsSync(basePath + "/application.manifest"))
-    Node.fs.unlinkSync(basePath + "/application.manifest");
-  //
-  // Create a new one
-  // First, compute the list of needed files reading the index.html file
-  var files = [];
-  var index = Node.fs.readFileSync(indexPath, "utf8");
-  var cssList = index.split("<link href=\"");
-  var jsList = index.split("<script src=\"");
-  //
-  for (i = 0; i < 2; i++) {
-    var list = (i === 0 ? cssList : jsList);
-    for (var j = 1; j < list.length; j++) {
-      var file = list[j].substring(0, list[j].indexOf("\"", 1));
-      if (Node.fs.existsSync(basePath + "/" + file))
-        files.push(file);
+  var idePath = Node.path.resolve(__dirname + "/../ide");
+  var files = {};
+  function parseHead(path, filename) {
+    var fullPath = idePath + (path ? "/" + path : "");
+    var index = Node.fs.readFileSync(fullPath + "/" + filename, "utf8");
+    var cssList = index.split("<link href=\"");
+    var jsList = index.split("<script src=\"");
+    //
+    for (i = 0; i < 2; i++) {
+      var list = (i === 0 ? cssList : jsList);
+      for (var j = 1; j < list.length; j++) {
+        var file = list[j].substring(0, list[j].indexOf("\"", 1));
+        if (Node.fs.existsSync(fullPath + "/" + file)) {
+          var stats = Node.fs.statSync(fullPath + "/" + file);
+          files[(path ? path + "/" : "") + file] = stats.mtime.toUTCString();
+        }
+      }
     }
   }
   //
-  // Compute lastModified of all files
-  var lastModified = 0;
-  for (i = 0; i < files.length; i++) {
-    var stats = Node.fs.statSync(basePath + "/" + files[i]);
-    if (stats.mtime > lastModified)
-      lastModified = stats.mtime;
-  }
+  // First, compute the list of needed files reading the index.html files
+  parseHead("", "index2.html");
+  parseHead("app/client", "index.html");
   //
-  var mf = [];
-  mf.push("CACHE MANIFEST");
-  mf.push("# " + lastModified);
-  mf.push("");
-  mf.push("CACHE:");
-  files.forEach(function (fn) {
-    mf.push(fn);
+  var sw = "[\n";
+  var urls = Object.keys(files);
+  urls.forEach(function (url, index) {
+    sw += "  " + JSON.stringify({url: url, lastModified: files[url]});
+    if (index !== urls.length - 1)
+      sw += ",";
+    sw += "\n";
   });
-  mf.push("");
-  mf.push("NETWORK:");
-  mf.push("*");
+  sw += "]";
   //
-  var manifest = mf.join("\n");
-  Node.fs.writeFileSync(basePath + "/application.manifest", manifest);
-  return manifest;
+  Node.fs.writeFileSync(idePath + "/serviceWorker.json", sw, "utf8");
+  return sw;
 };
 
 
 /**
- * Send the application.manifest to client (IDE & APP)
+ * Send the serviceWorker.js to client (IDE & APP)
  * @param {Request} req
  * @param {Response} res
  */
-Node.Server.prototype.sendManifest = function (req, res)
+Node.Server.prototype.sendServiceWorker = function (req, res)
 {
   try {
     var basePath;
@@ -1477,39 +1486,38 @@ Node.Server.prototype.sendManifest = function (req, res)
     var isAppMaster = (req.params.app && !isAppIDE);
     var isIDE = (!isAppIDE && !isAppMaster);
     //
-    if (isIDE)
+    if (isIDE || isAppIDE)
       basePath = Node.path.resolve(__dirname + "/../ide");
-    else if (isAppIDE)
-      basePath = Node.path.resolve(__dirname + "/../ide/app/client");
     else if (isAppMaster)
       basePath = this.config.appDirectory + "/apps/" + req.params.app + "/client";
     //
-    var manifest;
-    if (Node.fs.existsSync(basePath + "/application.manifest"))
-      manifest = Node.fs.readFileSync(basePath + "/application.manifest", "utf8");
+    var swConf;
+    var configPath = basePath + "/serviceWorker.json";
+    if (Node.fs.existsSync(configPath))
+      swConf = Node.fs.readFileSync(configPath, "utf8");
     //
-    // If the manifest does not exists create a new one
-    if (!manifest) {
-      // Do it only for IDE... The Master app manifest is created at build time
+    // If the config does not exists create a new one
+    if (!swConf && (isIDE || isAppIDE)) {
+      // Do it only for IDE... The Master app config is created at build time
       // and it have to be there
-      if (isIDE)
-        manifest = this.createManifest("ide");
-      else if (isAppIDE)
-        manifest = this.createManifest("ideapp");
+      swConf = this.createServiceWorker();
     }
     //
-    // If I have a manifest, send it
-    if (manifest) {
-      res.header("Content-Type", "text/cache-manifest");
-      res.header("Expires", new Date(new Date().getTime() + 300000));     // 5 minutes
-      res.header("Content-Length", manifest.length);
-      res.status(200).send(manifest);
+    // If I have a config, send it
+    if (swConf) {
+      var sw = "const precachingItems = " + swConf + ";\n";
+      sw += "const cacheName = \"" + (isAppMaster ? req.params.app : "ide") + "\";\n\n";
+      sw += Node.fs.readFileSync(basePath + "/serviceWorker.js", "utf8");
+      //
+      res.header("Content-Type", "text/javascript");
+      res.header("Content-Length", Buffer.from(sw).length);
+      res.status(200).send(sw);
     }
-    else // No manifest -> 404
+    else // No serviceWorker -> 404
       res.status(404).end();
   }
   catch (ex) {
-    this.logger.log("ERROR", "Error while sending MANIFEST: " + ex.message, "Server.sendManifest");
+    this.logger.log("ERROR", "Error while sending serviceWorker.js: " + ex.message, "Server.sendServiceWorker");
     res.status(500).end();
   }
 };
@@ -1522,6 +1530,32 @@ Node.Server.prototype.startServerSessions = function ()
 {
   for (var i = 0; i < this.config.users.length; i++)
     this.config.users[i].startServerSessions();
+};
+
+
+/**
+ * Set owner to INDERT on every directory
+ */
+Node.Server.prototype.setOwnerToIndert = function ()
+{
+  // On Docker I want everything to run as "INDERT" as it was on freebsd
+  // The problem is that on older docker's versions the setUID and setGID functions crashed... so everything was running as ROOT
+  // Now they've fixed it... but several files are now owned by ROOT... I want everything to be owned by IndeRT
+  if (process.platform === "linux" && !this.config.local) {
+    var params = ["-R", "indert:indert",
+      "/mnt/disk/IndeRT/ide",
+      "/mnt/disk/IndeRT/server",
+      "/mnt/disk/IndeRT/log",
+      "/mnt/disk/IndeRT/node_modules",
+      this.config.appDirectory + "/apps",
+      this.config.appDirectory + "/backups"];
+    this.execFileAsRoot("/bin/chown", params, function (err, stdout, stderr) {   // jshint ignore:line
+      if (err)
+        this.logger.log("ERROR", "Error while fixing files ownership: " + (stderr || err), "Server.setOwnerToIndert");
+      //
+      this.logger.log("DEBUG", "File's ownership fixed", "Server.setOwnerToIndert");
+    }.bind(this));
+  }
 };
 
 

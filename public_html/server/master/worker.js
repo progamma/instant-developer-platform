@@ -57,6 +57,8 @@ Node.Worker.msgTypeMap = {
   notifyFeedbackToConsole: "nftc",
   eval: "eval",
   evalResult: "evalResult",
+  serverStatus: "serverStatus",
+  serverStatusResult: "serverStatusResult"
 };
 
 
@@ -154,6 +156,7 @@ Node.Worker.prototype.createChild = function ()
   //
   // HACK per back-compatibilità con app 19.0 o precedenti su server 19.5 o successivi (dove pg è aggiornato ed ha una breaking change sulla connect)
   // TODO: RIMUOVERE PRIMA O POI...)
+  /*jshint multistr: true */
   if (!require("pg").connect) {
     var txt = "\
 App.pg = require('pg');\
@@ -262,6 +265,7 @@ Node.Worker.prototype.killChild = function (force)
  * Handle app child messages (i.e. messages sent by app.js)
  * @param {object} msg
  */
+/*jshint maxcomplexity:35 */
 Node.Worker.prototype.handleAppChildMessage = function (msg)
 {
   var appsess;
@@ -384,15 +388,16 @@ Node.Worker.prototype.handleAppChildMessage = function (msg)
       break;
 
     case Node.Worker.msgTypeMap.notifyFeedbackToConsole:
-      this.server.request.notifyFeedback(msg.cnt, function (data, err) {
-        if (err)
-          this.log("WARN", "Can't send feedback notification to console: " + err, "Worker.handleAppChildMessage", msg);
-      }.bind(this));
+      this.app.handleFeedbackMsgToConsole(msg);
       break;
 
     case Node.Worker.msgTypeMap.evalResult:
       if (msg.cnt.error)
         this.log("WARN", "Error while executing EVAL: " + msg.cnt.error, "Worker.handleAppChildMessage", msg);
+      break;
+
+    case Node.Worker.msgTypeMap.serverStatus:
+      this.handleServerStatus(msg);
       break;
 
     default:
@@ -676,9 +681,16 @@ Node.Worker.prototype.getStatus = function (params, callback)
   //
   // If a FULL status is requested, replace sessions count with an array of SIDs
   if (params.req.query.full) {
+    stat.options = this.options;
+    //
     stat.sessions = [];
-    for (var i = 0; i < this.sessions.length; i++)
-      stat.sessions.push(this.sessions[i].id);
+    for (var i = 0; i < this.sessions.length; i++) {
+      var session = this.sessions[i];
+      //
+      // If not online, flag it as "zombie"
+      var online = (session.masterAppClient || session.syncSocket || session.restReq || session.name === "_default");
+      stat.sessions.push(session.id + (online ? "" : " (-)"));
+    }
     stat.sessions.sort();
   }
   //
@@ -744,11 +756,43 @@ Node.Worker.prototype.getStatus = function (params, callback)
         }
       }
       //
+      // Ok... I haven't found it... on Alpine I've a problem if PID gets too big...
+      // It moves stuff away...
+      //   PID  PPID USER     STAT   VSZ %VSZ CPU %CPU COMMAND
+      //    41     8 postgres S     162m   2%   1   0% postgres: autovacuum launcher process
+      // 35179562093990 root     S     493m   7%   0   5% node /mnt/disk/IndeRT/server/server.js
+      // I have to get the line that "starts" with the given PID
+      for (var i = 0; i < stdout.length; i++) {
+        // Search right PID
+        var procstat = stdout[i].trim().split(/\s+/);
+        if (procstat[0].startsWith(this.child.pid)) {
+          stat.cpuLoad = parseFloat(procstat[7].replace("%", ""));
+          return callback(stat);
+        }
+      }
+      //
       this.log("ERROR", "Error getting the CPU load. PID not found", "Worker.getStatus", {pid: this.child.pid});
       stat.cpuLoad = "Error getting the CPU load. PID not found";
       callback(stat);
     }.bind(this));
   }
+};
+
+
+/*
+ * Handles a server session message
+ * @param {object} msg
+ */
+Node.Worker.prototype.handleServerStatus = function (msg)
+{
+  this.server.config.sendStatus(null, function (result) {
+    var response = {type: Node.Worker.msgTypeMap.serverStatusResult, cnt: {sid: msg.cnt.sid, cbId: msg.cnt.cbId}};
+    if (!result.msg)
+      response.cnt.error = result.err || result;
+    else
+      response.cnt.status = JSON.parse(result.msg).serverInfo;
+    this.sendToChild(response);
+  }.bind(this));
 };
 
 

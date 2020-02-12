@@ -464,8 +464,8 @@ Node.Branch.prototype.getCommitsMessages = function ()
     if (com.author !== this.parent.child.project.user.userName)
       continue;
     //
-    // Skip pushed/merged commits
-    if (com.pushed || com.merged)
+    // Skip pushed commits
+    if (com.pushed)
       continue;
     //
     result.push(com.message);

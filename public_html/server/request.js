@@ -213,8 +213,10 @@ Node.Request.prototype.sendResponse = function (RID, code, text)
 Node.Request.prototype.getParentProject = function (userName, projectName, callback)
 {
   // TODO: Eliminare
-  if (this.config.local && projectName.substring(0, 27) === "cloud-control-center-forked")
+  if (this.config.local && projectName === "cloud-control-center-forked")
     return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center", user: "lucabaldini"});
+  if (this.config.local && projectName === "cloud-control-center-forked1")
+    return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center-forked", user: "lucabaldini"});
   if (this.config.local && projectName.substring(0, 16) === "cccmaster-forked")
     return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diego"});
   if (this.config.local && projectName.substring(0, 17) === "cccmaster-forked2")
@@ -486,6 +488,43 @@ Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, c
     else
       callback();
   });
+};
+
+
+/**
+ *  Send create commit message to console
+ * @param {string} userName
+ * @param {string} projectName
+ * @param {Object} prInfo
+ * @param {function} callback - function(err)
+ */
+Node.Request.prototype.sendCommitInfo = function (userName, projectName, commitInfo, callback)
+{
+  var form = new Node.FormData();
+  form.append("user", userName);
+  form.append("project", projectName);
+  form.append("company", this.config.serverType);
+  form.append("commitInfo", JSON.stringify(commitInfo));
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=commit&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendCommitInfo",
+              {err: err, code: code, data: data, options: options});
+      callback(err || "Invalid response");
+    }
+    else
+      callback();
+  }.bind(this));
 };
 
 

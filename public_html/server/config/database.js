@@ -424,6 +424,8 @@ Node.Database.prototype.query = function (params, callback)
   else
     dbName = this.user.userName + "-" + this.name;
   //
+  this.log("DEBUG", "Database query", "Database.query", {query: query, dbName: dbName});
+  //
   if (!query) {
     this.log("WARN", "Empty query text", "Database.query");
     return callback("Empty query text");

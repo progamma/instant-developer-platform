@@ -2066,25 +2066,39 @@ Node.Config.prototype.configureCert = function (params, callback)
           // Found! Remove the certificate
           var revokedCert = this.customSSLCerts.splice(i, 1)[0];
           //
-          // Check if some files have become useless and if that's the case, delete them
-          // To check, compute the list of currently used files
-          var usedFiles = [];
-          for (i = 0; i < this.customSSLCerts.length; i++) {
-            var c = this.customSSLCerts[i];
-            usedFiles.push(c.SSLCert);
-            usedFiles.push(c.SSLKey);
-            for (j = 0; j < (c.SSLCABundles || []).length; j++)
-              usedFiles.push(c.SSLCABundles[j]);
+          // If this was a let's encrypt auto-certificate, revoke it
+          if (revokedCert.SSLCert.indexOf("/mnt/disk/config/cert/letsencrypt") !== -1) {
+            var pars = ["revoke", // Revoke a certificate
+              "-n", // Run non-interactively
+              "--config-dir", "/mnt/disk/config/cert/letsencrypt", // Installation folder
+              "--delete-after-revoke", // Delete useless files
+              "--cert-name", revokedCert.SSLDomain]; // Certificate to be revoked
+            this.server.execFileAsRoot("/usr/bin/certbot", pars, function (err, stdout, stderr) {   // jshint ignore:line
+              if (err)
+                this.logger.log("ERROR", "Can't revoke auto-SSL certificate: " + (stderr || err), "Config.configureCert");
+            }.bind(this));
           }
-          //
-          // Then check if the revoked certificate files are still used
-          if (usedFiles.indexOf(revokedCert.SSLCert) === -1)
-            filesToRemove.push(revokedCert.SSLCert);
-          if (usedFiles.indexOf(revokedCert.SSLKey) === -1)
-            filesToRemove.push(revokedCert.SSLKey);
-          for (j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
-            if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
-              filesToRemove.push(revokedCert.SSLCABundles[j]);
+          else {
+            // Check if some files have become useless and if that's the case, delete them
+            // To check, compute the list of currently used files
+            var usedFiles = [];
+            for (i = 0; i < this.customSSLCerts.length; i++) {
+              var c = this.customSSLCerts[i];
+              usedFiles.push(c.SSLCert);
+              usedFiles.push(c.SSLKey);
+              for (j = 0; j < (c.SSLCABundles || []).length; j++)
+                usedFiles.push(c.SSLCABundles[j]);
+            }
+            //
+            // Then check if the revoked certificate files are still used
+            if (usedFiles.indexOf(revokedCert.SSLCert) === -1)
+              filesToRemove.push(revokedCert.SSLCert);
+            if (usedFiles.indexOf(revokedCert.SSLKey) === -1)
+              filesToRemove.push(revokedCert.SSLKey);
+            for (j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
+              if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
+                filesToRemove.push(revokedCert.SSLCABundles[j]);
+          }
           //
           // If this was the last one, remove the custom SSL array
           if (this.customSSLCerts.length === 0)

@@ -88,8 +88,8 @@ Node.createServer = function ()
 Node.Server.prototype.initServer = function ()
 {
   // Detect server type: production, local
-  var srvtype = "prod";
-  /*try {
+  var srvtype;
+  try {
     if (Node.fs.existsSync("/mnt/disk/IndeRT"))
       srvtype = "prod";
     else
@@ -98,7 +98,7 @@ Node.Server.prototype.initServer = function ()
   catch (ex) {
     console.log("Error while detecting server type. Switching to LOCAL mode: " + ex.message);
     srvtype = "local";
-  }*/
+  }
   //
   // Load the configuration from the json file
   this.config = new Node.Config(this);
@@ -195,12 +195,11 @@ Node.Server.prototype.initServer = function ()
       }
       //
       // Prepare certificate
-      var cred = {key: Node.fs.readFileSync(certToUse.SSLKey, "utf8"),
-        cert: Node.fs.readFileSync(certToUse.SSLCert, "utf8"),
-        secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
-      cred.ca = [];
-      for (i = 0; i < certToUse.SSLCABundles.length; i++)
-        cred.ca.push(Node.fs.readFileSync(certToUse.SSLCABundles[i], "utf8"));
+      var cred = (this.customSSLCertsData ? this.customSSLCertsData[certToUse.SSLDomain] : null);
+      if (!cred) {
+        this.logger.log("ERROR", "Can't locate certificate data for domain " + certToUse.SSLDomain, "Server.initServer");
+        return cb("Can't locate certificate data for domain " + certToUse.SSLDomain);
+      }
       //
       // Reply with TLS secure context
       try {
@@ -211,6 +210,28 @@ Node.Server.prototype.initServer = function ()
         return cb(null, Node.tls.createSecureContext(ssl).context);
       }
     }.bind(this);
+    //
+    // If there are custom certificates, load them now (for letsencrypt I need to be root)
+    if (this.config.customSSLCerts) {
+      for (i = 0; i < this.config.customSSLCerts.length; i++) {
+        var cert = this.config.customSSLCerts[i];
+        //
+        try {
+          var cred = {key: Node.fs.readFileSync(cert.SSLKey, "utf8"),
+            cert: Node.fs.readFileSync(cert.SSLCert, "utf8"),
+            secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
+          cred.ca = [];
+          for (i = 0; i < cert.SSLCABundles.length; i++)
+            cred.ca.push(Node.fs.readFileSync(cert.SSLCABundles[i], "utf8"));
+          //
+          this.customSSLCertsData = this.customSSLCertsData || {};
+          this.customSSLCertsData[cert.SSLDomain] = cred;
+        }
+        catch (ex) {
+          console.error("ERROR", "Can't load certificate for domain " + cert.SSLDomain + ": " + ex, "Server.initServer");
+        }
+      }
+    }
     //
     // Create an https Server
     Node.httpsServer = require("https").createServer(ssl, Node.app);
@@ -1435,6 +1456,11 @@ Node.Server.prototype.createServiceWorker = function ()
 {
   var i;
   var idePath = Node.path.resolve(__dirname + "/../ide");
+  //
+  // The servers my-cloud don't have the ide folder
+  if (!Node.fs.existsSync(idePath))
+    return;
+  //
   var files = {};
   function parseHead(path, filename) {
     var fullPath = idePath + (path ? "/" + path : "");

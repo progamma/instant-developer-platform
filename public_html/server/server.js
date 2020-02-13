@@ -88,7 +88,7 @@ Node.createServer = function ()
 Node.Server.prototype.initServer = function ()
 {
   // Detect server type: production, local
-  var srvtype "prod";
+  var srvtype = "prod";
   //
   // Load the configuration from the json file
   this.config = new Node.Config(this);

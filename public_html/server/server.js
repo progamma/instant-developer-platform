@@ -87,7 +87,7 @@ Node.createServer = function ()
  */
 Node.Server.prototype.initServer = function ()
 {
-  // Detect server type: production, local
+  // Server type is always "prod"
   var srvtype = "prod";
   //
   // Load the configuration from the json file
@@ -107,8 +107,9 @@ Node.Server.prototype.initServer = function ()
   else {  // Use HTTPS server
     // Loads the ssl certificates
     var ca = [];
-    for (var i = 0; i < this.config.SSLCABundles.length; i++)
-      ca.push(Node.fs.readFileSync(this.config.SSLCABundles[i], "utf8"));
+    if (this.config.SSLCABundles)
+      for (var i = 0; i < this.config.SSLCABundles.length; i++)
+        ca.push(Node.fs.readFileSync(this.config.SSLCABundles[i], "utf8"));
     //
     // Ciphers are updated to May 11 node defaults
     // See https://github.com/nodejs/node/blob/master/doc/api/tls.markdown
@@ -211,8 +212,9 @@ Node.Server.prototype.initServer = function ()
             cert: Node.fs.readFileSync(cert.SSLCert, "utf8"),
             secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
           cred.ca = [];
-          for (i = 0; i < cert.SSLCABundles.length; i++)
-            cred.ca.push(Node.fs.readFileSync(cert.SSLCABundles[i], "utf8"));
+          if (cert.SSLCABundles)
+            for (var j = 0; j < cert.SSLCABundles.length; j++)
+              cred.ca.push(Node.fs.readFileSync(cert.SSLCABundles[j], "utf8"));
           //
           this.customSSLCertsData = this.customSSLCertsData || {};
           this.customSSLCertsData[cert.SSLDomain] = cred;

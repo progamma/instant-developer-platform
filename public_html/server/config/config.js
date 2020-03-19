@@ -1933,29 +1933,35 @@ Node.Config.prototype.configureCert = function (params, callback)
   switch (command) {
     case "config":
       // If a new SSLCert has been provided
-      if (cert.SSLCert) {
+      if (cert.SSLCert !== undefined) {
         // If there was already a SSLCert, remove the associated file
         if (this.SSLCert)
           filesToRemove.push(this.SSLCert);
-        this.SSLCert = certPath + cert.SSLCert;
+        if (cert.SSLCert)
+          this.SSLCert = certPath + cert.SSLCert;
+        else
+          delete this.SSLCert;
         saveConfig = true;
         //
         this.logger.log("DEBUG", "Updated SSLCert property", "Config.configureCert", {SSLCert: this.SSLCert});
       }
       //
       // If a new SSLKey has been provided
-      if (cert.SSLKey) {
+      if (cert.SSLKey !== undefined) {
         // If there was already a SSLKey, remove the associated file
         if (this.SSLKey)
           filesToRemove.push(this.SSLKey);
-        this.SSLKey = certPath + cert.SSLKey;
+        if (cert.SSLKey)
+          this.SSLKey = certPath + cert.SSLKey;
+        else
+          delete this.SSLKey;
         saveConfig = true;
         //
         this.logger.log("DEBUG", "Updated SSLKey property", "Config.configureCert", {SSLKey: this.SSLKey});
       }
       //
       // If a new SSLCABundles has been provided
-      if (cert.SSLCABundles) {
+      if (cert.SSLCABundles !== undefined) {
         // If there was already a SSLCABundles, remove the associated file
         if (this.SSLCABundles) {
           for (i = 0; i < this.SSLCABundles.length; i++)
@@ -1963,9 +1969,13 @@ Node.Config.prototype.configureCert = function (params, callback)
               filesToRemove.push(this.SSLCABundles[i]);
         }
         //
-        this.SSLCABundles = [];
-        for (i = 0; i < cert.SSLCABundles.length; i++)
-          this.SSLCABundles.push(certPath + cert.SSLCABundles[i]);
+        if (cert.SSLCABundles && cert.SSLCABundles.length) {
+          this.SSLCABundles = [];
+          for (i = 0; i < cert.SSLCABundles.length; i++)
+            this.SSLCABundles.push(certPath + cert.SSLCABundles[i]);
+        }
+        else
+          delete this.SSLCABundles;
         saveConfig = true;
         //
         this.logger.log("DEBUG", "Updated SSLCABundles property", "Config.configureCert", {SSLCABundles: this.SSLCABundles});
@@ -2013,12 +2023,12 @@ Node.Config.prototype.configureCert = function (params, callback)
               if (!cert.SSLDomain) {  // MAIN certificate
                 this.SSLCert = "/mnt/disk/config/cert/letsencrypt/live/" + this.name + "." + this.domain + "/fullchain.pem";
                 this.SSLKey = "/mnt/disk/config/cert/letsencrypt/live/" + this.name + "." + this.domain + "/privkey.pem";
-                this.SSLCABundles = [];
+                delete this.SSLCABundles;
               }
               else {  // Custom certificate
                 cert.SSLCert = "/mnt/disk/config/cert/letsencrypt/live/" + cert.SSLDomain + "/fullchain.pem";
                 cert.SSLKey = "/mnt/disk/config/cert/letsencrypt/live/" + cert.SSLDomain + "/privkey.pem";
-                cert.SSLCABundles = [];
+                delete cert.SSLCABundles;
                 //
                 this.customSSLCerts = this.customSSLCerts || [];
                 this.customSSLCerts.push(cert);
@@ -2049,8 +2059,9 @@ Node.Config.prototype.configureCert = function (params, callback)
       //
       cert.SSLCert = certPath + cert.SSLCert;
       cert.SSLKey = certPath + cert.SSLKey;
-      for (i = 0; i < cert.SSLCABundles.length; i++)
-        cert.SSLCABundles[i] = certPath + cert.SSLCABundles[i];
+      if (cert.SSLCABundles)
+        for (i = 0; i < cert.SSLCABundles.length; i++)
+          cert.SSLCABundles[i] = certPath + cert.SSLCABundles[i];
       this.customSSLCerts = this.customSSLCerts || [];
       this.customSSLCerts.push(cert);
       saveConfig = true;
@@ -2086,8 +2097,9 @@ Node.Config.prototype.configureCert = function (params, callback)
               var c = this.customSSLCerts[i];
               usedFiles.push(c.SSLCert);
               usedFiles.push(c.SSLKey);
-              for (j = 0; j < (c.SSLCABundles || []).length; j++)
-                usedFiles.push(c.SSLCABundles[j]);
+              if (c.SSLCABundles)
+                for (j = 0; j < (c.SSLCABundles || []).length; j++)
+                  usedFiles.push(c.SSLCABundles[j]);
             }
             //
             // Then check if the revoked certificate files are still used
@@ -2095,9 +2107,10 @@ Node.Config.prototype.configureCert = function (params, callback)
               filesToRemove.push(revokedCert.SSLCert);
             if (usedFiles.indexOf(revokedCert.SSLKey) === -1)
               filesToRemove.push(revokedCert.SSLKey);
-            for (j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
-              if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
-                filesToRemove.push(revokedCert.SSLCABundles[j]);
+            if (revokedCert.SSLCABundles)
+              for (j = 0; j < revokedCert.SSLCABundles.length; j++)
+                if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
+                  filesToRemove.push(revokedCert.SSLCABundles[j]);
           }
           //
           // If this was the last one, remove the custom SSL array

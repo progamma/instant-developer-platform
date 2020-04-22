@@ -1,19 +1,19 @@
 ### Instant Developer Cloud - framework setup
 
 ## ITA
-1. [#Installazione di node.js](Installazione di node.js)
+1. [#Installazione di Node.js](Installazione di node.js)
 1. [#Installazione di npm](Installazione di npm)
 1. [#Installazione di Postgres 10](Installazione di Postgres 10)
 1. [#Download del pacchetto da github e configurazione](Download del pacchetto da github e configurazione)
 
-## Installazione di Node.js
+##Installazione di Node.js
 La versione di riferimento è Node.js 10.18.1. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 
 > curl -sL https://deb.nodesource.com/setup_10.x | sudo bash
 
 > sudo apt-get install -y nodejs
 
-## Installazione di npm
+##Installazione di npm
 Per installare pm2 è consigliabile aggiornare prima la versione di npm
 
 > npm install npm@latest -g

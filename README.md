@@ -1,19 +1,19 @@
 ### Instant Developer Cloud - framework setup
 
 ## ITA
-1. [#Installazione di Node.js](Installazione di node.js)
-1. [#Installazione di npm](Installazione di npm)
-1. [#Installazione di Postgres 10](Installazione di Postgres 10)
-1. [#Download del pacchetto da github e configurazione](Download del pacchetto da github e configurazione)
+1. [Installazione di Node.js](#installazione-di-nodejs)
+1. [Installazione di npm](#installazione-di-npm)
+1. [Installazione di Postgres 10](#installazione-di-postgres-10)
+1. [Download del pacchetto da github e configurazione](#download-del-pacchetto-da-github-e-configurazione)
 
-##Installazione di Node.js
+## Installazione di Node.js
 La versione di riferimento è Node.js 10.18.1. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 
 > curl -sL https://deb.nodesource.com/setup_10.x | sudo bash
 
 > sudo apt-get install -y nodejs
 
-##Installazione di npm
+## Installazione di npm
 Per installare pm2 è consigliabile aggiornare prima la versione di npm
 
 > npm install npm@latest -g
@@ -47,11 +47,11 @@ Dopodiché è necessario:
   1. *dbUser* = *<postgres username>*
   1. *dbPassword* = *<postgres password>*
   1. *dbUser* = *<postgres username>*
-1. [#Aggiornare i node modules](Aggiornare i node modules)
-1. [#Aggiungere utente e gruppo indert](Aggiungere l'utente e il gruppo *indert*)
+1. [Aggiornare i node modules](#aggiornare-i-node-modules)
+1. [Aggiungere l'utente e il gruppo indert](#aggiungere-utente-e-gruppo-indert)
 1. dare i permessi di scrittura a *postgres* su *idclous/apps/db* - vedi [#Postgres e permessi](Postgres e permessi)
 1. creare un database postgress di nome *root*
-1. [#Avviare server.js con PM2](Avviare server.js con PM2)
+1. [Avviare server.js con PM2](#avviare-serverjs-con-pm2)
  
 ### Postgres e permessi
 > chown postgres:postgres /idcloud/idserver/apps/db

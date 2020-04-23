@@ -44,9 +44,10 @@ Dopodiché è necessario:
 1. copiare *config-example.json* in *idcloud/config/config.json*
 1. editare *idcloud/config/config.json*
   1. *appDirectory* = */idcloud/idserver/apps*
-  1. *dbUser* = *<postgres username>*
-  1. *dbPassword* = *<postgres password>*
-  1. *dbUser* = *<postgres username>*
+  1. *alias* = *lista di ip o domini del server separati da ,*
+  1. *dbUser* = *postgres username*
+  1. *dbPassword* = *postgres password*
+  1. *dbUser* = *postgres username*
 1. [Aggiornare i node modules](#aggiornare-i-node-modules)
 1. [Aggiungere l'utente e il gruppo indert](#aggiungere-utente-e-gruppo-indert)
 1. dare i permessi di scrittura a *postgres* su *idclous/apps/db* - vedi [#Postgres e permessi](Postgres e permessi)
@@ -81,6 +82,6 @@ Per avviare server.js con PM2 e impostare il reboot automatico eseguire i comand
 ## Installazione manuale di una build
 È possibile scaricare una build da Instant Developer Cloud e installarla sulla propria piattaforma
 
-1. scaricare la build e decoprimerla in *idcloud/apps/apps/<app-name>*
+1. scaricare la build e decoprimerla in *idcloud/apps/apps/app-name*
 1. editare *idcloud/config/config.json*
-  1. *apps* = *[{ "cl" : "Node.App", "name" : "<app-name>", "date" : "<current-date in ISO string>", "stopped" : false}]*
+  1. *apps* = *[{ "cl" : "Node.App", "name" : "app-name", "date" : "current-date in ISO string", "stopped" : false}]*

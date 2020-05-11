@@ -33,11 +33,11 @@ e poi installare pm2
 ### Download del pacchetto da github e configurazione
 Per il download del pacchetto su linux da riga di comando è possibile usare 
 
-> wget https://github.com/progamma/inde-self/archive/master.zip
+> wget https://github.com/progamma/instant-developer-platform/archive/master.zip
 
 Dopodiché è necessario:
 1. decomprimere la cartella sull'hd. In questa guida si prenderà in considerazione l'installazione in root.
-1. rinominare *inde-self-master* in *idcloud*.
+1. rinominare *instant-developer-platform-master* in *idcloud*.
 1. rinominare e spostare *public-html* in *idcloud/idserver*.
 1. rimuovere *idcloud/nbproject*
 1. creare le cartelle *idcloud/config*, *idcloud/idserver/apps/apps*, *idcloud/idserver/apps/db*, *idcloud/idserver/apps/backups*, *idcloud/node_modules*, *idcloud/idserver/log*

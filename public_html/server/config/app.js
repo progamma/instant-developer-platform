@@ -467,174 +467,7 @@ Node.App.prototype.sendSessions = function (params, callback)
  */
 Node.App.prototype.sendDttSessions = function (params, callback)
 {
-  // If there is a fromDate parameter, parse it
-  var fromDate;
-  if (params.req.query.fromDate)
-    fromDate = new Date(params.req.query.fromDate);
-  //
-  // Reply:
-  //  sessions: [{session 1 details}, {session 2 details}, ...]
-  //
-  // Function that sorts an array of sessions
-  var sortSessions = function (sessArr) {
-    sessArr.sort(function (s1, s2) {
-      if (new Date(s1.start) > new Date(s2.start))
-        return -1;
-      else if (new Date(s1.start) < new Date(s2.start))
-        return 1;
-      else
-        return 0;
-    });
-    //
-    return sessArr;
-  };
-  //
-  // First add live sessions
-  var sessions = [];
-  this.workers.forEach(function (wrk) {
-    wrk.sessions.forEach(function (s) {
-      var sinfo = {sessionID: s.id, start: s.created, sessionName: s.sessionName, type: "online"};
-      //
-      // If session has at least one client but there is no MasterClient, it means that he's gone
-      if (s.appClients.length && !s.masterAppClient)
-        sinfo.toOffline = true;   // Session will move to offline soon
-      //
-      sessions.push(sinfo);
-    });
-  });
-  //
-  // Sort by start date
-  sessions = sortSessions(sessions);
-  //
-  var doneFnc = function (msg, fd) {
-    // If there is a message, dump it
-    if (msg)
-      this.log("WARN", msg, "Node.App.sendDttSessions");
-    //
-    // If there is a FD, close it
-    if (fd)
-      Node.fs.close(fd, function (err) {
-        if (err)
-          this.log("WARN", "Error while closing file (" + fd + "): " + err, "Node.App.sendDttSessions.doneFnc");
-      });
-  }.bind(this);
-  //
-  // Read index file
-  var savedSess = [];
-  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
-  var fpath = this.config.appDirectory + "/apps/" + this.name + "/files/private/log";
-  var readIndexFile = function (idx) {
-    // If I've done -> reply
-    if (idx + 1 > maxAppWorkers) {
-      // Sort sessions by start date
-      savedSess = sortSessions(savedSess);
-      //
-      // Concatenate arrays by appending saved to online list
-      sessions = sessions.concat(savedSess);
-      //
-      // Now filter online sessions
-      return filterOnlineSessionsAndReturn(sessions);
-    }
-    //
-    var fname = fpath + "/index" + idx + ".json";
-    Node.fs.open(fname, "r", function (err, fd) {
-      // If there is no index file -> done
-      if (err && err.code === "ENOENT")
-        return readIndexFile(idx + 1);
-      else if (err)    // If there are other errors... log it
-        return doneFnc("Error while opening index file (read: " + fname + "): " + err);
-      //
-      var buff = Buffer.alloc(512);
-      var readBlock = function (pos) {
-        Node.fs.read(fd, buff, 0, buff.length, pos, function (err, bytesRead) {
-          if (err)
-            return doneFnc("Error while reading index file (read: " + fname + "): " + err, fd);
-          //
-          // If I've read nothing -> I've done reading
-          if (bytesRead === 0) {
-            return Node.fs.close(fd, function (err) {
-              if (err)
-                return doneFnc("Error while closing DTT index file (read: " + fname + "): " + err);
-              //
-              readIndexFile(idx + 1);
-            });
-          }
-          //
-          // If I've read an empty block -> skip it
-          var buffData = buff.toString().replace(/\0/g, "");
-          if (!buffData) {
-            doneFnc("Error while reading DTT index file (read: " + fname + "): empty block at pos " + pos);
-            //
-            // Read next block
-            return readBlock(pos + 512);
-          }
-          //
-          // Load the session
-          var s = JSON.parse(buffData);
-          //
-          // If a date filter was provided, use it
-          if (fromDate && s.updated && new Date(s.updated) < fromDate)
-            return readBlock(pos + 512); // Read next block
-          //
-          // Search session inside live sessions array
-          var lives = sessions.find(function (ls) {
-            return (ls.sessionID === s.sessionID);
-          });
-          //
-          // If there is already a live session coupled with this saved session
-          if (lives) {
-            // Copy "data" from saved to online
-            for (var p in s)
-              lives[p] = s[p];
-          }
-          else { // Not there... flag the session as offline
-            s.type = "offline";
-            savedSess.push(s);
-          }
-          //
-          // Read next block
-          readBlock(pos + 512);
-        });
-      };
-      //
-      // Read first block
-      readBlock(0);
-    });
-  };
-  //
-  // Filter online sessions
-  var traceFlt = (this.params ? this.params["filterDttTrace"] : null);
-  traceFlt = (traceFlt ? traceFlt.toLowerCase().split(",") : null);
-  var filterOnlineSessionsAndReturn = function (sessions) {
-    // Use the same "filter" schema (see dtt::canTraceSession)
-    for (var i = 0; i < sessions.length; i++) {
-      var s = sessions[i];
-      if (s.type !== "online")
-        continue; // I have to filter online sessions only
-      //
-      var delSession = false;
-      if (!s.sessionName)
-        delSession = true;  // If App has no session Name, can't apply filter -> don't trace
-      else if (!s.exceptions && !s.warnings && traceFlt) {  // If there are errors or warnings -> trace always
-        delSession = true;    // I'll delete this session (unless it matches filter criteria)
-        for (var j = 0; j < traceFlt.length && delSession; j++) {
-          var flt = traceFlt[j];
-          //
-          // If sessionName contains the i-th filter, trace session
-          if (s.sessionName.toLowerCase().indexOf(flt) !== -1)
-            delSession = false;
-        }
-      }
-      //
-      if (delSession)
-        sessions.splice(i--, 1);
-    }
-    //
-    // Reply to callee
-    callback({msg: JSON.stringify(sessions)});
-  };
-  //
-  readIndexFile(0);
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -645,58 +478,7 @@ Node.App.prototype.sendDttSessions = function (params, callback)
  */
 Node.App.prototype.deleteDttSessions = function (params, callback)
 {
-  // Check required parameters
-  if (!params.req.query.beforeDate) {
-    this.log("WARN", "Missing beforeDate parameter", "App.deleteDttSessions");
-    return callback("Missing beforeDate parameter");
-  }
-  //
-  this.log("INFO", "Delete DTT sessions", "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate});
-  //
-  // Never ever do it more than once at a time!
-  if (this.deletingDttSessions) {
-    this.log("WARN", "Pending delete DTT sessions", "App.deleteDttSessions");
-    return callback("Pending delete DTT sessions");
-  }
-  this.deletingDttSessions = true;
-  //
-  var beforeDate = new Date(params.req.query.beforeDate);
-  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
-  var appPath = this.config.appDirectory + "/apps/" + this.name;
-  var purgeWorkerFile = function (idx) {
-    // If I've done, return to callee
-    if (idx >= maxAppWorkers) {
-      delete this.deletingDttSessions;
-      this.log("INFO", "Delete DTT sessions completed", "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate});
-      return callback();
-    }
-    //
-    var nextWrk = function (err) {
-      if (err) {
-        delete this.deletingDttSessions;
-        this.log("WARN", "Can't delete DTT sessions: " + err, "App.deleteDttSessions", {beforeDate: params.req.query.beforeDate, workerIdx: idx});
-        return callback(err);
-      }
-      //
-      // Next
-      purgeWorkerFile(idx + 1);
-    }.bind(this);
-    //
-    // If the worker is "alive" I ask the worker's child to do the cleaning...
-    // This is needed because all "live" sessions must change their offsets...
-    if (this.workers[idx] && this.workers[idx].child) {
-      this.deleteTraceFilesCallback = nextWrk;
-      return this.workers[idx].child.send({type: Node.Worker.msgTypeMap.deleteTraceFiles, cnt: {beforeDate: beforeDate}});
-    }
-    //
-    // Worker is dead... Purge it directly...
-    var opts = {beforeDate: beforeDate, workerIdx: idx, appPath: appPath, logFn: Node.App.prototype.log.bind(this)};
-    var DTT = require(appPath + "/server/dtt").DTT;
-    DTT.purgeSessionsInfo(opts, nextWrk);
-  }.bind(this);
-  //
-  // Purge first file
-  purgeWorkerFile(0);
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -822,199 +604,7 @@ Node.App.prototype.terminate = function (params, callback)
  */
 Node.App.prototype.install = function (params, callback)
 {
-  var pthis = this;
-  var path = this.config.appDirectory + "/apps/" + this.name;
-  var pathCloud = params.req.query.file;
-  var appExisted;           // true if the app existed before
-  var filesChanged;         // true if at least a file have been changed
-  //
-  // If there is no appDirectory
-  if (!this.config.appDirectory) {
-    this.log("WARN", "The server is not configured as an app container (no appDirectory)", "App.install");
-    return callback("The server is not configured as an app container (no appDirectory)");
-  }
-  //
-  // If the app is already updating -> error
-  if (this.updating) {
-    this.log("WARN", "The app is already updating", "App.install");
-    return callback("The app is already updating");
-  }
-  //
-  // If the file is missing -> can't continue
-  if (!pathCloud) {
-    this.log("WARN", "Missing FILE parameter", "App.install");
-    return callback("Missing FILE parameter");
-  }
-  //
-  // Error function
-  var errorFnc = function (err) {
-    pthis.log("WARN", err, "App.install");
-    //
-    // The app is not updating
-    pthis.updating = false;
-    //
-    // Try to restore the app if one or more files have changed
-    if (filesChanged) {
-      // Something have been changed. If the app existed, restore it otherwise delete it
-      if (appExisted) {
-        // App existed: restore it to previous version
-        pthis.restoreFromDisk({}, function (err2) {
-          if (err2) {
-            err2 = err2.msg || err2;     // handle object errors
-            pthis.log("WARN", "Error while restoring the app after a failed install: " + err2, "App.install");
-            return callback("Error while restoring the app after a failed install: " + err2);
-          }
-          //
-          // Restore succeded
-          pthis.log("WARN", "Restore succeded after a failed install", "App.install");
-          callback(err);
-        });
-      }
-      else {
-        // App did not exist -> delete it
-        pthis.uninstall(params, function (err2) {
-          if (err2) {
-            err2 = err2.msg || err2;     // handle object errors
-            pthis.log("WARN", "Error while deleting the app after a failed install: " + err2, "App.install");
-            return callback("Error while deleting the app after a failed install: " + err2);
-          }
-          //
-          // Uninstall succeded
-          pthis.log("WARN", "Uninstall succeded after a failed install", "App.install");
-          callback(err);
-        });
-      }
-    }
-    else {
-      pthis.log("WARN", "Unable to install (files not touched)", "App.install");
-      callback(err);
-    }
-    //
-    // Delete temporary folder
-    Node.rimraf(path + ".tmp", function (err) {
-      if (err)
-        pthis.log("WARN", "Can't delete temporary folder " + path + ".tmp: " + err, "App.install");
-    });
-  };
-  //
-  // From now on the app is updating
-  this.updating = true;
-  //
-  // Check if the app exists
-  Node.fs.access(this.config.appDirectory + "/apps/" + this.name, function (err) {
-    // Remember if the app existed (needed if the app install fails)
-    appExisted = (err ? false : true);
-    //
-    // If the app does not exist it's easy: just start install
-    if (err)
-      appInstall();
-    else {
-      // App exists -> first terminate every session and wait for the workers to terminate
-      params.req.query.force = true;    // force TERMINATE
-      params.req.query.timeout = 15000; // max: 15 sec
-      params.req.query.msg = "The application is currently being updated and will be restarted in 15 seconds. It is recommended that you end the working session and close the browser";  // jshint ignore:line
-      pthis.terminate(params, function (err) {
-        if (err)
-          return errorFnc("Can't terminate the app: " + err);
-        //
-        // All workers have been terminated, now backup the app
-        pthis.backupToDisk({}, function (err) {
-          if (err)
-            return errorFnc("Error while backing up the app: " + err);
-          //
-          // App backed up. Start install
-          appInstall();
-        });
-      });
-    }
-  });
-  //
-  // Function that cleans up app folder (i.e. removes "server", "client" and "resources" folders)
-  var folderToDelete = ["server", "client", "resources"];
-  var cleanUpAppFolders = function (cleanCB) {
-    // If there are no more folders to delete, continue with installation
-    if (folderToDelete.length === 0)
-      return cleanCB();
-    //
-    // Delete first folder in the list
-    var fld = path + "/" + folderToDelete[0];
-    Node.rimraf(fld, function (err) {
-      if (err)
-        return cleanCB("Error while deleting folder " + fld + ": " + err);
-      //
-      // This folder has been deleted. Continue with next one
-      folderToDelete.splice(0, 1);
-      cleanUpAppFolders(cleanCB);
-    });
-  };
-  //
-  // Function that does the actual install: restore files, creates a worker then ask him to continue install
-  var appInstall = function () {
-    // Restore into a temporary folder (with .tmp extension)
-    var archiver = new Node.Archiver(pthis.server);
-    Node.fs.mkdir(path + ".tmp", function (err) {
-      // If there was an error, stop
-      if (err)
-        return errorFnc("Error while creating temporary folder: " + err);
-      //
-      archiver.restore(path + ".tmp/" + pthis.name, pathCloud, function (err) {
-        // If there was an error, stop
-        if (err)
-          return errorFnc("Error while restoring the app into a temporary folder: " + err);
-        //
-        // Cleanup destination directory
-        cleanUpAppFolders(function (err) {
-          // Files have been touched... better restore if failed later on
-          filesChanged = true;
-          //
-          // If there was an error, stop
-          if (err)
-            return errorFnc("Error while cleaning up the app folder: " + err);
-          //
-          // N.B.: the tar.gz file should contain a single directory with the
-          // "design-time" name of the app. That name could be different from this.name if
-          // the callee is installing this app with a different name than the design-time one
-          Node.fs.readdir(path + ".tmp/", function (err, files) {
-            if (err)
-              return errorFnc("Error while reading temporary directory content: " + err);
-            //
-            // Now copy all files from temporary folder to destination one
-            Node.ncp(path + ".tmp/" + files[0], path, function (err) {
-              // If there was an error, stop
-              if (err)
-                return errorFnc("Error while copying files from temporary folder to app folder: " + err);
-              //
-              // Delete temporary folder
-              Node.rimraf(path + ".tmp", function (err) {
-                if (err)
-                  pthis.log("WARN", "Can't delete temporary folder " + path + ".tmp: " + err, "App.install");
-              });
-              //
-              try {
-                // Reset cache of WebAPI metadata
-                delete require.cache[require.resolve(path + "/server/webapi/metadata.json")];
-              }
-              catch (e) {
-              }
-              //
-              // Done: the app have been restored from the cloud. Now I need to start it
-              pthis.start(null, function (err) {
-                // If there is an error, stop
-                if (err)
-                  return errorFnc("Error while installing the app: " + err);
-                //
-                // Log the operation
-                pthis.log("INFO", "Application " + (appExisted ? "updated" : "installed"), "App.install");
-                //
-                // Done!
-                callback();
-              });
-            });
-          });
-        });
-      });
-    });
-  };
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1134,51 +724,7 @@ Node.App.prototype.saveParameters = function (callback)
  */
 Node.App.prototype.backupToDisk = function (params, callback)
 {
-  var pthis = this;
-  //
-  // Function that copyies all app folders
-  var folderToCopy = ["server", "client", "resources"];
-  var copyFolders = function () {
-    // If there are no more folders to copy, backup is completed
-    if (folderToCopy.length === 0) {
-      pthis.log("DEBUG", "Backup of the app succeeded", "App.backupToDisk");
-      return callback();
-    }
-    //
-    // Copy first folder in the list
-    var fld = folderToCopy[0];
-    var srcPath = pthis.config.appDirectory + "/apps/" + pthis.name + "/" + fld;
-    var dstPath = pthis.config.appDirectory + "/backups/" + pthis.name + "/" + fld;
-    Node.ncp(srcPath, dstPath, function (err) {
-      if (err) {
-        pthis.log("WARN", "Error while copying folder " + srcPath + " to " + dstPath + ": " + err, "App.backupToDisk");
-        return callback("Error while copying folder " + srcPath + " to " + dstPath + ": " + err);
-      }
-      //
-      // This folder has been copied. Continue with next one
-      folderToCopy.splice(0, 1);
-      copyFolders();
-    });
-  };
-  //
-  // Delete the previous backup (if exists)
-  Node.rimraf(this.config.appDirectory + "/backups/" + this.name, function (err) {
-    if (err) {
-      pthis.log("WARN", "Can't delete previous backup: " + err, "App.backupToDisk");
-      return callback("Can't delete previous backup: " + err);
-    }
-    //
-    // Create the backup folder
-    Node.fs.mkdir(pthis.config.appDirectory + "/backups/" + pthis.name, function (err) {
-      if (err) {
-        pthis.log("WARN", "Can't create the backup folder: " + err, "App.backupToDisk");
-        return callback("Can't create the backup folder: " + err);
-      }
-      //
-      // Copy inner folders
-      copyFolders();
-    });
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1189,57 +735,7 @@ Node.App.prototype.backupToDisk = function (params, callback)
  */
 Node.App.prototype.restoreFromDisk = function (params, callback)
 {
-  var pthis = this;
-  //
-  // Function that deletes all app folders that are backed up (see App::backup)
-  var folderToDelete = ["server", "client", "resources"];
-  var deleteFolders = function () {
-    // If there are no more folders to delete, restore is performed
-    if (folderToDelete.length === 0) {
-      // Restore previous backup
-      var srcPath = pthis.config.appDirectory + "/backups/" + pthis.name;
-      var dstPath = pthis.config.appDirectory + "/apps/" + pthis.name;
-      Node.ncp(srcPath, dstPath, function (err) {
-        if (err) {
-          pthis.log("WARN", "Can't restore the backup folder: " + err, "App.restoreFromDisk", {src: srcPath, dest: dstPath});
-          return callback("Can't restore the backup folder: " + err);
-        }
-        //
-        // Log the operation
-        pthis.log("DEBUG", "Restore of the app succeeded", "App.restoreFromDisk");
-        //
-        // Done
-        callback();
-      });
-      //
-      return;
-    }
-    //
-    // Delete first folder in the list
-    var fld = folderToDelete[0];
-    var path = pthis.config.appDirectory + "/apps/" + pthis.name + "/" + fld;
-    Node.rimraf(path, function (err) {
-      if (err) {
-        pthis.log("WARN", "Error while deleting folder " + path + ": " + err, "App.restoreFromDisk");
-        return callback("Error while deleting folder " + path + ": " + err);
-      }
-      //
-      // This folder has been deleted. Continue with next one
-      folderToDelete.splice(0, 1);
-      deleteFolders();
-    });
-  };
-  //
-  Node.fs.access(this.config.appDirectory + "/backups/" + this.name, function (err) {
-    // If the backup does not exists
-    if (err) {
-      pthis.log("WARN", "There is no backup for the app", "App.restoreFromDisk");
-      return callback("There is no backup for the app");
-    }
-    //
-    // Start to delete the target folders and, when finished, do restore
-    deleteFolders();
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1250,24 +746,7 @@ Node.App.prototype.restoreFromDisk = function (params, callback)
  */
 Node.App.prototype.backup = function (params, callback)
 {
-  var pathCloud = "users/" + this.config.serverType + "/apps/" + this.name + ".tar.gz";
-  //
-  this.log("DEBUG", "App backup", "App.backup", {pathCloud: pathCloud});
-  //
-  // Backup the app folder in the cloud
-  var archiver = new Node.Archiver(this.server);
-  archiver.backup(this.config.appDirectory + "/apps/" + this.name, pathCloud, function (err) {
-    if (err) {
-      this.log("ERROR", "Error backing up the files: " + err, "App.backup");
-      return callback("Error backing up the files: " + err);
-    }
-    //
-    // Log the app backup
-    this.log("DEBUG", "App backed up in the cloud", "App.backup");
-    //
-    // Done!
-    callback();
-  }.bind(this));
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1278,25 +757,7 @@ Node.App.prototype.backup = function (params, callback)
  */
 Node.App.prototype.restore = function (params, callback)
 {
-  var path = this.config.appDirectory + "/apps/" + this.name;
-  var pathCloud = "users/" + this.config.serverType + "/apps/" + this.name + ".tar.gz";
-  //
-  this.log("DEBUG", "App restore", "App.restore", {pathCloud: pathCloud});
-  //
-  // Restore backup from the cloud
-  var archiver = new Node.Archiver(this.server);
-  archiver.restore(path, pathCloud, function (err) {
-    if (err) {
-      this.log("ERROR", "Error restoring the files: " + err, "App.restore");
-      return callback("Error restoring up the files: " + err);
-    }
-    //
-    // Log the app restore
-    this.log("DEBUG", "App restored from cloud", "App.restore");
-    //
-    // Done!
-    callback();
-  }.bind(this));
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1307,31 +768,7 @@ Node.App.prototype.restore = function (params, callback)
  */
 Node.App.prototype.handleFileSystem = function (params, callback)
 {
-  var appFilesPath = this.config.appDirectory + "/apps/" + this.name + "/files";
-  var objPath = params.req.query.path || "";    // (optional)
-  //
-  // Fix objPath (add / if needed)
-  if (objPath && objPath[0] !== "/")
-    objPath = "/" + objPath;
-  //
-  var options = {
-    path: appFilesPath + objPath,
-    command: params.tokens[1],
-    tempPath: appFilesPath + "/temp/"
-  };
-  //
-  this.log("DEBUG", "Handle file system command", "App.handleFileSystem", options);
-  //
-  // Append original params map
-  options.params = params;
-  //
-  // Handle the command
-  Node.Utils.handleFileSystem(options, function (res) {
-    if (res && (res.err || typeof res === "string"))
-      this.logger.log("WARN", "Error while handling file system command: " + (res.err || res), "App.handleFileSystem");
-    //
-    callback(res);
-  }.bind(this));
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1341,40 +778,7 @@ Node.App.prototype.handleFileSystem = function (params, callback)
  */
 Node.App.prototype.handleFeedbackMsgToConsole = function (msg)
 {
-  this.feedbackToSend = this.feedbackToSend || [];
-  this.feedbackToSend.push(msg.cnt);
-  if (!this.notifyFeedbackTimeout) {
-    this.notifyFeedbackTimeout = setTimeout(function () {
-      var error;
-      //
-      // Get the feedback collected
-      var fb = this.feedbackToSend.splice(0, this.feedbackToSend.length);
-      while (fb.length > 0) {
-        // Send the feedback to the console in groups of 100
-        var chunk = fb.length > 100 ? 100 : fb.length;
-        this.server.request.notifyFeedback(fb.splice(0, chunk), function (data, err) {
-          if (err) {
-            error = true;
-            this.log("WARN", "Can't send feedback notification to console: " + err, "Worker.handleAppChildMessage", msg);
-          }
-        }.bind(this));
-        //
-        if (error) {
-          clearTimeout(this.notifyFeedbackTimeout);
-          delete this.notifyFeedbackTimeout;
-          delete this.feedbackToSend;
-          return;
-        }
-      }
-      //
-      // If there aren't any other feedback to send, clear the timer
-      if (this.feedbackToSend.length === 0) {
-        clearTimeout(this.notifyFeedbackTimeout);
-        delete this.notifyFeedbackTimeout;
-        delete this.feedbackToSend;
-      }
-    }.bind(this), 120000);
-  }
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1532,82 +936,7 @@ Node.App.prototype.configure = function (params, callback)
  */
 Node.App.prototype.test = function (params, callback)
 {
-  var callbackMsg = {};
-  //
-  var testautoId = params.req.query.id;
-  //
-  if (params.tokens && params.tokens.indexOf("status") !== -1) {
-    if (this.testAuto && this.testAuto[testautoId]) {
-      // Update the duration
-      var duration = new Date().getTime() - this.testAuto[testautoId].startTime;
-      this.testAuto[testautoId].testResult.duration = parseInt(duration / 1000);
-      //
-      callbackMsg.code = 200;
-      callbackMsg.msg = this.testAuto[testautoId].testResult;
-    }
-    else {
-      callbackMsg.code = 404;
-      callbackMsg.err = "Test not found";
-    }
-  }
-  else if (params.tokens && params.tokens.indexOf("terminate") !== -1) {
-    if (this.testAuto && this.testAuto[testautoId]) {
-      this.testAuto[testautoId].terminate();
-      delete this.testAuto[testautoId];
-      //
-      callbackMsg.code = 200;
-      callbackMsg.msg = "Test terminated";
-    }
-    else {
-      callbackMsg.code = 404;
-      callbackMsg.err = "Test not found";
-    }
-  }
-  else {
-    // Get test auto params
-    var testautoMode = params.req.query.mode;
-    var duration = params.req.query.duration;
-    var maxSessions = params.req.query.maxSessions;
-    var pathList = params.req.query.path;
-    var rid = params.req.query.rid;
-    var device = params.req.query.device || "desktop";
-    var slowTimer = params.req.query.slowTimer;
-    var killTimer = params.req.query.killTimer;
-    //
-    // Create a new test auto
-    var options = {
-      id: testautoId,
-      mode: testautoMode,
-      duration: duration,
-      pathList: pathList,
-      maxSessions: maxSessions,
-      rid: rid,
-      slowTimer: slowTimer,
-      killTimer: killTimer
-    };
-    //
-    this.testAuto = this.testAuto || {};
-    //
-    // Create a new test auto
-    this.testAuto[testautoId] = new Node.TestAuto(this, options);
-    //
-    // Non regression && load tests don't need a browser. appClient will never open a connection
-    // and testAuto init method will never be called. So I called init method giving fake session
-    // to test auto
-    if ([Node.TestAuto.ModeMap.nonReg, Node.TestAuto.ModeMap.load].indexOf(testautoMode) !== -1)
-      this.testAuto[testautoId].init({session: {}});
-    //
-    // I need a browser only if testauto mode is "recording" or "replay step-by-step"
-    if (testautoMode === "r" || testautoMode === "sbs") {
-      params.res.redirect("/" + this.name + "/client/testautoPreview.html?device=" + device + "&testmode=" + testautoMode + "&testid=" +
-              testautoId + "&addsid=true");
-      callbackMsg.skipReply = true;
-    }
-    //
-    delete params.req.query.rid;
-  }
-  //
-  callback(callbackMsg);
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 

@@ -1,0 +1,31 @@
+{
+	"cl": "Node.Config",
+	"name": "www",
+	"domain": "domain.com",
+	"protocol": "https",
+	"serverType": "domain",
+	"portHttp": 8081,
+	"portHttps": 8082,
+	"SSLCABundles": [],
+	"directory": "C:/basedir/prj",
+	"consoleURL": "",
+	"storage": "gcloud",
+	"dbPort": "5432",
+	"dbAddress": "localhost",
+	"dbUser": "dbuser",
+	"dbPassword": "dbpass",
+	"timerSession": 6000,
+	"handleException": true,
+	"minify": true,
+	"timeBackup": 15,
+	"daysBackups": 30,
+	"numMinBackups": 5,
+	"appDirectory": "C:/basedir/IDServer/appDirectory",
+	"users": [{
+		"cl": "Node.User",
+		"userName": "manager",
+		"projects": [],
+		"databases": [],
+		"apps": []
+	}]
+}

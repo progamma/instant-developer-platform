@@ -161,7 +161,9 @@ Node.Logger.prototype.deleteOldLogs = function ()
  */
 Node.Logger.prototype.log = function (level, message, sender, data)
 {
-  // [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues. Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+  // [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues.
+  // Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+  //
   // Unfortunately we depend on more than 50 modules... and several have "new Buffer()" somewhere... We need to skip this message
   if (message.indexOf("Buffer() is deprecated due to security and usability issues") !== -1)
     return;

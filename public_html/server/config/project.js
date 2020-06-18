@@ -148,19 +148,15 @@ Node.Project.prototype.check = function ()
 
 /**
  * Update project's data (coming from the session's child process)
- * @param {string} type - type of info (save, build)
  * @param {Object} info - object that contains project's info
  */
-Node.Project.prototype.updateInfo = function (type, info)
+Node.Project.prototype.updateInfo = function (info)
 {
-  if (type === "save") {
-    // Update version, apps and databases list
-    this.version = info.version;
-    //
-    // Update SAVE info
-    this.lastSave = info.lastSave;
-    this.lastSaveID = info.lastSaveID;
-    this.ivAES = info.ivAES;
+  for (var k in info) {
+    if (info[k] === null)
+      delete this[k];
+    else
+      this[k] = info[k];
   }
   //
   // Save CONFIG
@@ -351,7 +347,7 @@ Node.Project.prototype.editProject = function (params, callback)
   }
   //
   // Protects SID cookie
-  session.protectSID(params.res);
+  session.protectSID(params.req, params.res);
   //
   // Redirect to the MAIN page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
@@ -396,7 +392,7 @@ Node.Project.prototype.viewProject = function (params, callback)
   var session = this.server.createSession(this, {readOnly: true, openParams: qry});
   //
   // Protects SID cookie
-  session.protectSID(params.res);
+  session.protectSID(params.req, params.res);
   //
   // Redirect to the page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
@@ -458,7 +454,7 @@ Node.Project.prototype.downloadFile = function (params, callback)
     //
     // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
     var stream;
-    if ((mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
+    if (mimetype && (mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
       var positions = params.req.headers.range.replace(/bytes=/, "").split("-");
       //
       Node.fs.stat(path, function (err, stats) {
@@ -1287,7 +1283,7 @@ Node.Project.prototype.removeBuild = function (params, callback)
     }
     //
     callback();
-  });
+  }.bind(this));
 };
 
 
@@ -1376,7 +1372,7 @@ Node.Project.prototype.openTutorial = function (params, callback)
   var session = this.server.createSession(this, {type: "tutorial", recFolder: params.req.query.dir, tutorialMode: mode});
   //
   // Protects SID cookie
-  session.protectSID(params.res);
+  session.protectSID(params.req, params.res);
   //
   // Redirect to the page with the sid as querystring
   params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);

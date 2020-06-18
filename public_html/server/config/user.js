@@ -698,7 +698,7 @@ Node.User.prototype.backup = function (params, callback)
                   return callback("Error backing up databases: " + err);
                 //
                 // Log the user backup
-                pthis.log("DEBUG", "User backed up", "User.backup");
+                pthis.log("INFO", "User backed up", "User.backup");
                 //
                 // Done!
                 callback();
@@ -808,7 +808,7 @@ Node.User.prototype.restore = function (params, callback)
               return callback("Error restoring databases: " + err);
             //
             // Log the user restore
-            pthis.log("DEBUG", "Restore of user succeeded", "User.restore");
+            pthis.log("INFO", "Restore of user succeeded", "User.restore");
             //
             // Done
             callback();

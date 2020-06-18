@@ -37,6 +37,21 @@ Node.Request = function (config, logger)
  */
 Node.Request.prototype.postRequest = function (options, form, callback)
 {
+  // If there is a pending GET/POST request, better wait
+  if (this.pendingRequest) {
+    // If I've not written a message, yet... do it now
+    if (!this.pendingRequest.msg) {
+      this.pendingRequest.msg = true;
+      this.logger.log("WARN", "Pending request", "Request.postRequest", {options: options, pendingOptions: this.pendingRequest.options});
+    }
+    return setTimeout(function () {
+      this.postRequest(options, form, callback);
+    }.bind(this), 50);
+  }
+  //
+  // Set semaphore
+  this.pendingRequest = {options: options, msg: false};
+  //
   // Set method to POST
   options.method = "POST";
   //
@@ -46,21 +61,24 @@ Node.Request.prototype.postRequest = function (options, form, callback)
       data += chunk;
     });
     res.on("end", function () {
+      delete this.pendingRequest;
       callback(res.statusCode, data);
-    });
-  };
+    }.bind(this));
+  }.bind(this);
   //
   // If procotol is missing
   if (!options.protocol) {
     this.logger.log("ERROR", "Missing protocol", "Request.postRequest", {options: options});
+    delete this.pendingRequest;
     return callback(null, null, "Missing protocol");
   }
   //
   var proto = options.protocol.substring(0, options.protocol.length - 1);
   var req = Node[proto].request(options, readReply);
   req.on("error", function (err) {
+    delete this.pendingRequest;
     callback(null, null, err);
-  });
+  }.bind(this));
   //
   form.pipe(req);
 };
@@ -73,6 +91,21 @@ Node.Request.prototype.postRequest = function (options, form, callback)
  */
 Node.Request.prototype.getRequest = function (options, callback)
 {
+  // If there is a pending GET/POST request, better wait
+  if (this.pendingRequest) {
+    // If I've not written a message, yet... do it now
+    if (!this.pendingRequest.msg) {
+      this.pendingRequest.msg = true;
+      this.logger.log("WARN", "Pending request", "Request.getRequest", {options: options, pendingOptions: this.pendingRequest.options});
+    }
+    return setTimeout(function () {
+      this.getRequest(options, callback);
+    }.bind(this), 50);
+  }
+  //
+  // Set semaphore
+  this.pendingRequest = {options: options, msg: false};
+
   // Set method to GET
   options.method = "GET";
   //
@@ -82,21 +115,24 @@ Node.Request.prototype.getRequest = function (options, callback)
       data += chunk;
     });
     res.on("end", function () {
+      delete this.pendingRequest;
       callback(res.statusCode, data);
-    });
-  };
+    }.bind(this));
+  }.bind(this);
   //
   // If procotol is missing
   if (!options.protocol) {
     this.logger.log("ERROR", "Missing protocol", "Request.getRequest", {options: options});
+    delete this.pendingRequest;
     return callback(null, null, "Missing protocol");
   }
   //
   var proto = options.protocol.substring(0, options.protocol.length - 1);
   var req = Node[proto].request(options, readReply);
   req.on("error", function (err) {
+    delete this.pendingRequest;
     callback(null, null, err);
-  });
+  }.bind(this));
   req.end();
 };
 
@@ -177,8 +213,10 @@ Node.Request.prototype.sendResponse = function (RID, code, text)
 Node.Request.prototype.getParentProject = function (userName, projectName, callback)
 {
   // TODO: Eliminare
-  if (this.config.local && projectName.substring(0, 27) === "cloud-control-center-forked")
+  if (this.config.local && projectName === "cloud-control-center-forked")
     return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center", user: "lucabaldini"});
+  if (this.config.local && projectName === "cloud-control-center-forked1")
+    return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center-forked", user: "lucabaldini"});
   if (this.config.local && projectName.substring(0, 16) === "cccmaster-forked")
     return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diego"});
   if (this.config.local && projectName.substring(0, 17) === "cccmaster-forked2")
@@ -209,7 +247,7 @@ Node.Request.prototype.getParentProject = function (userName, projectName, callb
         callback(JSON.parse(data));
       }
       catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.getParentProject", {data: data, code: code, options: options});
+        pthis.logger.log("ERROR", "GET reply error", "Request.getParentProject", {data: data, code: code, options: options, err: ex.message});
         callback(null, "Invalid response");
       }
     }
@@ -326,7 +364,7 @@ Node.Request.prototype.getComponents = function (userName, callback)
         callback(cmpList);
       }
       catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.getComponents", {data: data, code: code, options: options});
+        pthis.logger.log("ERROR", "GET reply error", "Request.getComponents", {data: data, code: code, options: options, err: ex.message});
         callback(null, "Invalid response");
       }
     }
@@ -450,6 +488,43 @@ Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, c
     else
       callback();
   });
+};
+
+
+/**
+ *  Send create commit message to console
+ * @param {string} userName
+ * @param {string} projectName
+ * @param {Object} prInfo
+ * @param {function} callback - function(err)
+ */
+Node.Request.prototype.sendCommitInfo = function (userName, projectName, commitInfo, callback)
+{
+  var form = new Node.FormData();
+  form.append("user", userName);
+  form.append("project", projectName);
+  form.append("company", this.config.serverType);
+  form.append("commitInfo", JSON.stringify(commitInfo));
+  //
+  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  var options = {
+    protocol: consoleUrlParts.protocol,
+    hostname: consoleUrlParts.hostname,
+    port: consoleUrlParts.port,
+    path: consoleUrlParts.pathname + "?mode=rest&cmd=commit&autk=" + this.config.autk,
+    method: "POST",
+    headers: form.getHeaders()
+  };
+  //
+  this.postRequest(options, form, function (code, data, err) {
+    if (err || code !== 200) {
+      this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendCommitInfo",
+              {err: err, code: code, data: data, options: options});
+      callback(err || "Invalid response");
+    }
+    else
+      callback();
+  }.bind(this));
 };
 
 
@@ -645,7 +720,7 @@ Node.Request.prototype.listUsers = function (msg, callback)
         callback(JSON.parse(data));
       }
       catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.listUsers", {data: data, code: code, options: options});
+        pthis.logger.log("ERROR", "GET reply error", "Request.listUsers", {data: data, code: code, options: options, err: ex.message});
         callback(null, "Invalid response");
       }
     }
@@ -682,7 +757,7 @@ Node.Request.prototype.isUserOnline = function (address, callback)
         callback(JSON.parse(data));
       }
       catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.isUserOnline", {data: data, code: code, options: options});
+        pthis.logger.log("ERROR", "GET reply error", "Request.isUserOnline", {data: data, code: code, options: options, err: ex.message});
         callback(null, "Invalid response");
       }
     }
@@ -704,7 +779,7 @@ Node.Request.prototype.executeRemoteQuery = function (options, callback)
   form.append("sql", options.sql);
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
+  var postOpt = {
     protocol: consoleUrlParts.protocol,
     hostname: consoleUrlParts.hostname,
     port: consoleUrlParts.port,
@@ -713,7 +788,7 @@ Node.Request.prototype.executeRemoteQuery = function (options, callback)
     headers: form.getHeaders()
   };
   //
-  this.postRequest(options, form, function (code, data, err) {
+  this.postRequest(postOpt, form, function (code, data, err) {
     if (err || code !== 200) {
       this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.executeRemoteQuery",
               {err: err, code: code, data: data, options: options});
@@ -785,7 +860,7 @@ Node.Request.prototype.notifyIssueCommand = function (msg, callback)
         callback(JSON.parse(data));
       }
       catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.notifyIssueCommand", {data: data, code: code, options: options});
+        pthis.logger.log("ERROR", "GET reply error", "Request.notifyIssueCommand", {data: data, code: code, options: options, err: ex.message});
         callback(null, "Invalid response");
       }
     }

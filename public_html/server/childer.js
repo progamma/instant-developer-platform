@@ -101,7 +101,8 @@ Node.Childer.prototype.handleMessage = function (msg)
       process.env.HOME = "/root";
       //
       // Execute the command and send back the response
-      Node.child.execFile(msg.cmd, msg.params, function (err, stdout, stderr) {
+      // https://nodejs.org/api/child_process.html#child_process_child_process_execfile_file_args_options_callback
+      Node.child.execFile(msg.cmd, msg.params, msg.options, function (err, stdout, stderr) {
         process.send({type: Node.Childer.msgTypeMap.execCmdResponse, cmdid: msg.cmdid, err: err, stdout: stdout, stderr: stderr});
       });
       break;

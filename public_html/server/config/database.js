@@ -415,47 +415,7 @@ Node.Database.prototype.dropDb = function (callback)
  */
 Node.Database.prototype.query = function (params, callback)
 {
-  var pthis = this;
-  //
-  var query = decodeURIComponent(params.req.query.query);
-  var dbName;
-  if (pthis.user.userName === "manager")
-    dbName = this.name;
-  else
-    dbName = this.user.userName + "-" + this.name;
-  //
-  if (!query) {
-    this.log("WARN", "Empty query text", "Database.query");
-    return callback("Empty query text");
-  }
-  //
-  // Create a new client to communicate with the db
-  var conString = this.remoteUrl || "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
-          this.config.dbAddress + ":" + this.config.dbPort + "/" + dbName;
-  var client = new Node.pg.Client(conString);
-  //
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      pthis.log("ERROR", "Error connecting to the database: " + err, "Database.query", {conString: conString});
-      return callback("Error connecting to the database: " + err);
-    }
-    //
-    client.query(query, function (err, result) {
-      if (err) {
-        client.end();
-        //
-        pthis.log("WARN", "Error in database query: " + err, "Database.query", {query: query, conString: conString});
-        return callback("Error while executing query: " + err);
-      }
-      //
-      client.end();
-      //
-      // Done
-      callback({msg: JSON.stringify(result)});
-    });
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -563,80 +523,7 @@ Node.Database.prototype.renameDb = function (params, callback)
  */
 Node.Database.prototype.backup = function (params, callback)
 {
-  var pthis = this;
-  //
-  var pathDB;
-  if (this.user.userName === "manager")
-    pathDB = this.config.appDirectory + "/backups/tmp_" + this.name;
-  else
-    pathDB = this.config.directory + "/" + this.user.userName + "/tmp_" + this.name;
-  //
-  var pathCloud;
-  if (params.req && params.req.query.path) {
-    // Given path could be a full file path (with .tar.gz extension) or a folder
-    pathCloud = params.req.query.path;
-    if (pathCloud.substr(-7) !== ".tar.gz")
-      pathCloud += "/" + this.name + ".tar.gz";   // Was a folder
-  }
-  else {
-    // If the DB is a production DB a path on the query string is needed
-    // (there is no "default" bucket for productions DB)
-    if (this.user.userName === "manager") {
-      this.log("WARN", "Can't backup a MANAGER database without a PATH", "Database.backup");
-      return callback("Can't backup a MANAGER database without a PATH");
-    }
-    //
-    pathCloud = "users/" + this.config.serverType + "/" + this.user.userName + "/backups/databases/" + this.name + "/" + this.name + ".tar.gz";
-  }
-  //
-  this.log("DEBUG", "Database backup", "Database.backup", {pathCloud: pathCloud, params: (params.req ? params.req.query : undefined)});
-  //
-  var errorFnc = function (msg) {
-    pthis.log("ERROR", msg, "Database.backup");
-    callback(msg);
-    //
-    // Operation failed -> clean up
-    Node.rimraf(pathDB, function () {
-    });
-  };
-  //
-  // Remove the temp folder if present (due to a failed previous backup)
-  Node.rimraf(pathDB, function (err) {
-    if (err)
-      return errorFnc("Error removing the previous temp folder (" + pathDB + "): " + err);
-    //
-    // Create the directory
-    Node.fs.mkdir(pathDB, function (err) {
-      if (err)
-        return errorFnc("Can't create temporary directory " + pathDB + ": " + err);
-      //
-      // Dump the database
-      var params = ["--no-owner", "-f", pathDB + "/backup", "--dbname=" + pthis.getURL()];
-      Node.child.execFile("/usr/local/bin/pg_dump", params, function (err, stdout, stderr) {   // jshint ignore:line
-        if (err)
-          return errorFnc("Error backing up the database: " + err);
-        //
-        // Backup in the cloud
-        var archiver = new Node.Archiver(pthis.server);
-        archiver.backup(pathDB, pathCloud, function (err) {
-          if (err)
-            return errorFnc("Error while backing up in the cloud: " + err);
-          //
-          // Remove the temp folder
-          Node.rimraf(pathDB, function (err) {
-            if (err)
-              return errorFnc("Error removing the temp database files: " + err);
-            //
-            // Log the operation
-            pthis.log("INFO", "Database backed up", "Database.backup");
-            //
-            // Done
-            callback();
-          });
-        });
-      });
-    });
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -647,85 +534,7 @@ Node.Database.prototype.backup = function (params, callback)
  */
 Node.Database.prototype.restore = function (params, callback)
 {
-  var pthis = this;
-  //
-  var pathDB;
-  if (this.user.userName === "manager")
-    pathDB = this.config.appDirectory + "/backups/tmp_" + this.name;
-  else
-    pathDB = this.config.directory + "/" + this.user.userName + "/tmp_" + this.name;
-  //
-  var pathCloud;
-  if (params.req && params.req.query.path) {
-    // Given path could be a full file path (with .tar.gz extension) or a folder
-    pathCloud = params.req.query.path;
-    if (pathCloud.substr(-7) !== ".tar.gz")
-      pathCloud += "/" + this.name + ".tar.gz";   // Was a folder
-  }
-  else {
-    // If the DB is a production DB a path on the query string is needed
-    // (there is no "default" bucket for productions DB)
-    if (this.user.userName === "manager") {
-      this.log("WARN", "Can't restore a MANAGER database without a PATH", "Database.restore");
-      return callback("Can't restore a MANAGER database without a PATH");
-    }
-    //
-    pathCloud = "users/" + this.config.serverType + "/" + this.user.userName + "/backups/databases/" + this.name + "/" + this.name + ".tar.gz";
-  }
-  //
-  this.log("DEBUG", "Database restore", "Database.restore", {pathCloud: pathCloud, params: (params.req ? params.req.query : undefined)});
-  //
-  var errorFnc = function (msg) {
-    pthis.log("ERROR", msg, "Database.restore");
-    callback(msg);
-    //
-    // Operation failed -> clean up
-    Node.rimraf(pathDB, function () {
-    });
-  };
-  //
-  // Restore
-  var archiver = new Node.Archiver(this.server);
-  archiver.restore(pathDB, pathCloud, function (err) {
-    if (err)
-      return errorFnc("Error while restoring database cloud files: " + err);
-    //
-    // Restore the database dump
-    var params = ["--dbname=" + pthis.getURL(), "-f", pathDB + "/backup"];
-    Node.child.execFile("/usr/local/bin/psql", params, function (err, stdout, stderr) {   // jshint ignore:line
-      if (err)
-        return errorFnc("Error while restoring database: " + err);
-      //
-      // Now If the database's owner is a specific user (IDE case) set the owner
-      // Note: everything should be owned by indert because I (indert process) restored it and inside
-      // the backup there is no owner information (see Database::backup "--no-owner" command line parameter)
-      if (pthis.user.userName !== "manager") {
-        params = ["--dbname=" + pthis.getURL(), "-c", "REASSIGN OWNED BY indert TO \"" + pthis.user.userName + "\""];
-        Node.child.execFile("/usr/local/bin/psql", params, function (err, stdout, stderr) {   // jshint ignore:line
-          if (err)
-            return errorFnc("Error while changing database object's owner: " + err);
-          //
-          completeRestore();
-        });
-      }
-      else
-        completeRestore();
-    });
-  });
-  //
-  // Cleanup and report to callee
-  var completeRestore = function () {
-    Node.rimraf(pathDB, function (err) {
-      if (err)
-        return errorFnc("Error removing the temp database files: " + err);
-      //
-      // Log the operation
-      pthis.log("INFO", "Database restored", "Database.restore");
-      //
-      // Done
-      callback();
-    });
-  };
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 

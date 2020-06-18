@@ -253,7 +253,7 @@ Node.TwManager.prototype.attachListeners = function ()
     pthis.sendSavedModifications();
   });
   this.doc.onMessage(Node.TwManager.msgTypeMap.requestDiffBranch, this, function (msg) {
-    pthis.sendDiffBranch(msg.branch);
+    pthis.sendDiffBranch(msg);
   });
   this.doc.onMessage(Node.TwManager.msgTypeMap.requestCommitHistory, this, function (msg) {
     pthis.sendCommitHistory(msg);
@@ -371,21 +371,32 @@ Node.TwManager.prototype.sendConflicts = function ()
 
 /**
  * Sends to the client the differences between the given branch and the current branch
- * @param {String} branchName - name of the branch for which the client is requesting the differences
+ * @param {object} options
+ *      branchName - name of the branch for which the client is requesting the differences
  */
-Node.TwManager.prototype.sendDiffBranch = function (branchName)
+Node.TwManager.prototype.sendDiffBranch = function (options)
 {
-  var pthis = this;
-  //
   // First, check if the branch exists
-  var branch = this.getBranchByName(branchName);
+  var branch = this.getBranchByName(options.branch);
   if (!branch) {
-    this.logger.log("WARN", "Branch " + branchName + " not found", "TwManager.sendDiffBranch", {branch: branchName});
+    this.logger.log("WARN", "Branch " + options.branch + " not found", "TwManager.sendDiffBranch", options);
     return this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt:
-              {err: InDe.rh.t("tw_branch_not_exists_err", {_b: branchName})}});
+              {err: InDe.rh.t("tw_branch_not_exists_err", {_b: options.branch})}});
   }
   //
-  var i, j, k, tr, ti;
+  // If there are unsaved modifications -> can't continue
+  if (branch.type !== Node.Branch.PR && this.memoryModif()) {
+    this.logger.log("WARN", "Can't send branch difference: there are unsaved modifications", "TwManager.sendDiffBranch");
+    return this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt:
+              {err: InDe.rh.t("tw_memory_mod")}});
+  }
+  //
+  // If there are local modifications -> can't continue
+  if (branch.type !== Node.Branch.PR && this.localModif()) {
+    this.logger.log("WARN", "Can't send branch difference: there are local modifications", "TwManager.sendDiffBranch");
+    return this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt:
+              {err: InDe.rh.t("tw_switch_locmod_err")}});
+  }
   //
   // Cerate a Shuttle transaction (used to send the transitems to the callee)
   var trShuttle = new InDe.Transaction(this.doc.transManager);
@@ -393,39 +404,16 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
   //
   // Get the commits
   var commits;
-  if (branch.type === Node.Branch.PR)
-    commits = {undoList: [], redoList: this.getDiffBranch(branchName)};   // PUSH/PULL -> REDO of all commits that are not in the actual branch
-  else
-    commits = this.getDiffBranchSwitch(branchName);                       // Normal -> UNDO until common point then REDO of other transactions
-  //
-  // Load all the commits that have to be undoed
-  for (i = 0; i < commits.undoList.length; i++) {
-    var ullist = commits.undoList[i].loadCommit();
-    for (j = 0; j < ullist.length; j++) {
-      tr = new InDe.Transaction(this.doc.transManager);
-      tr.load(ullist[j]);
-      //
-      // This transaction must be undoed... thus I need to invert each transitem
-      for (k = 0; k < tr.transItems.length; k++) {
-        ti = tr.transItems[k];
-        //
-        // Relink the item
-        tr.relinkItem(ti, "undo");
-        //
-        // Invert the item
-        InDe.Transaction.invertTransItem(ti);
-        //
-        // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
-        trShuttle.transItems.unshift(ti);
-      }
-    }
-  }
+  if (branch.type === Node.Branch.PR || options.showIncoming)
+    commits = this.actualBranch.getDiffBranch(branch);
+  else if (options.showOutgoing)
+    commits = branch.getDiffBranch(this.actualBranch);
   //
   // Load all the commits that have to be redoed
-  for (i = 0; i < commits.redoList.length; i++) {
-    var rllist = commits.redoList[i].loadCommit();
-    for (j = 0; j < rllist.length; j++) {
-      tr = new InDe.Transaction(this.doc.transManager);
+  for (var i = 0; i < commits.length; i++) {
+    var rllist = commits[i].loadCommit();
+    for (var j = 0; j < rllist.length; j++) {
+      var tr = new InDe.Transaction(this.doc.transManager);
       tr.load(rllist[j]);
       //
       // Append all transitems to the shuttle transaction (this is a REDO transaction, thus I add
@@ -434,54 +422,10 @@ Node.TwManager.prototype.sendDiffBranch = function (branchName)
     }
   }
   //
-  var sendResponse = function () {
-    // Purge the transaction
+  // Purge the transaction
 //    trShuttle = InDe.TransManager.purge(trShuttle);
-    trShuttle.purgeAToken();
-    //
-    pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt: {tr: trShuttle.save()}});
-  };
-  //
-  // If the branch is NOT a PR, add saved and memory modifications to the undo list
-  if (branch.type !== Node.Branch.PR) {
-    pthis.getAllSavedModifications({backward: true}, function (trans, err) {
-      if (err) {
-        pthis.logger.log("WARN", "Error while retrieving the saved modifications: " + err, "TwManager.sendDiffBranch");
-        return this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt:
-                  {err: InDe.rh.t("tw_diffbranch_err", {_b: branchName})}});
-      }
-      //
-      // Add all items into shuttle transaction
-      // (this is an UNDO item, thus I add it backward)
-      trans.transItems.forEach(function (ti) {
-        InDe.Transaction.invertTransItem(ti);
-        trShuttle.transItems.unshift(ti);
-      });
-      //
-      // Last: add memory modifications
-      var translist = pthis.doc.transManager.translist;
-      for (i = 0; i < translist.length; i++) {
-        tr = translist[i];
-        if (tr.saved)
-          continue;   // Skip saved transactions
-        //
-        // I need to invert the tr's items, thus I can't just use the "original" one. Thus I need a clone
-        var newtr = tr.clone();
-        for (k = 0; k < tr.transItems.length; k++) {
-          ti = newtr.transItems[k];
-          InDe.Transaction.invertTransItem(ti);
-          //
-          // Append all transitems to the shuttle transaction (this is an UNDO item, thus I add it backward)
-          trShuttle.transItems.unshift(ti);
-        }
-      }
-      //
-      // Done -> send the reply to the client
-      sendResponse();
-    });
-  }
-  else  // It's a PR -> send the reply to the client
-    sendResponse();
+  trShuttle.purgeAToken();
+  this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt: {tr: trShuttle.save()}});
 };
 
 
@@ -817,7 +761,8 @@ Node.TwManager.prototype.restoreHEAD = function (options, callback)
     // HEAD does not exist... I need to copy it
     this.copyFile(headFile, tgtFile, function (err) {
       if (err) {
-        this.logger.log("ERR", "Error while restoring HEAD: " + err, "TwManager.restoreHEAD", {headFile: headFile, tgtFile: tgtFile, options: options});
+        this.logger.log("ERR", "Error while restoring HEAD: " + err, "TwManager.restoreHEAD",
+                {headFile: headFile, tgtFile: tgtFile, options: options});
         return callback(err);
       }
       //
@@ -1059,7 +1004,7 @@ Node.TwManager.prototype.memoryModif = function ()
 {
   var translist = this.doc.transManager.translist;
   for (var i = 0; i < translist.length; i++)
-    if (!translist[i].saved)
+    if (!translist[i].saved && !translist[i].isFake())
       return true;
 };
 
@@ -1183,39 +1128,39 @@ Node.TwManager.prototype.createBranch = function (newBranchName, callback)
 
 /**
  * Delete an existing branch
- * @param {string} branchName
+ * @param {object} options - {branch: branch name, reason (optional): why the branch have to be deleted}
  * @param {function} callback - function(err)
  */
-Node.TwManager.prototype.deleteBranch = function (branchName, callback)
+Node.TwManager.prototype.deleteBranch = function (options, callback)
 {
   var pthis = this;
   //
   // Check if I'm requested to delete the actual branch
-  if (branchName === this.actualBranch.name) {
-    this.logger.log("WARN", "Can't delete active branch", "TwManager.deleteBranch", {branch: branchName});
+  if (options.branch === this.actualBranch.name) {
+    this.logger.log("WARN", "Can't delete active branch", "TwManager.deleteBranch", options);
     return callback(InDe.rh.t("tw_delete_actbranch_err"));
   }
   //
   // Check if the branch to be deleted exists
-  var branch = this.getBranchByName(branchName);
+  var branch = this.getBranchByName(options.branch);
   if (!branch) {
-    this.logger.log("WARN", "Branch not found", "TwManager.deleteBranch", {branch: branchName});
-    return callback(InDe.rh.t("tw_branch_not_exists_err", {_b: branchName}));
+    this.logger.log("WARN", "Branch not found", "TwManager.deleteBranch", options);
+    return callback(InDe.rh.t("tw_branch_not_exists_err", {_b: options.branch}));
   }
   //
   // If the branch is someone else's parent the deletion is not (yet) supported
   for (var i = 0; i < this.branches.length; i++) {
     var bra = this.branches[i];
-    if (bra.owner === branchName) {
-      this.logger.log("WARN", "Can't delete branch because it's " + bra.name + "'s parent", "TwManager.deleteBranch", {branch: branchName});
-      return callback(InDe.rh.t("tw_delete_branch_not_leaf_err", {_b: branchName, _ow: bra.name}));
+    if (bra.owner === options.branch) {
+      this.logger.log("WARN", "Can't delete branch because it's " + bra.name + "'s parent", "TwManager.deleteBranch", options);
+      return callback(InDe.rh.t("tw_delete_branch_not_leaf_err", {_b: options.branch, _ow: bra.name}));
     }
   }
   //
   // Delete the branch folder
   branch.deleteBranchFolder(function (err) {
     if (err) {
-      pthis.logger.log("WARN", "Can't delete branch folder: " + err, "TwManager.deleteBranch", {branch: branchName});
+      pthis.logger.log("WARN", "Can't delete branch folder: " + err, "TwManager.deleteBranch", options);
       return callback(InDe.rh.t("tw_delete_err"));
     }
     //
@@ -1230,7 +1175,7 @@ Node.TwManager.prototype.deleteBranch = function (branchName, callback)
     if (branch.type === Node.Branch.PR) {
       // If the PR has not been merged, tell the console that a PR has been rejected
       if (!branch.merged) {   // See TwManager::merge
-        var prInfo = {uid: branch.uid, status: "rejected"};
+        var prInfo = {uid: branch.uid, status: "rejected", reason: options.reason};
         pthis.child.request.sendTwPrInfo(pthis.child.project.user.userName, pthis.child.project.name, prInfo, function (err) {
           if (err)
             pthis.logger.log("WARN", "Can't send TwPrInfo to console: " + err, "TwManager.deleteBranch", {prInfo: prInfo});
@@ -1249,7 +1194,7 @@ Node.TwManager.prototype.deleteBranch = function (branchName, callback)
       }
       //
       // Log the branch deletion
-      pthis.logger.log("DEBUG", "Branch removed", "TwManager.deleteBranch", {branch: branchName});
+      pthis.logger.log("DEBUG", "Branch removed", "TwManager.deleteBranch", options);
       //
       // Operation completed
       callback();
@@ -1340,14 +1285,14 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
   }
   //
   // If there are local modifications
-  var skipRestore = undefined;
+  var skipRestore;
   if (this.localModif()) {
     // I can switch only if the new branch's HEAD and old branch's HEAD are the same
     var oldFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
     var newFile = this.path + "/branches/" + branchName + "/project.json";
     var oldFileStat = Node.fs.statSync(oldFile);
     var newFileStat = Node.fs.statSync(newFile);
-    if (oldFileStat.mtime.getTime() !== newFileStat.mtime.getTime()) {
+    if (oldFileStat.mtime.getTime() !== newFileStat.mtime.getTime() || oldFileStat.size !== newFileStat.size) {
       this.logger.log("WARN", "Can't switch: there are local modifications and HEAD's does not match", "TwManager.switchBranch",
               {oldFile: {name: oldFile, stat: oldFileStat.mtime, statTime: oldFileStat.mtime.getTime()},
                 newFile: {name: newFile, stat: newFileStat.mtime, statTime: newFileStat.mtime.getTime()}});
@@ -1405,78 +1350,6 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
 
 
 /**
- * Returns the list of all given branch's commits that are not inside the active branch
- * @param {string} branchName
- */
-Node.TwManager.prototype.getDiffBranch = function (branchName)
-{
-  var branch = this.getBranchByName(branchName);
-  if (!branch) {
-    this.logger.log("WARN", "Branch not found", "TwManager.getDiffBranch", {branch: branchName});
-    return [];
-  }
-  //
-  // Returns all the commits that are in the given branch but that are NOT in the actual branch
-  var commits = this.actualBranch.getDiffBranch(branch);
-  return commits;
-};
-
-
-/**
- * Get the difference between the given branch and the active branch
- * @param {string} branchName
- */
-Node.TwManager.prototype.getDiffBranchSwitch = function (branchName)
-{
-  // It's a diff-branch thus I need to compute the list of transactions that have to be undoed
-  // and the list of transactions that have to be redoed in order to "move" from the active branch
-  // to the given branch
-  //
-  // Get all the commits in the target branch
-  var newBranch = this.getBranchByName(branchName);
-  if (!newBranch) {
-    this.logger.log("WARN", "Branch not found", "TwManager.getDiffBranchSwitch", {branch: branchName});
-    return {undoList: [], redoList: []};
-  }
-  //
-  var commitsActual = this.actualBranch.loadAllCommits();
-  var commitsNew = newBranch.loadAllCommits();
-  //
-  // The idea is the following: search the "common point" inside both list
-  // ( i.e. the index in the array where both lists have the same commit)
-  var undoList = [];
-  var redoList = [];
-  var commonCommitIdx;
-  var i, j, idx;
-  for (i = 0; i < commitsActual.length; i++) {
-    var comm = commitsActual[i];
-    //
-    // If I still haven't found the first non common element
-    if (commonCommitIdx === undefined) {
-      // Search inside the other branch if this commit exists
-      idx = undefined;
-      for (j = 0; j < commitsNew.length && idx === undefined; j++)
-        if (commitsNew[j].id === comm.id)
-          idx = j;
-      if (idx === i)
-        continue;   // This commit was already inside the branch and in the same position -> continue the search
-      else
-        commonCommitIdx = i; // The commit is not inside the branch or is not in the same position -> this is the first non common element
-    }
-    //
-    // This must be undoed
-    undoList.push(comm);
-  }
-  //
-  // Prepare the list of commits that have to be redoed
-  for (j = (commonCommitIdx !== undefined ? commonCommitIdx : commitsActual.length); j < commitsNew.length; j++)
-    redoList.push(commitsNew[j]);
-  //
-  return {undoList: undoList, redoList: redoList};
-};
-
-
-/**
  * Commit the local modifications
  * @param {string} message
  * @param {function} callback - function(err)
@@ -1499,37 +1372,6 @@ Node.TwManager.prototype.commit = function (message, callback)
   //
   // Create a new commit with the given message
   var newCommit = pthis.actualBranch.createCommit(message);
-
-
-
-
-
-  // TODO: Eliminare quando TW sarà a posto
-  if (this.child.config.serverType === "pro-gamma-test") {
-    if (!Node.fs.existsSync(this.child.config.directory + "/_backup/"))
-      Node.fs.mkdirSync(this.child.config.directory + "/_backup/");
-    //
-    Node.tar = require("tar");
-    var taropt = {
-      file: this.child.config.directory + "/_backup/" + this.child.project.user.userName + "_" + this.child.project.name + "_commit_" + newCommit.id + ".tar.gz",
-      cwd: this.path,
-      gzip: true,
-      portable: true,
-      sync: true
-    };
-    var tarlist = ["trans", "project.json", "branches/" + this.actualBranch.name + "/project.json"];
-    try {
-      Node.tar.create(taropt, tarlist);
-    }
-    catch (ex) {
-      this.logger.log("ERROR", "Error while backing up TRANS directory: " + ex, "TwManager.commit");
-      return callback(InDe.rh.t("tw_commit_err"));
-    }
-  }
-
-
-
-
   //
   // Copy the staging area inside the new commit
   var pathCommit = pthis.path + "/branches/" + pthis.actualBranch.name + "/" + newCommit.id;
@@ -1539,9 +1381,77 @@ Node.TwManager.prototype.commit = function (message, callback)
       return callback(InDe.rh.t("tw_commit_err"));
     }
     //
+    // Load old document (HEAD), i.e. the document before all changes
+    var oldDoc = new InDe.Document(pthis.doc.app);
+    oldDoc.child = pthis.child;   // Give the temp document a child so that it can use the LOG
+    var headFile = pthis.path + "/branches/" + pthis.actualBranch.name + "/project.json";
+    var json = Node.fs.readFileSync(headFile, {encoding: "utf8"});
+    oldDoc.load(json, false);
+    //
+    // If this is NOT a new project check if everything is fine
+    // (I can't check for a new project because the transaction that changed ID's is gone)
+    if (oldDoc.prj.id !== "6DTj10XYJwuNMiewPRbTXQ==") {
+      // Check 1: CURRENT + UNDO(COMMIT) = HEAD
+      // Duplicate current document
+      var sdoc = pthis.doc.save();
+      var newDoc = new InDe.Document(pthis.doc.app);
+      newDoc.child = pthis.child;   // Give the temp document a child so that it can use the LOG
+      newDoc.load(sdoc, false);
+      //
+      // Duplicate commit
+      var trClone = new InDe.Transaction(newDoc.transManager);
+      trClone.load(trans.save());
+      //
+      // Commit UNDO on the duplicate project
+      newDoc.transManager.translist.push(trClone);
+      trClone.undo(undefined, {local: true, silent: true});
+      //
+      // Check if it's equal to the old document
+      var result = InDe.Document.computeDifference(oldDoc, newDoc);
+      if (result.transItems.length) {
+        if (pthis.child.config.serverType.indexOf("pro-gamma") !== -1) {
+          pthis.writeJSONFile(pthis.path + "/branches/" + pthis.actualBranch.name + "/TRANS.js", [trans.save()], function (err) {});
+          pthis.writeJSONFile(pthis.path + "/branches/" + pthis.actualBranch.name + "/UNDO-diff.js", [result.save()], function (err) {});
+        }
+        //
+        // There are differences... that's bad
+        pthis.logger.log("ERROR", "Wrong commit: CURRENT + undo(COMMIT) != HEAD", "TwManager.commit", {tr: result.save()});
+        return callback(InDe.rh.t("tw_commit_err"));
+      }
+      //
+      // Check 2: HEAD + REDO(COMMIT) = CURRENT
+      // Duplicate commit
+      var trClone = new InDe.Transaction(oldDoc.transManager);
+      trClone.load(trans.save());
+      //
+      // Commit REDO on the old document
+      oldDoc.transManager.translist.push(trClone);
+      trClone.redo(undefined, {local: true, silent: true});
+      //
+      // Check if it's equal to the current document
+      result = InDe.Document.computeDifference(oldDoc, pthis.doc);
+      if (result.transItems.length) {
+        if (pthis.child.config.serverType.indexOf("pro-gamma") !== -1) {
+          pthis.writeJSONFile(pthis.path + "/branches/" + pthis.actualBranch.name + "/TRANS.js", [trans.save()], function (err) {});
+          pthis.writeJSONFile(pthis.path + "/branches/" + pthis.actualBranch.name + "/REDO-diff.js", [result.save()], function (err) {});
+        }
+        //
+        // There are differences... that's bad
+        pthis.logger.log("ERROR", "Wrong commit: HEAD + redo(COMMIT) != CURRENT", "TwManager.commit", {tr: result.save()});
+        return callback(InDe.rh.t("tw_commit_err"));
+      }
+    }
+    //
+    // Send a message to the console
+    var commitInfo = {id: newCommit.id, uid: pthis.actualBranch.uid, status: "created", message: message, branch: pthis.actualBranch.name};
+    pthis.child.request.sendCommitInfo(pthis.child.project.user.userName, pthis.child.project.name, commitInfo, function (err) {
+      if (err)
+        pthis.logger.log("WARN", "Can't comunicate commit info to console: " + err, "TwManager.commit");
+    });
+    //
     pthis.writeJSONFile(pathCommit, [trans.save()], function (err) {
       if (err) {
-        pthis.logger.log("ERROR", "Error writing to the file" + pathCommit + ": " + err, "TwManager.commit");
+        pthis.logger.log("ERROR", "Error writing to the file " + pathCommit + ": " + err, "TwManager.commit");
         return callback(InDe.rh.t("tw_commit_err"));
       }
       //
@@ -1730,7 +1640,7 @@ Node.TwManager.prototype.merge = function (branchName, callback)
       // without merging I need to tell the console that the branch has been rejected)
       branch.merged = true;
       //
-      pthis.deleteBranch(branch.name, function (err) {
+      pthis.deleteBranch({branch: branch.name}, function (err) {
         if (err) {
           pthis.logger.log("WARN", "Can't delete a PR branch: " + err, "TwManager.merge", {branch: branchName});
           return callback(InDe.rh.t("tw_merge_err"));
@@ -1879,7 +1789,7 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
     //
     // If the source branch was a PR, remove it
     if (branch.type === Node.Branch.PR)
-      pthis.deleteBranch(branch.name, function (err) {
+      pthis.deleteBranch({branch: branch.name}, function (err) {
         if (err) {
           pthis.logger.log("WARN", "Can't delete a PR branch: " + err, "TwManager.rebase", {branch: branchName});
           return callback(InDe.rh.t("tw_rebase_err"));
@@ -1900,8 +1810,6 @@ Node.TwManager.prototype.rebase = function (branchName, callback)
  */
 Node.TwManager.prototype.getAllSavedModifications = function (options, callback)
 {
-  var result;
-  //
   // Load HEAD and compute differences between HEAD and current project
   var headFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
   Node.fs.readFile(headFile, {encoding: "utf8"}, function (err, file) {
@@ -1921,21 +1829,21 @@ Node.TwManager.prototype.getAllSavedModifications = function (options, callback)
     try {
       var src = (!options.backward ? head : this.doc);
       var dst = (!options.backward ? this.doc : head);
-      result = InDe.Document.computeDifference(src, dst);
+      var result = InDe.Document.computeDifference(src, dst);
       //
       result.tw = true;
       result.status = InDe.Transaction.Status.COMMITTED;
+      //
+      // Done!
+      this.logger.log("DEBUG", "Difference with head computed: " + result.transItems.length + " items in " + (new Date() - start) + " ms",
+              "TwManager.getAllSavedModifications", options);
+      callback(result);
     }
     catch (ex) {
       this.logger.log("ERROR", "Error while computing difference with HEAD: " + ex, "TwManager.getAllSavedModifications",
               {options: options, stack: ex.stack});
-      return callback(null, ex);
+      callback(null, ex);
     }
-    //
-    // Done!
-    this.logger.log("DEBUG", "Difference with head computed: " + result.transItems.length + " items in " + (new Date() - start) + " ms",
-            "TwManager.getAllSavedModifications", options);
-    callback(result);
   }.bind(this));
 };
 
@@ -1952,6 +1860,8 @@ Node.TwManager.prototype.getMemoryTransItemsById = function (objid, callback)
   for (var i = translist.length - 1; i >= 0; i--) {     // Move back in time starting from the last transaction
     var tr = translist[i];
     if (tr.saved)   // If this has been saved, I've already checked for it above
+      continue;
+    if (tr.isFake())  // If this is fake, I'm not interested
       continue;
     //
     // Preview the transaction as UNDO
@@ -1977,69 +1887,21 @@ Node.TwManager.prototype.getMemoryTransItemsById = function (objid, callback)
  */
 Node.TwManager.prototype.getAllSavedTransItemsById = function (objid, callback)
 {
-  var trSaved = new InDe.Transaction(this.doc.transManager);
-  //
-  var pathSave = this.path + "/trans/save.json";
-  Node.fs.access(pathSave, function (err) {
-    if (!err) {
-      // Read all transactions and get only relevant items
-      this.readJSONFile(pathSave, function (sessions, err) {
-        if (err) {
-          this.logger.log("ERROR", "Error reading the file " + pathSave + ": " + err, "TwManager.getAllSavedTransItemsById");
-          return callback(null, err);
-        }
-        //
-        // Read each session and check if it contains changes relative to the given object (do it backwards)
-        var readLastSession = function () {
-          // If there are no more sessions
-          if (sessions.length === 0) {
-            // Filter items using given object
-            var items = trSaved.getItemsForObj(objid);
-            //
-            // Copy date into items array (so that callee can get it from there)
-            items.date = trSaved.date;
-            //
-            // Return to callee
-            return callback(items);
-          }
-          //
-          // Read last session in the list
-          var sess = sessions.pop();
-          var sessionFile = this.path + "/trans/" + sess.id;
-          this.readJSONFile(sessionFile, function (trlist, err) {
-            if (err) {
-              this.logger.log("ERROR", "Error reading the file " + sessionFile + ": " + err, "TwManager.getAllSavedTransItemsById");
-              return callback(null, err);
-            }
-            //
-            // Read all session's transactions
-            for (var i = trlist.length - 1; i >= 0; i--) {
-              var tr = new InDe.Transaction(this.doc.transManager);
-              tr.load(trlist[i]);
-              //
-              // Relink all transaction's items. Here I'm watching "old" transactions
-              // Moreover I'm interested in an object that is already in the document thus
-              // I don't care about RC nor AC... (i.e. the operation (undo/redo) should not be that important)
-              tr.preview("undo", true);   // Note: callee will clear the preview
-              //
-              // Store date of latest transaction
-              if (!trSaved.date)
-                trSaved.date = tr.date;
-              //
-              // Add all items to resultTr transaction
-              for (var j = tr.transItems.length - 1; j >= 0; j--)
-                trSaved.transItems.unshift(tr.transItems[j]);
-            }
-            //
-            readLastSession();      // Next one
-          }.bind(this));
-        }.bind(this);
-        //
-        readLastSession();
-      }.bind(this));
+  // First get all saved modifications
+  this.getAllSavedModifications({}, function (trans, err) {
+    if (err) {
+      this.logger.log("ERROR", "Error retrieving all saved modifications: " + err, "TwManager.getAllSavedTransItemsById");
+      return callback(null, err);
     }
-    else
-      callback();
+    //
+    // Filter items using given object
+    var items = trans.getItemsForObj(objid);
+    //
+    // Copy date into items array (so that callee can get it from there)
+    items.date = trans.date;
+    //
+    // Return to callee
+    return callback(items);
   }.bind(this));
 };
 
@@ -2431,11 +2293,11 @@ Node.TwManager.prototype.pullBranch = function (branchName, options, callback)
           // - this branch will be merged (with rebase, see above), and it will not be used like a normal branch for switching
           // - the sendDiffBranch does not have to send saved/memory modifications (like it would do for any normal branch)
           branch.type = Node.Branch.PR;
-          pthis.sendDiffBranch(branch.name);
+          pthis.sendDiffBranch({branch: branch.name});
           delete branch.type;
           //
           // Delete the received (temporary) branch
-          pthis.deleteBranch(branch.name, function (err) {
+          pthis.deleteBranch({branch: branch.name}, function (err) {
             if (err) {
               pthis.logger.log("WARN", "Error while deleting the diff branch: " + err, "TwManager.pullBranch", {branch: branch.name});
               return callback("Error while deleting the diff branch " + branch.name + ": " + err);
@@ -2454,21 +2316,29 @@ Node.TwManager.prototype.pullBranch = function (branchName, options, callback)
             }
             //
             // Delete the new branch
-            pthis.deleteBranch(branch.name, function (err) {
+            pthis.deleteBranch({branch: branch.name}, function (err) {
               if (err) {
                 pthis.logger.log("WARN", "Error while deleting the merged branch: " + err, "TwManager.pullBranch", {branch: branch.name});
                 return callback("Error while deleting the merged branch " + branch.name + ": " + err);
               }
               //
-              // Something has been fetched from my parent server...
-              // Now I need nothing from my parent
-              delete pthis.parentCommits;
-              //
-              // Update the client status
-              pthis.sendTWstatus();
-              //
-              // Operation completed
-              callback();
+              // Last, align HEAD (i.e. with overwrite)
+              pthis.saveHEAD({overwrite: true}, function (err) {
+                if (err) {
+                  pthis.logger.log("WARN", "Error while re-creating HEAD: " + err, "TwManager.pullBranch", {branch: branch.name});
+                  return callback("Error while re-creating HEAD: " + err);
+                }
+                //
+                // Something has been fetched from my parent server...
+                // Now I need nothing from my parent
+                delete pthis.parentCommits;
+                //
+                // Update the client status
+                pthis.sendTWstatus();
+                //
+                // Operation completed
+                callback();
+              });
             });
           });
         }

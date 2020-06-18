@@ -639,13 +639,18 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
     // First delete all packages to be removed (if any)
     if (toRemove)
       toRemove.forEach(function (pack) {
-        delete packageJson.dependencies[pack.split("@")[0]];
+        // Handle scoped and non-scoped packages (@google/pack@1.1.2, mypacket@1.2.3)
+        var packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
+        delete packageJson.dependencies[packName];
       });
     //
     // Then add new packages (if any)
     if (toAdd)
       toAdd.forEach(function (pack) {
-        packageJson.dependencies[pack.split("@")[0]] = pack.split("@")[1];
+        // Handle scoped and non-scoped packages (@google/pack@1.1.2, mypacket@1.2.3)
+        var packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
+        var packVer = pack.substring(pack.substring(1).indexOf("@") + 2);
+        packageJson.dependencies[packName] = packVer;
       });
     //
     // Remove the old BACK if present
@@ -686,8 +691,8 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
  * @param {request} req
  * @param {response} res
  */
-/* jshint maxstatements:120 */
-/* jshint maxcomplexity:40 */
+/* jshint maxstatements:140 */
+/* jshint maxcomplexity:50 */
 Node.Config.prototype.processRun = function (req, res)
 {
   // Possible URL formats:
@@ -928,17 +933,23 @@ Node.Config.prototype.processRun = function (req, res)
           if (!s.entityContainer)
             return false;
           //
-          return s.entityContainer.entitySet.find(function (e) {
+          if (s.entityContainer.entitySet.find(function (e) {
             if (e.name === cls) {
-              req.params.cls = (s.namespace === appName ? "" : s.namespace + ".") + e.name;
+              req.params.cls = e.name;
               return true;
             }
           }) || s.entityContainer.actionImport.find(function (a) {
             if (a.name === cls) {
-              req.params.cls = (s.namespace === appName ? "" : s.namespace + ".") + cls.split("__")[0];
+              req.params.cls = cls.split("__")[0];
               return true;
             }
-          });
+          })) {
+            if (s.namespace.toLowerCase() !== appName.toLowerCase())
+              req.params.cls = s.namespace + "." + req.params.cls;
+            return true;
+          }
+          else
+            return false;
         }))
           return req.next();
       }
@@ -970,7 +981,7 @@ Node.Config.prototype.processRun = function (req, res)
       res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
       //
       // Protects SID cookie
-      session.protectSID(res, expires);
+      session.protectSID(req, res);
     }
   }
   //
@@ -993,12 +1004,8 @@ Node.Config.prototype.processRun = function (req, res)
       session.request.url = req.url;
       session.request.method = req.method;
       session.request.headers = req.headers;
-      if (isWebApi) {
-        if (req.params.cls.startsWith(session.app.name + "."))
-          session.request.class = req.params.cls.split(".").slice(1).join(".");
-        else
-          session.request.class = req.params.cls;
-      }
+      if (isWebApi)
+        session.request.class = req.params.cls;
     }
     //
     if (params) {
@@ -1150,6 +1157,75 @@ Node.Config.prototype.initTokenTimer = function ()
  */
 Node.Config.prototype.sendStatus = function (params, callback)
 {
+  // Function that reply to callee
+  if (params.req.query.full) {
+    delete params.req.query.full;   // I don't want following commands to send FULL info
+    //
+    // Change callback to a smarter one that sends more data...
+    // I know, that's ugly... :-((
+    var oldCallback = callback;
+    callback = function (msg) {
+      if (typeof msg === "string")
+        return oldCallback(msg);
+      //
+      // If FULL mode -> add all other infos
+      this.sendSessionsList(params, function (res) {    // IDE sessions list
+        if (typeof res === "string")
+          return oldCallback(res);
+        //
+        result.sessions = JSON.parse(res.msg);
+        this.sendUsersList(params, function (res) {     // Users list
+          if (typeof res === "string")
+            return oldCallback(res);
+          //
+          // If there are no users it means that this is a PROD server -> add MANAGER
+          var userList = JSON.parse(res.msg);
+          if (userList.length === 0)
+            userList.push("manager");
+          //
+          result.users = [];
+          userList.forEach(function (u) {
+            var user = this.getUser(u);
+            var userInfo = {userName: user.userName};
+            //
+            user.sendAppSessions(params, function (res) {     // For each user: app sessions
+              if (typeof res === "string")
+                return oldCallback(res);
+              //
+              if (user.userName === "manager")
+                userInfo.appsessions = JSON.parse(res.msg);
+              user.sendAppsList(params, function (res) {     // For each user: apps
+                if (typeof res === "string")
+                  return oldCallback(res);
+                //
+                if (user.userName === "manager")
+                  userInfo.apps = JSON.parse(res.msg);
+                user.sendDatabasesList(params, function (res) {   // For each user: databases
+                  if (typeof res === "string")
+                    return oldCallback(res);
+                  //
+                  userInfo.databases = JSON.parse(res.msg);
+                  user.sendProjectsList(params, function (res) {   // For each user: projects
+                    if (typeof res === "string")
+                      return oldCallback(res);
+                    //
+                    if (user.userName !== "manager")
+                      userInfo.projects = JSON.parse(res.msg);
+                    //
+                    // Add to response and if this is the last one, reply
+                    result.users.push(userInfo);
+                    if (result.users.length === userList.length)
+                      oldCallback({msg: JSON.stringify(result)});
+                  }.bind(this));
+                }.bind(this));
+              }.bind(this));
+            }.bind(this));
+          }.bind(this));
+        }.bind(this));
+      }.bind(this));
+    }.bind(this);
+  }
+  //
   // Send the current server status (skip class name and users)
   var result = this.save();
   delete result.cl;
@@ -1208,7 +1284,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
         this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", process.pid], function (err, stdout, stderr) {   // jshint ignore:line
           if (err) {
             this.logger.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
-            return callback(null, "Error getting the CPU load: " + (stderr || err));
+            return callback("Error getting the CPU load: " + (stderr || err));
           }
           //
           stdout = stdout.split("\n")[1];   // Remove headers
@@ -1222,7 +1298,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
             this.server.execFileAsRoot("/usr/bin/top", ["-n"], function (err, stdout, stderr) {   // jshint ignore:line
               if (err) {
                 this.logger.log("ERROR", "Error getting the memory status: " + (stderr || err), "Config.sendStatus");
-                return callback(null, "Error getting the memory status: " + (stderr || err));
+                return callback("Error getting the memory status: " + (stderr || err));
               }
               //
               // Mem: 719M Active, 3832M Inact, 1196M Wired, 736M Buf, 1679M Free
@@ -1244,7 +1320,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
       this.server.execFileAsRoot("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           this.logger.log("ERROR", "Error getting the CPU load and memory status: " + (stderr || err), "Config.sendStatus");
-          return callback(null, "Error getting the CPU load and memory status: " + (stderr || err));
+          return callback("Error getting the CPU load and memory status: " + (stderr || err));
         }
         //
         // Mem: 719M Active, 3832M Inact, 1196M Wired, 736M Buf, 1679M Free
@@ -1668,137 +1744,7 @@ Node.Config.prototype.sendMessage = function (params, callback)
  */
 Node.Config.prototype.update = function (params, callback)
 {
-  // If the file is missing -> can't continue
-  if (!params.req.query.file) {
-    this.logger.log("WARN", "Missing FILE parameter", "Config.update");
-    return callback("Missing FILE parameter");
-  }
-  //
-  // Check if I'm already updating
-  if (this.isUpdating) {
-    this.logger.log("WARN", "The server is already updating", "Config.update");
-    return callback("The server is already updating");
-  }
-  this.isUpdating = true;
-  //
-  var pthis = this;
-  var foldername = params.req.query.file.substring(0, params.req.query.file.length - 7);      // Remove .tar.gz
-  //
-  // Compute source and destination paths
-  var pathCloud = "updates/" + params.req.query.file;
-  var path = Node.path.resolve(__dirname + "/../..") + "/update.tmp";
-  //
-  // Handle absolute URLs
-  if (params.req.query.file.toLowerCase().startsWith("http://") || params.req.query.file.toLowerCase().startsWith("https://")) {
-    // Recalc local variables
-    pathCloud = params.req.query.file;
-    foldername = foldername.substring(foldername.lastIndexOf("/") + 1);
-  }
-  //
-  // Create error function (plus clean up)
-  var errorFnc = function (err) {
-    pthis.logger.log("ERROR", err, "Config.update", {path: path, pathCloud: pathCloud});
-    //
-    // Remove temporary directory
-    Node.rimraf(path, function (err1) {
-      if (err1)
-        pthis.logger.log("WARN", "Can't remove temporary directory: " + err1, "Config.update", {path: path});
-      //
-      delete pthis.isUpdating;
-      callback(err);
-    });
-  };
-  //
-  // Create a temporary directory (in order to "protect" main dirs)
-  Node.fs.mkdir(path, function (err) {
-    if (err)
-      return errorFnc("Can't create temporary directory: " + err);
-    //
-    // Extract into temporary directory
-    var archiver = new Node.Archiver(pthis.server);
-    archiver.restore(path + "/" + foldername, pathCloud, function (err) {
-      if (err)
-        return errorFnc("Error restoring the update archive from the cloud: " + err);
-      //
-      // Compute the name of the directory (so that I can have a "logical name" that is different from what it contains)
-      Node.fs.readdir(path, function (err, files) {
-        if (err)
-          return errorFnc("Error restoring the update archive from the cloud: " + err);
-        //
-        // Search, within the archive, the first file that does not start with .
-        // (mac puts garbage inside TAR.GZ files...)
-        var dirname;
-        files.forEach(function (fn) {
-          if (!dirname && fn[0] !== ".")
-            dirname = fn;
-        });
-        //
-        // Copy tar.gz content onto main dirs
-        Node.ncp(path + "/" + dirname, path + "/..", function (err) {
-          if (err)
-            return errorFnc("Error copying the folders: " + err);
-          //
-          // Remove temporary directory (and all its content)
-          Node.rimraf(path, function (err) {
-            if (err)
-              return errorFnc("Error removing the update folder: " + err);
-            //
-            // Update package.json if needed
-            pthis.updatePackageJson(null, pthis.customPackages, function (err) {
-              if (err)
-                return errorFnc("Error while updating package.json file: " + err);
-              //
-              // If not skipped, update packages...
-              if (!params.req.query.nopackages) {
-                pthis.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
-                  if (err)
-                    return errorFnc("Error updating packages: " + (stderr || err));
-                  //
-                  fixIndeJSON();
-                });
-              }
-              else
-                setImmediate(fixIndeJSON);  // Use setImmediate so that I can write the fixIndeJSON code after this block
-              //
-              // If I'm on Node10 I need to "clean" the inde.json file
-              // TODO: Rimuovere prima o poi....
-              var fixIndeJSON = function () {
-                if (process.platform === "linux" && parseInt(process.versions.node.split(".")[0], 10) >= 10) {
-                  pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/--harmony_object_observe//", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
-                    if (err)
-                      return errorFnc("Error while fixing inde.json (1): " + (stderr || err));
-                    //
-                    pthis.server.execFileAsRoot("/bin/sed", ["-i", "s/\\[\\\"\\\"\\]/\\[\\]/", __dirname + "/../inde.json"], function (err, stdout, stderr) {   // jshint ignore:line
-                      if (err)
-                        return errorFnc("Error while fixing inde.json (2): " + (stderr || err));
-                      //
-                      completeUpdate();
-                    });
-                  });
-                }
-                else
-                  completeUpdate();
-              };
-              //
-              var completeUpdate = function () {
-                // If requested, reboot
-                if (params.req.query.reboot) {
-                  pthis.server.childer.send({type: Node.Config.msgTypeMap.execCmd, cmd: "reboot"});
-                  pthis.logger.log("INFO", "Reboot requested", "Config.update");
-                }
-                //
-                // LOG the operation
-                pthis.logger.log("INFO", "Update succeeded", "Config.update");
-                //
-                delete pthis.isUpdating;
-                callback({msg: "Update succeeded"});
-              };
-            });
-          });
-        });
-      });
-    });
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1810,214 +1756,7 @@ Node.Config.prototype.update = function (params, callback)
 /*jshint maxcomplexity:45 */
 Node.Config.prototype.configureCert = function (params, callback)
 {
-  /*
-   "SSLCert": "/mnt/disk/config/cert/406a935796b9f.crt",
-   "SSLKey": "/mnt/disk/config/cert/star_instantdevelopercloud_com.key",
-   "SSLCABundles": ["/mnt/disk/config/cert/gd_bundle.crt", "/mnt/disk/config/cert/gd_bundle-g1.crt", "/mnt/disk/config/cert/gd_bundle-g2.crt"],
-
-   BASE CERTIFICATE CONFIGURATION (i.e. *.instantdevelopercloud.com)
-   1) manager/cert/config?cert={SSLCert:<filename>, SSLKey:<filename>, SSLCABundles:[<filename1>, <filename2>, <filename3>]}
-   if the SSLCert was already there the system will delete the SSLCert file.
-   A new file have to be uploaded with a POST request manager/cert/upload
-   if the SSLKey was already there the system will delete the SSLKey file.
-   A new file have to be uploaded with a POST request manager/cert/upload
-   if the SSLCABundles was already there the system will delete the useless bundles.
-   One or more files have to be uploaded with several POST request manager/cert/upload
-
-   CUSTOM CERTIFICATES
-   1) manager/cert/add?cert={SSLDomain:<certdomain>, SSLCert:<filename>, SSLKey:<filename>, SSLCABundles:[<filename1>, <filename2>, <filename3>]}
-   One or more files have to be uploaded with several POST request manager/cert/upload
-
-   2) manager/cert/revoke?cert=<certdomain>
-   The system will delete all files used by the certificate then remove the certificate from the custom certificate array
-   */
-  //
-  var command = params.tokens[1];
-  var cert = params.req.query.cert;
-  var certPath = Node.path.resolve(__dirname + "/../../../config") + "/cert/";
-  //
-  // If it's not an upload and the CERT parameter is missing -> error
-  if (!cert && command !== "upload") {
-    this.logger.log("WARN", "Missing certificate object", "Config.configureCert");
-    return callback("Missing certificate object");
-  }
-  //
-  // For CONFIG and ADD cert value is a JSON.stringified object
-  // (for UPLOAD there is no cert parameter and for REVOKE cert is a string
-  if (command === "config" || command === "add") {
-    try {
-      cert = JSON.parse(cert);
-    }
-    catch (ex) {
-      this.logger.log("WARN", "Invalid cert format", "Config.configureCert", {cert: cert});
-      return callback("Invalid cert format");
-    }
-  }
-  //
-  var i, j, filesToRemove = [], saveConfig = false;
-  switch (command) {
-    case "config":
-      // If a new SSLCert has been provided
-      if (cert.SSLCert) {
-        // If there was already a SSLCert, remove the associated file
-        if (this.SSLCert)
-          filesToRemove.push(this.SSLCert);
-        this.SSLCert = certPath + cert.SSLCert;
-        saveConfig = true;
-        //
-        this.logger.log("DEBUG", "Updated SSLCert property", "Config.configureCert", {SSLCert: this.SSLCert});
-      }
-      //
-      // If a new SSLKey has been provided
-      if (cert.SSLKey) {
-        // If there was already a SSLKey, remove the associated file
-        if (this.SSLKey)
-          filesToRemove.push(this.SSLKey);
-        this.SSLKey = certPath + cert.SSLKey;
-        saveConfig = true;
-        //
-        this.logger.log("DEBUG", "Updated SSLKey property", "Config.configureCert", {SSLKey: this.SSLKey});
-      }
-      //
-      // If a new SSLCABundles has been provided
-      if (cert.SSLCABundles) {
-        // If there was already a SSLCABundles, remove the associated file
-        if (this.SSLCABundles) {
-          for (i = 0; i < this.SSLCABundles.length; i++)
-            if (cert.SSLCABundles.indexOf(this.SSLCABundles[i].substring(certPath.length)) === -1)     // File it's not there anymore
-              filesToRemove.push(this.SSLCABundles[i]);
-        }
-        //
-        this.SSLCABundles = [];
-        for (i = 0; i < cert.SSLCABundles.length; i++)
-          this.SSLCABundles.push(certPath + cert.SSLCABundles[i]);
-        saveConfig = true;
-        //
-        this.logger.log("DEBUG", "Updated SSLCABundles property", "Config.configureCert", {SSLCABundles: this.SSLCABundles});
-      }
-      break;
-
-    case "add":
-      if (!cert.SSLDomain || !cert.SSLCert || !cert.SSLKey || !cert.SSLCABundles) {
-        this.logger.log("WARN", "Invalid cert format (missing SSLDomain, SSLCert, SSLKey or SSLCABundles)", "Config.configureCert", cert);
-        return callback("Invalid cert format (missing SSLDomain, SSLCert, SSLKey or SSLCABundles)");
-      }
-      //
-      // If the domain exists -> that's an error
-      this.customSSLCerts = this.customSSLCerts || [];
-      for (i = 0; i < this.customSSLCerts.length; i++)
-        if (this.customSSLCerts[i].SSLDomain === cert.SSLDomain) {
-          this.logger.log("WARN", "Cert for domain " + cert.SSLDomain + " exists", "Config.configureCert", cert);
-          return callback("Cert for domain " + cert.SSLDomain + " exists");
-        }
-      //
-      cert.SSLCert = certPath + cert.SSLCert;
-      cert.SSLKey = certPath + cert.SSLKey;
-      for (i = 0; i < cert.SSLCABundles.length; i++)
-        cert.SSLCABundles[i] = certPath + cert.SSLCABundles[i];
-      this.customSSLCerts.push(cert);
-      saveConfig = true;
-      //
-      this.logger.log("DEBUG", "Added new custom certificate", "Config.configureCert", cert);
-      break;
-
-    case "revoke":
-      for (i = 0; i < (this.customSSLCerts || []).length; i++) {
-        if (this.customSSLCerts[i].SSLDomain === cert) {
-          this.logger.log("DEBUG", "Custom certificate revoked", "Config.configureCert", this.customSSLCerts[i]);
-          //
-          // Found! Remove the certificate
-          var revokedCert = this.customSSLCerts.splice(i, 1)[0];
-          //
-          // Check if some files have become useless and if that's the case, delete them
-          // To check, compute the list of currently used files
-          var usedFiles = [];
-          for (i = 0; i < this.customSSLCerts.length; i++) {
-            var c = this.customSSLCerts[i];
-            usedFiles.push(c.SSLCert);
-            usedFiles.push(c.SSLKey);
-            for (j = 0; j < (c.SSLCABundles || []).length; j++)
-              usedFiles.push(c.SSLCABundles[j]);
-          }
-          //
-          // Then check if the revoked certificate files are still used
-          if (usedFiles.indexOf(revokedCert.SSLCert) === -1)
-            filesToRemove.push(revokedCert.SSLCert);
-          if (usedFiles.indexOf(revokedCert.SSLKey) === -1)
-            filesToRemove.push(revokedCert.SSLKey);
-          for (j = 0; j < (revokedCert.SSLCABundles || []).length; j++)
-            if (usedFiles.indexOf(revokedCert.SSLCABundles[j]) === -1)
-              filesToRemove.push(revokedCert.SSLCABundles[j]);
-          //
-          // If this was the last one, remove the custom SSL array
-          if (this.customSSLCerts.length === 0)
-            delete this.customSSLCerts;
-          //
-          saveConfig = true;
-          break;
-        }
-      }
-      //
-      if (!saveConfig) {
-        this.logger.log("WARN", "Certificate " + cert + " not found", "Config.configureCert", {cert: cert});
-        return callback({code: 404, msg: "Certificate " + cert + " not found"});
-      }
-      break;
-
-    case "upload":
-      var form = new Node.multiparty.Form({autoFields: true, autoFiles: true, uploadDir: certPath});
-      form.parse(params.req, function (err, fields, files) {
-        if (err) {
-          this.logger.log("WARN", "Error parsing post request: " + err, "Config.configureCert");
-          return callback("Error parsing post request: " + err);
-        }
-        //
-        // Rename uploaded files
-        var nfiles = 0;
-        var farr = Object.keys(files);
-        for (i = 0; i < farr.length; i++) {
-          var k = farr[i];
-          var f = files[k][0];
-          var newfile = certPath + f.originalFilename;
-          Node.fs.rename(f.path, newfile, function (err) {
-            if (err) {
-              this.logger.log("WARN", "Error moving uploaded file: " + err, "Config.configureCert",
-                      {originalfile: f.originalFilename, newfile: newfile});
-              return callback("Error moving uploaded file: " + err);
-            }
-            //
-            // If it's the last one, report to callee
-            if (++nfiles === farr.length) {
-              this.logger.log("DEBUG", "Certificate files uploaded", "Config.configureCert", files);
-              callback();
-            }
-          }.bind(this));    // jshint ignore:line
-        }
-      }.bind(this));
-      return;   // Don't do anything else...
-
-    default:
-      this.logger.log("WARN", "Invalid command", "Config.configureCert", {cmd: command, url: params.req.originalUrl});
-      return callback("Invalid Command");
-  }
-  //
-  // If there are files to remove, remove them
-  for (i = 0; i < filesToRemove.length; i++)
-    (function (fn) {
-      Node.rimraf(fn, function (err) {
-        if (err)
-          this.logger.log("WARN", "Error removing the file " + fn + ": " + err, "Config.configureCert");
-        else
-          this.logger.log("DEBUG", "Removed useless file " + fn, "Config.configureCert");
-      }.bind(this));
-    }.bind(this))(filesToRemove[i]);    // jshint ignore:line
-  //
-  // If config has changed, save it
-  if (saveConfig)
-    this.saveConfig();
-  //
-  // Done!
-  callback();
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -2166,6 +1905,145 @@ Node.Config.prototype.checkDataDisk = function (params, callback)
 
 
 /**
+ * Backup all projects
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Config.prototype.backupProjects = function (params, callback)
+{
+  // Compute when the automatic backup was performed and get all projects that have been modified since then
+  var saveLimit;
+  if (params.req.query.fromDate)
+    saveLimit = new Date(params.req.query.fromDate);  // If a date was provided, use it
+  else if (!this.nigthlybucketGCloud || !this.daysBackups || !this.numMinBackups) {
+    // Auto-backup is not enabled -> back up all projects that have been modified in the last 24 hours
+    saveLimit = new Date();
+    saveLimit.setDate(saveLimit.getDate() - 1);
+  }
+  else {
+    // Periodic backup is enabled.
+    // Compute HOURS and MINUTES from timeBackup param
+    var hours = Math.floor((this.timeBackup || 0) / 100);
+    var mins = (this.timeBackup || 0) % 100;
+    //
+    // Compute how many ms there are from NOW to the expected backup time
+    var now = new Date();
+    saveLimit = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, mins, 0, 0);
+    if (saveLimit > now)
+      saveLimit.setDate(saveLimit.getDate() - 1);
+  }
+  //
+  this.logger.log("DEBUG", "Save limit for backing up: " + saveLimit, "Config.backupProjects");
+  //
+  // Compute which projects I have to backup
+  var prjsToBackup = [];
+  for (var i = 0; i < this.users.length; i++) {
+    var user = this.users[i];
+    for (var j = 0; j < user.projects.length; j++) {
+      var prj = user.projects[j];
+      //
+      // If the project is online -> stop
+      if (prj.isOnline()) {
+        this.logger.log("WARN", "The project is open", "Config.backupProjects", {user: user.userName, project: prj.name});
+        return callback("The project " + prj.user.userName + "/" + prj.name + " is open");
+      }
+      //
+      // Skip projects that have not been modified since the saveLimit
+      if (!prj.lastSave || new Date(prj.lastSave) < saveLimit)
+        continue;
+      //
+      // I have to backup this project
+      prjsToBackup.push(prj);
+    }
+  }
+  //
+  var backupLoop = function () {
+    // If there are no more projects to backup, I've done
+    if (prjsToBackup.length === 0)
+      return callback();
+    //
+    // Backup the first project in the list
+    prj = prjsToBackup.shift();
+    //
+    this.logger.log("DEBUG", "Backup project", "Config.backupProjects", {user: prj.user.userName, project: prj.name});
+    prj.nightlyBackup(function (err) {
+      if (err) {
+        this.logger.log("ERROR", "Can't backup project: " + err, "Config.backupProjects", {user: prj.user.userName, project: prj.name});
+        return callback("Can't backup project " + prj.user.userName + "/" + prj.name + ": " + err);
+      }
+      //
+      cleanBucket(prj, function (err) {
+        if (err) {
+          this.logger.log("ERROR", "Can't clean up project's bucket: " + err, "Config.backupProjects", {user: prj.user.userName, project: prj.name});
+          return callback("Can't clean up project's bucket: " + err);
+        }
+        //
+        // Next project
+        backupLoop();
+      }.bind(this));
+    }.bind(this));
+  }.bind(this);
+  //
+  var cleanBucket = function (prj, cb) {
+    var path = "users/" + this.serverType + "/" + prj.user.userName + "/backups/projects/" + prj.name + "/";
+    var msLimit = this.daysBackups * 24 * 3600 * 1000;   // Number of ms I have to keep the file for
+    var now = new Date();
+    //
+    // Get the list of all files in the cloud at the given project's backup path
+    var archiver = new Node.Archiver(this.server, true);
+    archiver.getFiles(path, function (err, files) {
+      if (err)
+        return cb("Can't enumerate files: " + err);
+      //
+      // If the number of files in the bucket is already at minimum, do nothing
+      this.logger.log("DEBUG", "#files in bucket: " + (files ? files.length : 0) + "/" + this.numMinBackups, "Config.backupProjects",
+              {project: prj.name, user: prj.user.userName});
+      if (!files || files.length <= this.numMinBackups)
+        return cb();
+      //
+      // Remove older ones
+      var checkFile = function (i) {
+        // If I've done -> report to callee
+        if (i === files.length)
+          return cb();
+        //
+        // Compute the file date
+        var fn = files[i];
+        //
+        // File name format: [project]-[date].tar.gz
+        // where [date] is in the ISO form without "-:T.Z" (thus YYYYMMDDHHMMSSmmm - see Node.Project.prototype.backup)
+        fn = fn.substring(0, fn.length - 7);     // Remove extension (.tar.gz)
+        fn = fn.substring(fn.lastIndexOf("-") + 1); // Get the DATE part
+        var dateFile = new Date(fn.substring(0, 4) + "-" + fn.substring(4, 6) + "-" + fn.substring(6, 8) + "T" +
+                fn.substring(8, 10) + ":" + fn.substring(10, 12) + ":" + fn.substring(12, 14) + "." + fn.substring(15) + "Z");
+        var msFileDelta = now - dateFile;
+        //
+        if (msFileDelta > msLimit) {
+          var ftodelete = files[i];
+          this.logger.log("DEBUG", "Remove older file " + ftodelete, "Config.backupProjects", {project: prj.name, user: prj.user.userName});
+          archiver.deleteFile(ftodelete, function (err) {
+            if (err)
+              return cb("Error removing file " + ftodelete + " from the project backup bucket: " + err);
+            //
+            // Next file
+            checkFile(i + 1);
+          }.bind(this));   // jshint ignore:line
+        }
+        else // No delete -> check the next one
+          checkFile(i + 1);
+      }.bind(this);
+      //
+      // Check first file
+      checkFile(0);
+    }.bind(this));
+  }.bind(this);
+  //
+  // Start back up
+  backupLoop();
+};
+
+
+/**
  * Initialize tracking
  * @param {function} callback (err or {err, msg, code})
  */
@@ -2181,7 +2059,9 @@ Node.Config.prototype.initTracking = function (callback)
   //
   var Postgres = require("../../ide/app/server/postgres");
   var trackDB = new Postgres();
+  /* jshint ignore:start */
   trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "GMu4qCtqK2ylk1a9+xpSzw==", "name": "IssueApplicationID", "datatype": "id", "maxlen": 24}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "uuxk4NaVz0wfFNt9+NK2rw==", "name": "BuildName", "datatype": "vc"}, {"id": "zZqgdCi9k5ffG38wROQ4ug==", "name": "BuildFormat", "datatype": "vc", "maxlen": 3}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "LinkedObject", "datatype": "j"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}, {"id": "TneyghFUGS6pK5F5B9JGVA==", "name": "NotificationEmails", "datatype": "vc"}, {"id": "v/ljRAQzPtMNI8sRsL+yGg==", "name": "ForkChainID", "datatype": "id", "maxlen": 24}], "fks": [{"id": "dPSTX+LzXuTMSoAcVUIT4A==", "name": "fkIssueApplications", "t": "IssueApplications", "ur": "c", "dr": "c", "refs": {"GMu4qCtqK2ylk1a9+xpSzw==": "ID"}}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}, {"id": "kr3qP6vuLOc4E31EN0UVwQ==", "name": "IssueApplications", "fields": [{"id": "FSAY7uGwp8zhmf7mocRjTA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "D7rgv3xFaWjP3A7yUv82+A==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "KVVu0MTG5AtVzUC1xJdphg==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "cu2THSSWPeLnH8qKW0NMXA==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "VF7d2FtNzhEMBee1dGzOAQ==", "name": "ApplicationName", "datatype": "vc"}, {"id": "e0FdPOi5ITQlMXyKE5J6Pg==", "name": "Format", "datatype": "vc", "maxlen": 3, "notn": true}]}]};
+  /* jshint ignore:end */
   trackDB.initDbConString("postgres://" + this.dbUser + ":" + this.dbPassword + "@" + this.dbAddress + ":" + this.dbPort);
   //
   // Replace the standard createDb function (normally the updateSchema method is called from a child process
@@ -2396,6 +2276,9 @@ Node.Config.prototype.execCommand = function (params, callback)
       break;
     case "checkdisk":
       this.checkDataDisk(params, callback);
+      break;
+    case "backupprj":
+      this.backupProjects(params, callback);
       break;
     default:
       // For any other command ask MANAGER user

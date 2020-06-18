@@ -54,7 +54,10 @@ Node.IDESession = function (prj, options, callback)
   this.createChild();
   //
   // The client have to "confirm" its initialization in 1 minute... otherwise this session is lost
-  this.startAutoKillTimer(60000);
+  // (do it only for "ide-like" sessions, not for "working" sessions like "buildProject", "backupBranch", "restoreBranch",
+  // "TWrestore", "teamworksCmd")
+  if (this.options.type === "ide" || this.options.type === "tutorial")
+    this.startAutoKillTimer(60000);
 };
 
 
@@ -354,14 +357,31 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
 /**
  * Protects the SID
  * Adds a cookie to the given request in order to protect my SID
+ * @param {HTTPRequest} req
  * @param {HTTPResponse} res
  */
-Node.IDESession.prototype.protectSID = function (res)
+Node.IDESession.prototype.protectSID = function (req, res)
 {
   // Add another HTTP-only cookie that will "protect" the SID/CID cookie
   var secure = (!this.config.local && this.config.protocol === "https");
   this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
   res.cookie(this.id + "_secureSID", this.secureSID, {path: "/", httpOnly: true, secure: secure});
+  //
+  // Remove old _secureSID cookies
+  // (for every cookie there have to be a valid IDE/APP session...
+  // if such session is not there the corresponding cookie is old and useles)
+  var cookies = Node.cookie.parse(req.headers.cookie || "{}");
+  Object.keys(cookies).forEach(function (key) {
+    if (!key.endsWith("_secureSID"))
+      return;
+    //
+    var sid = key.substring(0, key.length - "_secureSID".length);
+    var session = (this.server.IDESessions[sid] || this.server.appSessions[sid]);
+    if (!session) {
+      this.log("DEBUG", "Remove OLD cookie " + key, "IDESession.protectSID");
+      res.clearCookie(key);
+    }
+  }.bind(this));
 };
 
 
@@ -436,7 +456,7 @@ Node.IDESession.prototype.processMessage = function (msg)
       break;
 
     case Node.IDESession.msgTypeMap.prjSaved:     // Project was saved in the child process -> update config's data
-      this.project.updateInfo("save", msg);
+      this.project.updateInfo(msg.info);
       break;
 
     case Node.IDESession.msgTypeMap.sessionCompleted:      // I've done my job
@@ -588,17 +608,10 @@ Node.IDESession.prototype.handleCreateDBMsg = function (msg)
 Node.IDESession.prototype.handleSendResponseMsg = function (msg)
 {
   if (!this.restRes)
-    return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)", "IDESession.handleSendResponseMsg", msg);
+    return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)",
+            "IDESession.handleSendResponseMsg", msg);
   //
-  this.log("DEBUG", "Sending REST response", "IDESession.handleSendResponseMsg", msg);
-  //
-  // Adapt objects
-  if (typeof msg.code === "object") {   // If someone wrote app.sendResponse({code: 200, text: "ok"})
-    msg.text = msg.text || msg.code.text;
-    msg.code = (msg.code.code || 0);
-  }
-  if (typeof msg.text === "object")
-    msg.text = JSON.stringify(msg.text);
+  this.log("DEBUG", "Send REST response", "IDESession.handleSendResponseMsg", msg);
   //
   // Handle options, if any
   if (typeof msg.code === "string")
@@ -613,14 +626,23 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
   }
   //
   try {
-    // Send code and headers
-    if (msg.options.headers && typeof msg.options.headers === "object")
-      this.restRes.writeHead(msg.code, msg.options.headers);
-    else
-      this.restRes.status(msg.code);
+    // Send headers
+    if (msg.options.headers && typeof msg.options.headers === "object") {
+      Object.keys(msg.options.headers).forEach(function (header) {
+        this.restRes.setHeader(header, msg.options.headers[header]);
+      }.bind(this));
+    }
+    //
+    // Send code
+    this.restRes.status(msg.code);
     //
     // Send response
-    this.restRes.end(msg.text + "");
+    if (msg.options.type === "buffer")
+      this.restRes.end(Buffer.from(msg.text, "base64"));
+    else if (msg.options.type === "file")
+      this.restRes.sendFile(msg.text);
+    else
+      this.restRes.end(typeof msg.text !== "string" ? JSON.stringify(msg.text) : msg.text);
   }
   catch (ex) {
     this.log("WARN", "Can't send REST response: " + ex, "IDESession.handleSendResponseMsg", msg);

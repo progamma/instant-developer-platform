@@ -307,7 +307,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                     // tar.gz uses some junky library that has a problem: if the file has an invalid format
                     // the extract method crashes in an asynchronous way... thus there is no way of knowing
                     // if something is wrong... Thus, before I extract the file, I check if it's correct
-                    Node.zlib.gunzip(Node.fs.readFileSync(newfile), function (err, buffer) {
+                    Node.zlib.gunzip(Node.fs.readFileSync(newfile), function (err, buffer) {    // jshint ignore:line
                       if (err)
                         return callback("Error while checking the " + newfile + ": " + err);
                       //
@@ -354,7 +354,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                             // Ensure parent directory exists
                             Node.fsExtra.mkdirs(Node.path.dirname(entry.fileName), function (err) {
                               if (err)
-                                return cb(err);
+                                return callback("Error while ensuring parent directory " + Node.path.dirname(entry.fileName) + " existence: " + err);
                               //
                               var output = Node.fs.createWriteStream(options.path + "/" + entry.fileName);
                               output.on("open", function () {
@@ -373,7 +373,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                       zipfile.on("error", function (error) {
                         return callback("Error while extracting the ZIP file: " + error);
                       });
-                      zipfile.on("end", function (error) {
+                      zipfile.on("end", function () {
                         ok = true;
                       });
                       zipfile.on("close", function () {

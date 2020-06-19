@@ -989,8 +989,13 @@ Node.Config.prototype.processRun = function (req, res)
   var newAppReq = function (req, res, session, params) {
     var oldreq = session.request;
     session.request = {query: req.query, body: req.body};
-    if (req.connection && req.connection.remoteAddress)
+    if (req.connection && req.connection.remoteAddress) {
       session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, "");
+      session.request.originalReqHeaders  = req.headers;
+      session.request.originalAddress = (req.headers['x-forwarded-for'] || req.connection.remoteAddress).replace(/^.*:/, "");
+      var re = /(^127\.0\.0\.1)|(^10\.)|(^172\.1[6-9]\.)|(^172\.2[0-9]\.)|(^172\.3[0-1]\.)|(^192\.168\.)|localhost/;
+      session.request.isFromLAN = re.test(session.request.originalAddress);
+    }
     session.cookies = req.cookies;
     //
     if (isRest || isWebApi) {

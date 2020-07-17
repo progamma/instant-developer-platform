@@ -366,6 +366,36 @@ Node.App.prototype.deleteWorker = function (worker)
 
 
 /**
+ * Send the "install" message to the App
+ * @param {object} options for install (see App::handleInstallMsg in app.js (app/server))
+ * @param {function} callback (result)
+ */
+Node.App.prototype.sendInstallToApp = function (options, callback)
+{
+  // Create a dummy worker so that I can send install to app
+  var worker = new Node.Worker(this);
+  //
+  // Store a callback in the worker so that it will be called when install is completed
+  worker.installCallback = function (result) {
+    // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
+    // then I have to kill it directly!)
+    if (worker.child)     // Only if it's still alive
+      worker.child.kill();
+    else
+      result.err = result.err || "Child process is dead";
+    //
+    // Done!
+    callback(result);
+  }.bind(this);
+  //
+  // Create the worker and tell him that the app have to be installed
+  worker.createChild();
+  worker.stopWatchDog();  // I don't need it
+  worker.child.send({type: Node.Worker.msgTypeMap.install, cnt: options});
+};
+
+
+/**
  * Send the actual status of the App
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -489,31 +519,17 @@ Node.App.prototype.deleteDttSessions = function (params, callback)
  */
 Node.App.prototype.start = function (params, callback)
 {
-  // Create a dummy worker so that I can check all app DBs
-  var worker = new Node.Worker(this);
-  //
-  // Store a callback in the worker so that it will be called when check is completed
-  worker.installCallback = function (result) {
-    // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
-    // then I have to kill it directly!)
-    if (worker.child)     // Only if it's still alive
-      worker.child.kill();
-    else
-      result.err = result.err || "Child process is dead";
-    //
+  // Send "install" message to app and wait for reply
+  this.sendInstallToApp({updateDB: false}, function (result) {
     // If there is an error, stop
     if (result.err) {
       this.log("WARN", "Error while starting the app: " + result.err, "App.start");
       return callback("Error while starting the app: " + result.err);
     }
     //
-    // Update app's info
-    this.updating = false;  // If the app was updating, from now on it's not
-    this.stopped = false;   // If the app was stopped, from now on it's not
-    this.version = result.appinfo.version;
-    this.date = result.appinfo.date;
-    //
-    // Save config
+    // App is started -> save config
+    this.updating = false;
+    this.stopped = false;
     this.config.saveConfig();
     //
     // If needed, start app's server session
@@ -522,13 +538,8 @@ Node.App.prototype.start = function (params, callback)
     // Log the operation
     this.log("INFO", "Application started", "App.start");
     //
-    // Done!
     callback();
-  }.bind(this);
-  //
-  // Create the worker and tell him that the app have to be installed
-  worker.createChild();
-  worker.child.send({type: Node.Worker.msgTypeMap.install});
+  }.bind(this));
 };
 
 
@@ -542,6 +553,9 @@ Node.App.prototype.stop = function (params, callback)
   // App is stopped -> save config
   this.stopped = true;
   this.config.saveConfig();
+  //
+  // If needed, stop app's server session
+  this.stopDefaultServerSession();
   //
   // Log the operation
   this.log("INFO", "Application stopped", "App.stop");
@@ -650,6 +664,17 @@ Node.App.prototype.uninstall = function (params, callback)
       });
     });
   });
+};
+
+
+/**
+ * Updates app's DBs schema
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.App.prototype.updateDBschema = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1010,6 +1035,9 @@ Node.App.prototype.execCommand = function (params, callback)
       break;
     case "restore":
       this.restore(params, callback);
+      break;
+    case "updatedbschema":
+      this.updateDBschema(params, callback);
       break;
     case "filesystem":
       this.handleFileSystem(params, callback);

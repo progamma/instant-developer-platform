@@ -206,8 +206,8 @@ Node.Project.prototype.createProjectFolder = function (callback)
 {
   var pthis = this;
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name;
-  var foldersToCreate = ["/", "/resources", "/files", "/tutorials", "/files/blobs", "/files/temp",
-    "/files/private", "/files/uploaded", "/branches"];
+  var foldersToCreate = ["/", "/branches", "/build", "/files", "/files/blobs", "/files/private", "/files/temp",
+    "/files/uploaded", "/resources", "/tutorials"];
   //
   var createFolder = function () {
     // If all folder have been created
@@ -307,7 +307,7 @@ Node.Project.prototype.editProject = function (params, callback)
   delete this.token;
   //
   // First try to see if there is an open session for this project...
-  var session = this.server.getOpenSession(this);
+  var session = this.server.getOpenSession(this, {type: "ide", readOnly: undefined});
   //
   // If there is already a session
   if (session) {
@@ -425,9 +425,9 @@ Node.Project.prototype.downloadFile = function (params, callback)
   // Send the file only if there is an editing session
   // (don't check resources/libusage.json... that file is asked whenever the callee needs it)
   if (folder !== "resources" || filename !== "libusage.json") {
-    var session = this.server.getOpenSession(this, true);
+    var session = this.server.getOpenSession(this, {request: params.req});
     if (!session) {
-      this.log("WARN", "No session is asking for this file", "Project.downloadFile");
+      this.log("WARN", "No session is asking for this file", "Project.downloadFile", {path: path});
       return callback("No session is asking for this file");
     }
   }
@@ -607,7 +607,14 @@ Node.Project.prototype.uploadResource = function (params, callback)
   }
   //
   // Get the session that will receive this resource
-  var session = this.server.getOpenSession(this, true);
+  var session = this.server.getOpenSession(this, {type: "ide", readOnly: undefined, request: params.req});
+  if (!session) {
+    // Session is not there... check if it's a course... he is allowed to upload files
+    // (course is IDE, readonly with openParams.course)
+    session = this.server.getOpenSession(this, {type: "ide", readOnly: true, request: params.req});
+    if (session && (!session.options.openParams || !session.options.openParams.course))
+      session = null;
+  }
   if (!session) {
     this.log("WARN", "No session is waiting for this resource", "Project.uploadResource");
     return callback("No session is waiting for this resource");
@@ -732,7 +739,7 @@ Node.Project.prototype.configure = function (params, callback)
   // have to "apply" that configuration change into the project. If everything is fine I can report to callee
   if (query.description !== undefined || query.iconUrl !== undefined) {
     // Configure the project. If there is an open session it can't be done
-    if (this.server.getOpenSession(this, true)) {
+    if (this.server.getOpenSession(this)) {
       this.log("WARN", "Can't configure the project: open IDE session", "Project.configure");
       return callback("Can't configure the project: open IDE session");
     }
@@ -1066,7 +1073,7 @@ Node.Project.prototype.renameProject = function (params, callback)
   }
   //
   // If there is an open session I can't rename the project!
-  if (this.server.getOpenSession(this, true)) {
+  if (this.server.getOpenSession(this)) {
     this.log("WARN", "Can't rename the project: open IDE session", "Project.renameProject");
     return callback("Can't rename the project: open IDE session");
   }
@@ -1222,7 +1229,7 @@ Node.Project.prototype.restoreBranch = function (params, callback)
     //
     // Check if there is an open session for this project. If so, when I've finisched, I can tell
     // the session that it has to update its TeamWorks UI
-    var session = pthis.server.getOpenSession(pthis);
+    var session = pthis.server.getOpenSession(pthis, {type: "ide", readOnly: undefined});
     //
     var opt = {type: "restoreBranch", branch: branch, msg: message, pr: pr, srcUser: srcUser, srcProject: srcProject, srcCompany: srcCompany};
     pthis.server.createSession(pthis, opt, function (result) {
@@ -1299,7 +1306,7 @@ Node.Project.prototype.uploadRecFile = function (params, callback)
   var filePath = path + params.req.query.dir;
   //
   // Get the session that will receive this rec file
-  var session = this.server.getOpenSession(this, true);
+  var session = this.server.getOpenSession(this, {type: "ide", readOnly: undefined, request: params.req});
   if (!session) {
     this.log("WARN", "No session is waiting for this tutorial rec file", "Project.uploadRecFile");
     return callback("No session is waiting for this tutorial rec file");
@@ -1392,7 +1399,7 @@ Node.Project.prototype.updateTutProject = function (params, callback)
   var pthis = this;
   //
   // Get the session that will receive this rec file
-  var session = this.server.getOpenSession(this);
+  var session = this.server.getOpenSession(this, {type: "ide", readOnly: undefined, request: params.req});
   if (!session) {
     this.log("WARN", "No session is waiting for this tutorial project", "Project.updateTutProject");
     return callback("No session is waiting for this tutorial project");

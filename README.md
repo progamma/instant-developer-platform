@@ -7,9 +7,9 @@
 1. [Download del pacchetto da github e configurazione](#download-del-pacchetto-da-github-e-configurazione)
 
 ### Installazione di Node.js
-La versione di riferimento è Node.js 10.18.1. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
+La versione di riferimento è Node.js 12.18.0. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 
-> curl -sL https://deb.nodesource.com/setup_10.x | sudo bash
+> curl -sL https://deb.nodesource.com/setup_12.x | sudo bash
 
 > sudo apt-get install -y nodejs
 

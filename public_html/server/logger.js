@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2016
  * All rights reserved
  */
-/* global require, process, module, __dirname */
+/* global require, process, module, __dirname, __filename */
 
 var Node = Node || {};
 
@@ -69,6 +69,9 @@ Node.Logger.prototype.init = function ()
     //
     // Create the LOG file
     this.initLogFile();
+    //
+    // Create timer that checks if I need to stop writing due to disk space or file size
+    this.startCheckTimer();
   }
 };
 
@@ -101,6 +104,9 @@ Node.Logger.prototype.initLogFile = function ()
     //
     delete this.ISOdate;
     delete this.stream;
+    //
+    // Recheck stop logging file size
+    delete this.stopLogFileSize;
   }
   //
   // If there is no DATE -> date is NOW()
@@ -168,6 +174,10 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   if (message.indexOf("Buffer() is deprecated due to security and usability issues") !== -1)
     return;
   //
+  // If log has stopped, do nothing
+  if (this.stopLogFileSize || this.stopLogDiskSize)
+    return;
+  //
   // Protect for un-serializable data
   if (data) {
     try {
@@ -230,6 +240,73 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   // Log message to physical file
   var l = {dt: new Date().toISOString(), lev: level, msg: message.replace(/\n/g, ""), snd: sender, data: data};
   this.stream.write(JSON.stringify(l) + "\n");
+};
+
+
+/**
+ * Starts an interval that checks if:
+ * - file size is bigger than 200 MB
+ * - left disk space is less than 1GB
+ */
+Node.Logger.prototype.startCheckTimer = function ()
+{
+  // Start check timer
+  setInterval(function () {
+    // If log has stopped due to file size, do nothing
+    // (a new file will ha to be generated in order to check for something else)
+    if (this.stopLogFileSize)
+      return;
+    //
+    // Check file size
+    if (this.stream)
+      Node.fs.stat(this.stream.path, function (err, stats) {
+        if (err)
+          return this.log("ERROR", "Error getting the LOG size: " + err, "Logger.startCheckTimer");
+        //
+        // LOG file is too big... stop writing to disk
+        if (stats.size > 200 * 1024 * 1024) {
+          this.log("WARN", "LOG file is too big", "Logger.startCheckTimer", {size: stats.size, path: this.stream.path});
+          this.stopLogFileSize = true;
+          return;
+        }
+      }.bind(this));
+    //
+    // Check disk size
+    var cmd, cmdParams;
+    if (!/^win/.test(process.platform)) {   // linux
+      cmd = "/bin/df";
+      cmdParams = ["."];
+    }
+    else {  // windows
+      cmd = "wmic";
+      cmdParams = ["logicaldisk", "where", "DeviceID='" + __filename[0] + ":'", "get", "freespace,size", "/format:table"];
+    }
+    this.parent.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {   // jshint ignore:line
+      if (err)
+        return this.log("ERROR", "Error getting the disk size: " + (stderr || err), "Logger.startCheckTimer");
+      //
+      stdout = stdout.split("\n")[1];   // Remove headers
+      stdout = stdout.split(/\s+/);     // Split spaces
+      //
+      var diskStat;
+      if (!/^win/.test(process.platform))    // linux
+        diskStat = {size: stdout[1] * 1024, available: stdout[3] * 1024};
+      else   // windows
+        diskStat = {size: stdout[1], available: stdout[0]};
+      //
+      // If disk left is less than 1GB stop writing
+      if (diskStat.available < 1 * 1024 * 1024 * 1024) {
+        // LOG file is too big... stop writing to disk
+        this.log("WARN", "Disk space left on device is too low", "Logger.startCheckTimer", diskStat);
+        this.stopLogDiskSize = true;
+      }
+      else if (this.stopLogDiskSize) {
+        // LOG file was too big... now it's good... restart log writing
+        delete this.stopLogDiskSize;
+        this.log("WARN", "Disk space left on device is good -> resume logging", "Logger.startCheckTimer", diskStat);
+      }
+    }.bind(this));
+  }.bind(this), 3 * 60 * 1000);    // Every 3 minutes
 };
 
 

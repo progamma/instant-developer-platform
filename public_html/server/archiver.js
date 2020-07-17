@@ -16,7 +16,7 @@ Node.archiver = require("archiver");
 Node.AWS = require("aws-sdk");
 Node.rimraf = require("rimraf");
 Node.fs = require("fs");
-Node.googleCloudStorage = require("@google-cloud/storage");
+Node.googleCloudStorage = require("@google-cloud/storage").Storage;
 Node.http = require("http");
 Node.https = require("https");
 
@@ -31,11 +31,11 @@ Node.Archiver = function (par, nightly)
   this.parent = par;
   //
   if (this.config.storage === "gcloud") {
-    var storage = Node.googleCloudStorage(this.config.configGCloudStorage);
+    var storage = new Node.googleCloudStorage(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
     if (nightly)
-      Node.indertBucket = storage.bucket(this.config.nigthlybucketGCloud);
+      this.indertBucket = storage.bucket(this.config.nigthlybucketGCloud);
     else
-      Node.indertBucket = storage.bucket(this.config.bucketGCloud);
+      this.indertBucket = storage.bucket(this.config.bucketGCloud);
   }
 };
 
@@ -67,7 +67,7 @@ Node.Archiver.prototype.upload = function (pathFile, pathCloud, callback)
   //
   // If the storage is gcloud
   if (this.config.storage === "gcloud") {
-    var file = Node.indertBucket.file(pathCloud);
+    var file = this.indertBucket.file(pathCloud);
     var readStream = Node.fs.createReadStream(pathFile);
     var writeStream = file.createWriteStream({resumable: false});
     readStream.pipe(writeStream);
@@ -144,7 +144,7 @@ Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
   //
   // If the storage is gcloud
   if (this.config.storage === "gcloud") {
-    var file = Node.indertBucket.file(pathCloud);
+    var file = this.indertBucket.file(pathCloud);
     var readStream = file.createReadStream();
     var writeStream = Node.fs.createWriteStream(pathFile);
     readStream.pipe(writeStream);
@@ -158,6 +158,7 @@ Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
       callback(err);
       //
       // In this particular case an empty file remains here. Delete it!
+      writeStream.end();
       Node.rimraf(pathFile, function () {
       });
     });
@@ -400,7 +401,7 @@ Node.Archiver.prototype.getFiles = function (path, callback)
 {
   var pthis = this;
   //
-  Node.indertBucket.getFiles({prefix: path}, function (err, files, nextQuery, apiResponse) {    // jshint ignore:line
+  this.indertBucket.getFiles({prefix: path}, function (err, files, nextQuery, apiResponse) {    // jshint ignore:line
     if (err) {
       pthis.logger.log("ERROR", "Error while reading files list from GCloud: " + err, "Archiver.getFiles", {path: path});
       return callback("Error while reading files list from GCloud: " + err);
@@ -422,7 +423,7 @@ Node.Archiver.prototype.getFiles = function (path, callback)
  */
 Node.Archiver.prototype.deleteFile = function (path, callback)
 {
-  var file = Node.indertBucket.file(path);
+  var file = this.indertBucket.file(path);
   file.delete(function (err) {
     callback(err);
   });
@@ -441,7 +442,7 @@ Node.Archiver.prototype.saveObject = function (pathCloud, obj, callback)
   //
   // If the storage se is gcloud
   if (this.config.storage === "gcloud") {
-    var file = Node.indertBucket.file(pathCloud);
+    var file = this.indertBucket.file(pathCloud);
     //
     // copy the file into the cloud
     var wsFile = file.createWriteStream({resumable: false});
@@ -485,7 +486,7 @@ Node.Archiver.prototype.readObject = function (pathCloud, callback)
   //
   // If the storage se is gcloud
   if (this.config.storage === "gcloud") {
-    var file = Node.indertBucket.file(pathCloud);
+    var file = this.indertBucket.file(pathCloud);
     var rsFile = file.createReadStream();
     rsFile.read();
     //

@@ -87,12 +87,9 @@ Node.createServer = function ()
  */
 Node.Server.prototype.initServer = function ()
 {
-  // Detect server type: production, local
-  var srvtype = "prod";
-  //
   // Load the configuration from the json file
   this.config = new Node.Config(this);
-  this.config.local = (srvtype === "local");
+  this.config.local = Node.fs.existsSync(__dirname + "/config.json"); // local if config.json is "close" to this file (server.js)
   this.config.loadConfig();
   console.log("Current server mode: " + (this.config.local ? "LOCAL" : "PROD"));
   //
@@ -273,6 +270,9 @@ Node.Server.prototype.start = function ()
   // Start the periodic back-up of the disk
   this.backupDisk();
   //
+  // Rotate logs (console.log and console.error)
+  this.startLogRotate();
+  //
   // Create a new AUTK token and send it (if needed)
   this.config.initTokenTimer();
   //
@@ -329,6 +329,16 @@ Node.Server.prototype.start = function ()
     pthis.sendServiceWorker(req, res);
   });
   //
+  // Invalidate old manifest used by 19.5-
+  // (https://www.html5rocks.com/en/tutorials/appcache/beginner/
+  // If the manifest itself returns a 404 or 410, the cache is deleted.)
+  Node.app.get("/application.manifest", function (req, res) {
+    res.status(404).end();
+  });
+  Node.app.get("/:app/client/application.manifest", function (req, res) {
+    res.status(404).end();
+  });
+  //
   // Inizialize static file management for express with maxAge=5min (not for local servers)
   var expOpts = (this.config.local ? undefined : {index: false, redirect: false, maxAge: 300000});
   var idePath = Node.path.resolve(__dirname + "/../ide");
@@ -338,6 +348,16 @@ Node.Server.prototype.start = function ()
   }
   if (this.config.appDirectory) {    // MASTER
     this.logger.log("INFO", "Start EXPRESS for MASTER", "Server.start", {path: this.config.appDirectory + "/apps"});
+    //
+    // If there is a default app and the IDE path does not exist (MyCloud server)
+    // route all SERVER/app/client/XXX requests that normally goes to the IDE side onto the default app
+    if (this.config.defaultApp && !Node.fs.existsSync(idePath)) {
+      var defAppPath = this.config.appDirectory + "/apps/" + this.config.defaultApp + "/client";
+      if (Node.fs.existsSync(defAppPath)) {
+        this.logger.log("INFO", "Start EXPRESS for DEFAULT APP (IDE-like: /app/client path)", "Server.start", {path: defAppPath});
+        Node.app.use("/app/client", Node.express.static(defAppPath, expOpts));
+      }
+    }
     //
     // Use, for every app, maxAge=1 year for uploaded and resources... if they change, their name will change
     if (expOpts)
@@ -1041,9 +1061,9 @@ Node.Server.prototype.closeSession = function (session)
 /**
  * Returns an open session for the given project
  * @param {Node.Project} project
- * @param {boolean} anytype - if true search for any (non ide, readonly, etc...) session
+ * @param {boolean} filter - search parameters (type:"*|ide", ip:IPADDRESS)
  */
-Node.Server.prototype.getOpenSession = function (project, anytype)
+Node.Server.prototype.getOpenSession = function (project, filter)
 {
   var keys = Object.keys(this.IDESessions);
   for (var i = 0; i < keys.length; i++) {
@@ -1053,12 +1073,43 @@ Node.Server.prototype.getOpenSession = function (project, anytype)
     if (sess.project !== project)
       continue;
     //
-    // It's a session for the given project. If I'm not interested in a specific type, I've done
-    if (anytype)
-      return sess;
+    var sessMatches = true; // Be positive
     //
-    // I'm interested in a "true" IDE editing session
-    if (sess.options.type === "ide" && !sess.options.readOnly)
+    var filterKeys = Object.keys(filter);
+    for (var j = 0; j < filterKeys.length && sessMatches; j++) {
+      var k = filterKeys[j];
+      //
+      var val = sess.options[k];
+      if (k === "request") {
+        // Here I need to check if REQUEST is valid...
+        // Checking for IP address
+        var sessIP = (sess.masterClientSod && sess.sockets[sess.masterClientSod] &&
+                sess.sockets[sess.masterClientSod].conn ? sess.sockets[sess.masterClientSod].conn.remoteAddress : "!");  // Master's IP address
+        var filterIP = (filter.request.connection ? filter.request.connection.remoteAddress : "?");
+        if (sessIP !== filterIP) {
+          sessMatches = false;
+          //
+          // It could be that a connected device is asking for this...
+          for (var k = 0; k < sess.project.user.devices.length && !sessMatches; k++) {
+            var device = sess.project.user.devices[k];
+            if (device.socket) {
+              var devIP = (device.socket.conn ? device.socket.conn.remoteAddress : "!");
+              if (devIP === filterIP)
+                sessMatches = true;
+            }
+          }
+        }
+        //
+        // Request matched... next filter criteria
+        continue;
+      }
+      //
+      if (val !== filter[k])
+        sessMatches = false;
+    }
+    //
+    // If matches -> search completed!
+    if (sessMatches)
       return sess;
   }
 };
@@ -1380,9 +1431,9 @@ Node.Server.prototype.backupDisk = function (scheduled)
   //
   // Function that schedules the backup of the data disk and clean up old snapshots
   var doBackup = function () {
-    this.logger.log("DEBUG", "Start disk backup", "Server.backupDisk", this.backupInfo);
+    this.logger.log("INFO", "Start disk backup", "Server.backupDisk", this.backupInfo);
     //
-    var gce = Node.googleCloudCompute(this.config.configGCloudStorage);
+    var gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
     var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
     var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
     //
@@ -1398,6 +1449,8 @@ Node.Server.prototype.backupDisk = function (scheduled)
       }.bind(this));
       //
       operation.on("complete", function (metadata) {    // jshint ignore:line
+        this.logger.log("INFO", "Disk backup completed", "Server.backupDisk", this.backupInfo);
+        //
         // Snapshot created, now clean up (if needed)
         // List all snapshots for this disk
         gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
@@ -1442,6 +1495,23 @@ Node.Server.prototype.backupDisk = function (scheduled)
 
 
 /**
+ * Rotate logs (console.log and console.error)
+ */
+Node.Server.prototype.startLogRotate = function ()
+{
+  // If I'm LOCAL or on a windows machine, log rotate is not supported
+  if (this.config.local || /^win/.test(process.platform))
+    return;
+  //
+  // Start log-rotate timer
+  setInterval(function () {
+    this.config.handleLog({req: {query: {console: "out"}}, tokens: ["manager", "checkrotate"]}, function () {});
+    this.config.handleLog({req: {query: {console: "error"}}, tokens: ["manager", "checkrotate"]}, function () {});
+  }.bind(this), 30 * 1000);    // Every 30 seconds
+};
+
+
+/**
  * Generates a new serviceWorker.json file
  */
 Node.Server.prototype.createServiceWorker = function ()
@@ -1457,8 +1527,8 @@ Node.Server.prototype.createServiceWorker = function ()
   function parseHead(path, filename) {
     var fullPath = idePath + (path ? "/" + path : "");
     var index = Node.fs.readFileSync(fullPath + "/" + filename, "utf8");
-    var cssList = index.split("<link href=\"");
-    var jsList = index.split("<script src=\"");
+    var cssList = index.split("<" + "link href=\"");
+    var jsList = index.split("<" + "script src=\"");
     //
     for (i = 0; i < 2; i++) {
       var list = (i === 0 ? cssList : jsList);

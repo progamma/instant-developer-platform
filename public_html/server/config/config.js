@@ -66,7 +66,7 @@ Node.Config.prototype.save = function ()
     serverType: this.serverType, portHttp: this.portHttp, portHttps: this.portHttps,
     SSLCert: this.SSLCert, SSLKey: this.SSLKey, SSLCABundles: this.SSLCABundles, customSSLCerts: this.customSSLCerts,
     directory: this.directory, auth: this.auth, editPrjToken: this.editPrjToken,
-    consoleURL: this.consoleURL, configS3: this.configS3, bucketS3: this.bucketS3,
+    consoleURL: this.consoleURL, exitUrl: this.exitUrl, configS3: this.configS3, bucketS3: this.bucketS3,
     configGCloudStorage: this.configGCloudStorage, bucketGCloud: this.bucketGCloud,
     nigthlybucketGCloud: this.nigthlybucketGCloud, storage: this.storage, customPackages: this.customPackages,
     dbPort: this.dbPort, dbAddress: this.dbAddress, dbUser: this.dbUser, dbPassword: this.dbPassword,
@@ -130,6 +130,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.serverType = v.serverType;
   if (v.consoleURL)
     this.consoleURL = v.consoleURL;
+  if (v.exitUrl)
+    this.exitUrl = v.exitUrl;
   if (v.handleException)
     this.handleException = v.handleException;
   if (v.domain)
@@ -198,6 +200,9 @@ Node.Config.prototype.saveProperties = function ()
   r.version = this.server.version;
   r.remoteDBurls = this.getRemoteDBUrls();
   //
+  // Default values
+  r.exitUrl = r.exitUrl || "https://www.instantdeveloper.com";
+  //
   return r;
 };
 
@@ -247,6 +252,8 @@ Node.Config.prototype.saveConfig = function ()
     return;
   }
   //
+  this.logger.log("INFO", "Config file save started", "Config.saveConfig");
+  //
   this.savingConf = true;   // Start save
   var docjson = JSON.stringify(this, function (k, v) {
     if (v instanceof Node.Config || v instanceof Node.User || v instanceof Node.Database || v instanceof Node.Project || v instanceof Node.App)
@@ -277,7 +284,7 @@ Node.Config.prototype.saveConfig = function ()
         }
         //
         delete pthis.savingConf;  // End save
-        pthis.logger.log("DEBUG", "Config file saved with success", "Config.saveConfig");
+        pthis.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
       });
     });
   });
@@ -640,18 +647,36 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
     if (toRemove)
       toRemove.forEach(function (pack) {
         // Handle scoped and non-scoped packages (@google/pack@1.1.2, mypacket@1.2.3)
-        var packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
+        var packName = pack;
+        if (pack.substring(1).indexOf("@") !== -1)
+          packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
+        //
         delete packageJson.dependencies[packName];
       });
     //
     // Then add new packages (if any)
-    if (toAdd)
-      toAdd.forEach(function (pack) {
+    if (toAdd) {
+      for (let i=0; i<toAdd.length; i++) {
+        let pack = toAdd[i];
+        //
         // Handle scoped and non-scoped packages (@google/pack@1.1.2, mypacket@1.2.3)
-        var packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
-        var packVer = pack.substring(pack.substring(1).indexOf("@") + 2);
+        var packName = pack;
+        var packVer = "*";
+        if (pack.substring(1).indexOf("@") !== -1) {
+          packName = pack.substring(0, pack.substring(1).indexOf("@") + 1);
+          packVer = pack.substring(pack.substring(1).indexOf("@") + 2);
+        }
+        //
+        // If the package is already available it means that the user is trying to overwrite a "standard" package 
+        // (before I've already removed all user-defined packages... so if I'm here it means that the user is trying 
+        // to rewrite one of our packages). 
+        // It can't be done, otherwise, if he will remove it, the system will have problems
+        if (packageJson.dependencies[packName])
+          return errorFnc("Package " + packName + " is already installed");
+        //
         packageJson.dependencies[packName] = packVer;
-      });
+      }
+    }
     //
     // Remove the old BACK if present
     Node.rimraf(packageJSONfile + ".bak", function (err) {
@@ -815,9 +840,10 @@ Node.Config.prototype.processRun = function (req, res)
     //
     // If there is not an app to start, stop here
     if (!appName) {
-      this.logger.log("WARN", "No command detected and no app to start. Redirect to www.instantdeveloper.com", "Config.processRun",
+      var exitUrl = this.saveProperties().exitUrl;
+      this.logger.log("WARN", "No command detected and no app to start. Redirect to " + exitUrl, "Config.processRun",
               {url: req.originalUrl});
-      return res.redirect("http://www.instantdeveloper.com");
+      return res.redirect(exitUrl);
     }
     //
     // Get the user
@@ -979,6 +1005,7 @@ Node.Config.prototype.processRun = function (req, res)
       var expires = new Date(Date.now() + 86400000);
       res.cookie("sid", sid, {expires: expires, path: "/" + app.name});
       res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
+      res.cookie("exitUrl", this.saveProperties().exitUrl, {expires: expires, path: "/" + app.name});
       //
       // Protects SID cookie
       session.protectSID(req, res);
@@ -991,6 +1018,7 @@ Node.Config.prototype.processRun = function (req, res)
     session.request = {query: req.query, body: req.body};
     if (req.connection && req.connection.remoteAddress)
       session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, "");
+    session.request.headers = req.headers;
     session.cookies = req.cookies;
     //
     if (isRest || isWebApi) {
@@ -1408,6 +1436,8 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
   }
   if (query.consoleURL !== undefined)
     this.consoleURL = query.consoleURL || undefined;
+  if (query.exitUrl !== undefined)
+    this.exitUrl = query.exitUrl || undefined;
   if (query.configS3)
     this.configS3 = JSON.parse(query.configS3);
   if (query.bucketS3)
@@ -1595,6 +1625,7 @@ Node.Config.prototype.refresh = function (params, callback)
 Node.Config.prototype.handleLog = function (params, callback)
 {
   var pthis = this;
+  var MaxLen = 50 * 1024 * 1024;
   //
   // Possible commands:
   //   manager/log/status[?console=<out/error>&date=<date>]
@@ -1637,8 +1668,19 @@ Node.Config.prototype.handleLog = function (params, callback)
           return callback("Error getting the file " + filename + " status: " + err);
         }
         //
-        // Report file size
-        callback({msg: {size: (stats ? stats.size : -1)}});
+        // If .1 file exists, add that file as well
+        Node.fs.stat(path + filename + ".1", function (err, stats1) {
+          if (err && err.code !== "ENOENT") {
+            pthis.logger.log("WARN", "Error getting the file " + filename + ".1 status: " + err, "Config.handleLog");
+            return callback("Error getting the file " + filename + ".1 status: " + err);
+          }
+          //
+          if (stats1)
+            stats.size += stats1.size;
+          //
+          // Report file size
+          callback({msg: {size: stats.size}});
+        });
       });
       break;
 
@@ -1656,7 +1698,15 @@ Node.Config.prototype.handleLog = function (params, callback)
           return callback("Can't clear file " + filename + ": " + (stderr || err));
         }
         //
-        callback();
+        // Remove .1 if exists
+        Node.rimraf(path + filename + ".1", function (err) {
+          if (err) {
+            pthis.logger.log("WARN", "Error removing the " + filename + ".1: " + err, "Config.handleLog");
+            return callback("Error removing the " + filename + ".1: " + err);
+          }
+          //
+          callback();
+        });
       });
       break;
 
@@ -1669,24 +1719,86 @@ Node.Config.prototype.handleLog = function (params, callback)
           return callback("Error reading the file " + filename + ": " + err);
         }
         //
-        // If the user requested to view the file, don't force the download
-        params.res.status(200);
-        if (command === "view") {
-          params.res.setHeader("Content-type", "text/html");
-          if (params.req.headers["user-agent"])     // If it's a browser, beautify output
-            params.res.write("<pre>");
-          params.res.write(data, "binary");
-          if (params.req.headers["user-agent"])     // If it's a browser, beautify output
-            params.res.write("</pre>");
+        // Send file to client
+        Node.fs.readFile(path + filename + ".1", function (err, data1) {
+          if (err && err.code !== "ENOENT") {
+            pthis.logger.log("WARN", "Error reading the file " + filename + ".1: " + err, "Config.handleLog");
+            return callback("Error reading the file " + filename + ".1: " + err);
+          }
+          //
+          if (data1)
+            data = data1 + data;
+          //
+          // If the user requested to view the file, don't force the download
+          params.res.status(200);
+          if (command === "view") {
+            params.res.setHeader("Content-type", "text/html");
+            if (params.req.headers["user-agent"])     // If it's a browser, beautify output
+              params.res.write("<pre>");
+            params.res.write(data, "binary");
+            if (params.req.headers["user-agent"])     // If it's a browser, beautify output
+              params.res.write("</pre>");
+          }
+          else {
+            params.res.setHeader("Content-disposition", "attachment; filename = " + pthis.name + "-" + filename);
+            params.res.write(data, "binary");
+          }
+          params.res.end();
+          //
+          // Done (don't reply, I've done it)
+          callback({skipReply: true});
+        });
+      });
+      break;
+
+    case "checkrotate":
+      if (!filename.startsWith("console.")) {
+        this.logger.log("WARN", "Can't rotate server LOG", "Config.handleLog", {filename: filename});
+        return callback("Can't rotate server LOG");
+      }
+      //
+      // Send file to client
+      Node.fs.stat(path + filename, function (err, stats) {
+        if (err) {
+          pthis.logger.log("WARN", "Error reading the file " + filename + ": " + err, "Config.handleLog");
+          return callback("Error reading the file " + filename + ": " + err);
         }
-        else {
-          params.res.setHeader("Content-disposition", "attachment; filename = " + pthis.name + "-" + filename);
-          params.res.write(data, "binary");
-        }
-        params.res.end();
         //
-        // Done (don't reply, I've done it)
-        callback({skipReply: true});
+        // If bigger than MaxLen -> Rotate!
+        if (stats.size > MaxLen) {
+          // Remove .1 if exists
+          Node.rimraf(path + filename + ".1", function (err) {
+            if (err) {
+              pthis.logger.log("WARN", "Error removing the " + filename + ".1: " + err, "Config.handleLog");
+              return callback("Error removing the " + filename + ".1: " + err);
+            }
+            //
+            // Copy console to console.1 (copy only last MaxLen portion)
+            Node.fs.readFile(path + filename, "utf8", function (err, data) {
+              if (err) {
+                pthis.logger.log("WARN", "Error reading the file " + filename + ": " + err, "Config.handleLog");
+                return callback("Error reading the file " + filename + ": " + err);
+              }
+              //
+              Node.fs.writeFile(path + filename + ".1", data.substr(-MaxLen), function (err) {
+                if (err) {
+                  pthis.logger.log("WARN", "Error copying the " + filename + " to .1: " + err, "Config.handleLog");
+                  return callback("Error copying the " + filename + " to .1: " + err);
+                }
+                //
+                // Empty the file (don't delete it otherwise PM2 will not create it again)
+                pthis.server.execFileAsRoot("/usr/bin/truncate", ["-s0", path + filename], function (err, stdout, stderr) {   // jshint ignore:line
+                  if (err) {
+                    pthis.logger.log("WARN", "Can't clear file " + filename + ": " + (stderr || err), "Config.handleLog");
+                    return callback("Can't clear file " + filename + ": " + (stderr || err));
+                  }
+                  //
+                  callback();
+                });
+              });
+            });
+          });
+        }
       });
       break;
 
@@ -2039,6 +2151,72 @@ Node.Config.prototype.backupProjects = function (params, callback)
 
 
 /**
+ * Handle safe snapshot disk creation
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Config.prototype.handleSnapshot = function (params, callback)
+{
+  // If there was an auto-stop snapshot timer, kill it
+  if (this.autoStopSnapshotTimer) {
+    clearTimeout(this.autoStopSnapshotTimer);
+    delete this.autoStopSnapshotTimer;
+  }
+  //
+  var op = params.tokens[1];
+  if (op === "start") {
+    // Flush data to disk
+    this.server.execFileAsRoot("/bin/sync", [], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.logger.log("ERROR", "Error while executing SYNC: " + (stderr || err), "Config.handleSnapshot");
+        return callback("Error while executing SYNC: " + (stderr || err));
+      }
+      //
+      // Stop writing to disk
+      this.server.execFileAsRoot("/sbin/fsfreeze", ["-f", "/mnt/disk"], function (err, stdout, stderr) {   // jshint ignore:line
+        if (err) {
+          this.logger.log("ERROR", "Error while executing FSFREEZE: " + (stderr || err), "Config.handleSnapshot");
+          return callback("Error while executing FSFREEZE: " + (stderr || err));
+        }
+        //
+        // Done!
+        this.logger.log("INFO", "Disk freezed -> ready for snapshot", "Config.handleSnapshot", {url: params.req.originalUrl});
+        callback();
+        //
+        // Be skeptics: auto-unlock after some time (if callee dies it's a problem... fs will remain LOCKED)
+        this.autoStopSnapshotTimer = setTimeout(function () {
+          this.logger.log("WARN", "Disk auto-unfreeze", "Config.handleSnapshot");
+          //
+          params.tokens[1] = "end";
+          this.handleSnapshot(params, function (err) {
+            if (err)
+              this.logger.log("ERROR", "Error while auto-unlocking FS: " + err, "Config.handleSnapshot");
+          }.bind(this));
+        }.bind(this), 15000);
+      }.bind(this));
+    }.bind(this));
+  }
+  else if (op === "end") {
+    // Resume writing to disk
+    this.server.execFileAsRoot("/sbin/fsfreeze", ["-u", "/mnt/disk"], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.logger.log("ERROR", "Error while executing FSFREEZE: " + (stderr || err), "Config.handleSnapshot");
+        return callback("Error while executing FSFREEZE: " + (stderr || err));
+      }
+      //
+      // Done!
+      this.logger.log("INFO", "Disk unfreezed -> write allowed", "Config.handleSnapshot", {url: params.req.originalUrl});
+      callback();
+    }.bind(this));
+  }
+  else {
+    this.logger.log("WARN", "Invalid operation", "Config.handleSnapshot", {op: op, url: params.req.originalUrl});
+    callback("Invalid operation");
+  }
+};
+
+
+/**
  * Initialize tracking
  * @param {function} callback (err or {err, msg, code})
  */
@@ -2274,6 +2452,9 @@ Node.Config.prototype.execCommand = function (params, callback)
       break;
     case "backupprj":
       this.backupProjects(params, callback);
+      break;
+    case "snapshot":
+      this.handleSnapshot(params, callback);
       break;
     default:
       // For any other command ask MANAGER user

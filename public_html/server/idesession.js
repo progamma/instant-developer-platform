@@ -236,8 +236,9 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
   else {  // No ctoken received
     // If the SID is invalid
     if (this.invalidSID(socket)) {
-      this.log("WARN", "Invalid SID", "IDESession.openConnection");
-      socket.emit(Node.IDESession.msgTypeMap.redirect, "http://www.instantdeveloper.com");
+      var exitUrl = this.config.saveProperties().exitUrl;
+      this.log("WARN", "Invalid SID -> redirect to " + exitUrl, "IDESession.openConnection");
+      socket.emit(Node.IDESession.msgTypeMap.redirect, exitUrl);
       return;
     }
     //
@@ -688,8 +689,23 @@ Node.IDESession.prototype.handleSyncMessage = function (msg)
 Node.IDESession.prototype.handleOtherMessages = function (msg)
 {
   var socket = this.sockets[msg.sod];
-  if (!socket)
+  if (!socket) {
+    // Clean up General Channel message (it's too big to be logged!)
+    if (msg.type === Node.IDESession.msgTypeMap.generalChannel && msg.cnt) {
+      try {
+        let msgContent = JSON.stringify(msg.cnt);
+        if (msgContent.length > 1000) {
+          msgContent = msgContent.substring(0, 1000) + "...";
+          msg.cnt = {"PARTIAL MESSAGE": msgContent};
+        }
+      }
+      catch (ex) {
+        msg.cnt = {"ORIGINAL MESSAGE": "NOT SERIALIZABLE"};
+      }
+    }
+    //
     return this.log("WARN", "Can't send message to unknown socket", "IDESession.handleOtherMessages", msg);
+  }
   //
   socket.emit(msg.type, msg.cnt);
 };

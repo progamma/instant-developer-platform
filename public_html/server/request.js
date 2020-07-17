@@ -495,7 +495,7 @@ Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, c
  *  Send create commit message to console
  * @param {string} userName
  * @param {string} projectName
- * @param {Object} prInfo
+ * @param {Object} commitInfo
  * @param {function} callback - function(err)
  */
 Node.Request.prototype.sendCommitInfo = function (userName, projectName, commitInfo, callback)

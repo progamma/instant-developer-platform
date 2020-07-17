@@ -76,7 +76,9 @@ Node.TwManager.msgTypeMap = {
   emptyTransList: "etl",
   //
   requestPushDescription: "rpd",
-  pushDescription: "pd"
+  pushDescription: "pd",
+  //
+  resetEditingTime: "ret"
 };
 
 
@@ -1329,6 +1331,9 @@ Node.TwManager.prototype.switchBranch = function (branchName, callback)
     // Update UI
     this.sendTWstatus();
     //
+    // The active branch has changed. I need to inform the Console
+    this.doc.sendPrjInfoToConsole(function () {});
+    //
     // Done -> complete switch
     this.saveConfig(function (err) {
       if (err) {
@@ -1464,6 +1469,10 @@ Node.TwManager.prototype.commit = function (message, callback)
         //
         newCommit.workdays = workDays;
         //
+        newCommit.editingTime = pthis.doc.prj.editingTime;
+        pthis.doc.prj.editingTime = 0;    // Reset editing time after commit
+        pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.resetEditingTime});
+        //
         // OK. Now let's take care of resources
         pthis.getWorkingResources(function (resources, err) {
           if (err)
@@ -1509,11 +1518,19 @@ Node.TwManager.prototype.commit = function (message, callback)
                   // if I can fetch changes from the parent project
                   delete pthis.parentCommits;
                   //
-                  // Log the commit
-                  pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
-                  //
-                  // Operation completed
-                  callback();
+                  // Save document (I've changed the editing time)
+                  pthis.saveDocument(function (err) {
+                    if (err) {
+                      pthis.logger.log("WARN", "Error while saving the document after commit: " + err, "TwManager.commit");
+                      return callback(InDe.rh.t("tw_commit_err"));
+                    }
+                    //
+                    // Log the commit
+                    pthis.logger.log("DEBUG", "Branch committed", "TwManager.commit", {branch: pthis.actualBranch.name, commit: newCommit.id});
+                    //
+                    // Operation completed
+                    callback();
+                  });
                 });
               });
             });
@@ -2447,7 +2464,7 @@ Node.TwManager.prototype.teamworksCmd = function (command, params, callback)
         result.localModif = true;
       //
       // Search the given branch
-      var branch = this.getBranchByName(params.branch);
+      var branch = this.getBranchByName(params.branch || "master");
       if (!branch) {
         this.logger.log("WARN", "Branch not found", "TwManager.teamworksCmd", {command: command, params: params});
         return callback({err: "Branch not found"});
@@ -2472,7 +2489,7 @@ Node.TwManager.prototype.teamworksCmd = function (command, params, callback)
           result.commits.push({id: com.id});
         else
           result.commits.push({id: com.id, author: com.author, date: com.date, workdays: com.workdays,
-            message: com.message, branch: com.parent.name});
+            editingTime: com.editingTime, message: com.message, branch: com.parent.name});
       }
       callback({data: result});
       break;

@@ -37,7 +37,8 @@ Node.Commit = function (parent)
 Node.Commit.prototype.save = function ()
 {
   var r = {cl: "Node.Commit", id: this.id, date: this.date, author: this.author,
-    originBranch: this.originBranch, message: this.message, pushed: this.pushed, merged: this.merged, workdays: this.workdays};
+    originBranch: this.originBranch, message: this.message, pushed: this.pushed, merged: this.merged, workdays: this.workdays,
+    editingTime: this.editingTime};
   return r;
 };
 
@@ -56,6 +57,7 @@ Node.Commit.prototype.load = function (v)
   this.pushed = v.pushed;
   this.merged = v.merged;
   this.workdays = v.workdays;
+  this.editingTime = v.editingTime;
 };
 
 

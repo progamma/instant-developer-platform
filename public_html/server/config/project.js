@@ -119,6 +119,7 @@ Node.Project.prototype.saveProperties = function ()
   //
   // Add usefull properties
   r.user = this.user.saveProperties();
+  r.company = this.config.serverType;
   r.cloudPath = "users/" + this.config.serverType + "/" + this.user.userName + "/" + this.name;
   r.reconnectToken = this.reconnectToken;
   //
@@ -536,10 +537,10 @@ Node.Project.prototype.handleFileSystem = function (params, callback)
   //
   // Function for fixing permissions
   var fixPathPermissions = function (cb) {    // cb(err)
-    this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, options.path], function (err, stdout, stderr) {   // jshint ignore:line
+    this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, prjFilesPath], function (err, stdout, stderr) {   // jshint ignore:line
       if (err) {
         this.log("ERROR", "Error changing folder permissions: " + (stderr || err), "Project.handleFileSystem",
-                {OSUser: this.user.OSUser, path: options.path});
+                {OSUser: this.user.OSUser, path: prjFilesPath});
         return cb("Error changing folder permissions: " + (stderr || err));
       }
       //

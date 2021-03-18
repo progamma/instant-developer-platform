@@ -218,9 +218,9 @@ Node.Request.prototype.getParentProject = function (userName, projectName, callb
   if (this.config.local && projectName === "cloud-control-center-forked1")
     return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center-forked", user: "lucabaldini"});
   if (this.config.local && projectName.substring(0, 16) === "cccmaster-forked")
-    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diego"});
+    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
   if (this.config.local && projectName.substring(0, 17) === "cccmaster-forked2")
-    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diego"});
+    return callback({ server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
   //
   var pthis = this;
   //

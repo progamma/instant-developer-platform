@@ -666,6 +666,7 @@ Node.Branch.prototype.merge = function (checkConfl, callback)
       return callback(err);
     //
     // Define some functions
+    let totalEditingTime = 0;
     var mergeNextCommit = function () {
       var commit = pthis.mergeList[0];    // Commit I have to merge
       //
@@ -675,6 +676,9 @@ Node.Branch.prototype.merge = function (checkConfl, callback)
           twManager.logger.log("WARN", "Error merging commit " + commit.id + ": " + err, "TwManager.merge");
           return callback(err);
         }
+        //
+        // Keep track of this commit's editing Time
+        totalEditingTime += (commit.editingTime || 0);
         //
         // Remove the merged commit and if there are more, continue with the next commit
         pthis.mergeList.splice(0, 1);
@@ -687,6 +691,10 @@ Node.Branch.prototype.merge = function (checkConfl, callback)
           // If there have been conflicts but they have been resolved, forget about them!
           if (twManager.actualBranch.conflictTrans && twManager.actualBranch.conflictTrans.transItems.length === 0)
             delete twManager.actualBranch.conflictTrans;
+          //
+          // Add all merged commit's editing time (I have to account for that)
+          twManager.doc.prj.totalEditingTime += totalEditingTime;
+          twManager.doc.sendMessage({type: Node.TwManager.msgTypeMap.setEditingTime, cnt: {totalEditingTime: twManager.doc.prj.totalEditingTime}});
           //
           // If the merge generated conflicts, save them
           if (twManager.actualBranch.conflictTrans) {
@@ -1157,6 +1165,13 @@ Node.Branch.prototype.revert = function (options, callback)
   for (i = commitsToRevert.length - 1; i >= 0; i--) {
     twManager.logger.log("DEBUG", "Revert commit " + commitsToRevert[i].id, "Branch.revert");
     commitsToRevert[i].reverseCommit(transList);
+  }
+  //
+  // If no message was provided, compute one using the reverted's commit messages
+  if (!options.message) {
+    for (i = commitsToRevert.length - 1; i >= 0; i--)
+      if (commitsToRevert[i].message)
+        options.message = (options.message || "") + commitsToRevert[i].message + "\n";
   }
   //
   // Create a new commit

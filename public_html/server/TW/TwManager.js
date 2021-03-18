@@ -78,7 +78,7 @@ Node.TwManager.msgTypeMap = {
   requestPushDescription: "rpd",
   pushDescription: "pd",
   //
-  resetEditingTime: "ret"
+  setEditingTime: "sedt"
 };
 
 
@@ -427,7 +427,7 @@ Node.TwManager.prototype.sendDiffBranch = function (options)
   // Purge the transaction
 //    trShuttle = InDe.TransManager.purge(trShuttle);
   trShuttle.purgeAToken();
-  this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt: {tr: trShuttle.save()}});
+  this.doc.sendMessage({type: Node.TwManager.msgTypeMap.diffBranch, cnt: {tr: trShuttle.save(), showOutgoing: options.showOutgoing}});
 };
 
 
@@ -980,10 +980,30 @@ Node.TwManager.prototype.getBranchList = function (PR)
   for (var i = 0; i < this.branches.length; i++) {
     var bra = this.branches[i];
     //
-    if (!PR && bra.type !== Node.Branch.PR)
-      list.push({name: bra.name, owner: bra.owner});
-    else if (PR && bra.type === Node.Branch.PR)
-      list.push({id: bra.id, prid: bra.uid, name: bra.name, message: bra.message, date: bra.date});
+    // Skip branches I'm not interested in
+    if ((PR && bra.type !== Node.Branch.PR) ||
+            (!PR && bra.type === Node.Branch.PR))
+      continue;
+    //
+    let brinfo;
+    if (bra.type !== Node.Branch.PR)
+    {
+      brinfo = {name: bra.name, owner: bra.owner};
+      //
+      // If There are uncommitted changes, tell the client if the user can safely switch to this branch
+      if (this.localModif())
+      {
+        // I can switch only if the new branch's HEAD and old branch's HEAD are the same
+        var oldFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
+        var newFile = this.path + "/branches/" + bra.name + "/project.json";
+        var oldFileStat = Node.fs.statSync(oldFile);
+        var newFileStat = Node.fs.statSync(newFile);
+        brinfo.canSwitch = (oldFileStat.mtime.getTime() === newFileStat.mtime.getTime() && oldFileStat.size === newFileStat.size);
+      }
+    }
+    else
+      brinfo = {id: bra.id, prid: bra.uid, name: bra.name, message: bra.message, date: bra.date};
+    list.push(brinfo);
   }
   //
   return list;
@@ -1375,11 +1395,11 @@ Node.TwManager.prototype.commit = function (message, callback)
     return callback(InDe.rh.t("tw_no_commit"));
   }
   //
-  // Create a new commit with the given message
-  var newCommit = pthis.actualBranch.createCommit(message);
+  // Create a new commit ID
+  var newCommitID = Node.Utils.generateUID36();
   //
   // Copy the staging area inside the new commit
-  var pathCommit = pthis.path + "/branches/" + pthis.actualBranch.name + "/" + newCommit.id;
+  var pathCommit = pthis.path + "/branches/" + pthis.actualBranch.name + "/" + newCommitID;
   pthis.getAllSavedModifications({}, function (trans, err) {
     if (err) {
       pthis.logger.log("WARN", "Error while getting local modifications: " + err, "TwManager.commit");
@@ -1447,13 +1467,6 @@ Node.TwManager.prototype.commit = function (message, callback)
       }
     }
     //
-    // Send a message to the console
-    var commitInfo = {id: newCommit.id, uid: pthis.actualBranch.uid, status: "created", message: message, branch: pthis.actualBranch.name};
-    pthis.child.request.sendCommitInfo(pthis.child.project.user.userName, pthis.child.project.name, commitInfo, function (err) {
-      if (err)
-        pthis.logger.log("WARN", "Can't comunicate commit info to console: " + err, "TwManager.commit");
-    });
-    //
     pthis.writeJSONFile(pathCommit, [trans.save()], function (err) {
       if (err) {
         pthis.logger.log("ERROR", "Error writing to the file " + pathCommit + ": " + err, "TwManager.commit");
@@ -1466,12 +1479,6 @@ Node.TwManager.prototype.commit = function (message, callback)
           pthis.logger.log("ERROR", "Error while computing work days: " + err, "TwManager.commit");
           return callback(InDe.rh.t("tw_commit_err"));
         }
-        //
-        newCommit.workdays = workDays;
-        //
-        newCommit.editingTime = pthis.doc.prj.editingTime;
-        pthis.doc.prj.editingTime = 0;    // Reset editing time after commit
-        pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.resetEditingTime});
         //
         // OK. Now let's take care of resources
         pthis.getWorkingResources(function (resources, err) {
@@ -1491,15 +1498,38 @@ Node.TwManager.prototype.commit = function (message, callback)
                 return callback(InDe.rh.t("tw_commit_err"));
               }
               //
-              // Clear the resources array for this sessions
-              pthis.doc.resources = [];
+              // Create a new commit with the given message
+              var newCommit = pthis.actualBranch.createCommit(message);
+              newCommit.id = newCommitID;
+              newCommit.workdays = workDays;
+              newCommit.editingTime = pthis.doc.prj.editingTime;
               //
               // Now, that everything if fine, save the list of the commits in the branch
               pthis.actualBranch.saveCommitsList(function (err) {
                 if (err) {
                   pthis.logger.log("WARN", "Error while saving commit list: " + err, "TwManager.commit");
+                  //
+                  // Too bad... remove the new Commit from the list
+                  let comIdx = pthis.actualBranch.commits.indexOf(newCommit);
+                  if (comIdx > -1)
+                    pthis.actualBranch.commits.splice(comIdx, 1);
+                  //
                   return callback(InDe.rh.t("tw_commit_err"));
                 }
+                //
+                // Clear the resources array for this sessions
+                pthis.doc.resources = [];
+                //
+                // Reset editing time after commit
+                pthis.doc.prj.editingTime = 0;
+                pthis.doc.sendMessage({type: Node.TwManager.msgTypeMap.setEditingTime, cnt: {editingTime: pthis.doc.prj.editingTime}});
+                //
+                // Send a message to the console
+                var commitInfo = {id: newCommitID, uid: pthis.actualBranch.uid, status: "created", message: message, branch: pthis.actualBranch.name};
+                pthis.child.request.sendCommitInfo(pthis.child.project.user.userName, pthis.child.project.name, commitInfo, function (err) {
+                  if (err)
+                    pthis.logger.log("WARN", "Can't comunicate commit info to console: " + err, "TwManager.commit");
+                });
                 //
                 // Last, align HEAD (i.e. with overwrite)
                 pthis.saveHEAD({overwrite: true}, function (err) {

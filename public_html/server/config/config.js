@@ -76,7 +76,7 @@ Node.Config.prototype.save = function ()
     numHoursSnapshot: this.numHoursSnapshot, numMaxSnapshot: this.numMaxSnapshot, timeSnapshot: this.timeSnapshot,
     appDirectory: this.appDirectory, defaultApp: this.defaultApp, services: this.services,
     maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
-    users: this.users
+    params: this.params, users: this.users
   };
   return r;
 };
@@ -178,6 +178,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.minAppUsersPerWorker = v.minAppUsersPerWorker;
   if (v.maxAppWorkers)
     this.maxAppWorkers = v.maxAppWorkers;
+  if (v.params)
+    this.params = v.params;
   if (v.local)
     this.local = true;
 };
@@ -656,7 +658,7 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
     //
     // Then add new packages (if any)
     if (toAdd) {
-      for (let i=0; i<toAdd.length; i++) {
+      for (let i = 0; i < toAdd.length; i++) {
         let pack = toAdd[i];
         //
         // Handle scoped and non-scoped packages (@google/pack@1.1.2, mypacket@1.2.3)
@@ -667,9 +669,9 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
           packVer = pack.substring(pack.substring(1).indexOf("@") + 2);
         }
         //
-        // If the package is already available it means that the user is trying to overwrite a "standard" package 
-        // (before I've already removed all user-defined packages... so if I'm here it means that the user is trying 
-        // to rewrite one of our packages). 
+        // If the package is already available it means that the user is trying to overwrite a "standard" package
+        // (before I've already removed all user-defined packages... so if I'm here it means that the user is trying
+        // to rewrite one of our packages).
         // It can't be done, otherwise, if he will remove it, the system will have problems
         if (packageJson.dependencies[packName])
           return errorFnc("Package " + packName + " is already installed");
@@ -747,8 +749,8 @@ Node.Config.prototype.processRun = function (req, res)
               {meth: req.method, url: req.originalUrl, headers: req.headers});
       //
       res.header("Access-Control-Allow-Origin", "*");
-      res.header("Access-Control-Allow-Headers", "Accept, Cache-Control, X-Requested-With, X-HTTP-Method, Content-Type, Prefer, Authorization");
-      res.header("Access-Control-Allow-Methods", "GET, POST, DELETE, PUT, PATCH");
+      res.header("Access-Control-Allow-Headers", "*");
+      res.header("Access-Control-Allow-Methods", "*");
       res.header("Access-Control-Max-Age", "86400"); // Cache for 24 hours
       return res.status(204).end();
     }
@@ -1003,8 +1005,16 @@ Node.Config.prototype.processRun = function (req, res)
     if (!isRest && !isWebApi) {
       // Create/update cookies for this session
       var expires = new Date(Date.now() + 86400000);
-      res.cookie("sid", sid, {expires: expires, path: "/" + app.name});
-      res.cookie("cid", cid, {expires: expires, path: "/" + app.name});
+      var cookieOpt = {expires: expires, path: "/" + app.name};
+      //
+      // If I'm working "securely"
+      var secure = (!this.local && this.protocol === "https");
+      if (secure) {
+        cookieOpt.secure = true;
+        cookieOpt.sameSite = "none";  // Allow embedding the app in an IFRAME
+      }
+      res.cookie("sid", sid, cookieOpt);
+      res.cookie("cid", cid, cookieOpt);
       res.cookie("exitUrl", this.saveProperties().exitUrl, {expires: expires, path: "/" + app.name});
       //
       // Protects SID cookie
@@ -1072,6 +1082,16 @@ Node.Config.prototype.processRun = function (req, res)
         // Check if the session is still there
         session = (isIDE ? pthis.server.IDESessions[sid] : pthis.server.appSessions[sid]);
         if (!session) {
+          // Delete files
+          Object.keys(files).forEach(function (name) {
+            files[name].forEach(function (f) {
+              Node.rimraf(f.path, function (err) {
+                if (err)
+                  pthis.logger.log("WARN", "Can't delete file " + f.path + ": " + err, "Config.processRun", {sid: sid});
+              });
+            });
+          });
+          //
           pthis.logger.log("WARN", "Session not found", "Config.processRun", {sid: sid});
           return res.status(500).send("Session not found");
         }
@@ -1086,56 +1106,60 @@ Node.Config.prototype.processRun = function (req, res)
         //
         // Extract files
         var postfiles = [];
-        var nOfFiles = Object.keys(files).length;
+        var nOfFiles = 0;
+        Object.keys(files).forEach(function (name) {
+          files[name].forEach(function (f) {
+            nOfFiles++;
+          });
+        });
         var nOfSavedFiles = 0;
         if (nOfFiles === 0) // No files -> send to app
           newAppReq(req, res, session, {params: fields, files: postfiles});
         else {
           // There are files... rename them and send to app
-          var farr = Object.keys(files);
-          for (i = 0; i < farr.length; i++) {
-            var k = farr[i];
-            var f = files[k][0];
-            var ext = f.originalFilename.split(".");
-            ext = "." + ext[ext.length - 1];
-            var id = Node.Utils.generateUID36();
-            var path, localPath;
-            if (isIDE) {    // IDE
-              path = "/" + session.project.user.userName + "/" + session.project.name + "/files/uploaded/" + id + ext;
-              localPath = pthis.directory + path;
-            }
-            else {    // MASTER
-              path = "/" + app.name + "/files/uploaded/" + id + ext;
-              localPath = pthis.appDirectory + "/apps" + path;
-            }
-            var serverPath = pthis.getUrl() + path;
-            //
-            // Beautify file name
-            /*jshint loopfunc: true */
-            Node.fs.rename(f.path, localPath, function (err) {
-              if (err) {
-                pthis.logger.log("ERROR", "Error moving POST file: " + err, "Config.processRun", {src: f.path, dst: localPath});
-                //
-                // Remove the file
-                Node.fs.unlink(f.path, function (err) {
-                  if (err)
-                    pthis.logger.log("ERROR", "Error removing temp POST file after move failed: " + err, "Config.processRun", {src: f.path});
-                });
+          Object.keys(files).forEach(function (name) {
+            files[name].forEach(function (f) {
+              var ext = f.originalFilename.split(".");
+              ext = "." + ext[ext.length - 1];
+              var id = Node.Utils.generateUID36();
+              var path, localPath;
+              if (isIDE) {    // IDE
+                path = "/" + session.project.user.userName + "/" + session.project.name + "/files/uploaded/" + id + ext;
+                localPath = pthis.directory + path;
               }
-              else
-                postfiles.push({path: "uploaded/" + id + ext, type: undefined, originalName: f.originalFilename, publicUrl: serverPath});
+              else {    // MASTER
+                path = "/" + app.name + "/files/uploaded/" + id + ext;
+                localPath = pthis.appDirectory + "/apps" + path;
+              }
+              var serverPath = pthis.getUrl() + path;
               //
-              // Log operation
-              pthis.logger.log("INFO", "Received file via REST request", "Config.processRun",
-                      {path: "uploaded/" + id + ext, serverPath: serverPath});
-              //
-              nOfSavedFiles++;
-              //
-              // If last file, send to app
-              if (nOfSavedFiles === nOfFiles)
-                newAppReq(req, res, session, {params: fields, files: postfiles});
+              // Beautify file name
+              /*jshint loopfunc: true */
+              Node.fs.rename(f.path, localPath, function (err) {
+                if (err) {
+                  pthis.logger.log("ERROR", "Error moving POST file: " + err, "Config.processRun", {src: f.path, dst: localPath});
+                  //
+                  // Remove the file
+                  Node.fs.unlink(f.path, function (err) {
+                    if (err)
+                      pthis.logger.log("ERROR", "Error removing temp POST file after move failed: " + err, "Config.processRun", {src: f.path});
+                  });
+                }
+                else
+                  postfiles.push({path: "uploaded/" + id + ext, type: undefined, originalName: f.originalFilename, publicUrl: serverPath});
+                //
+                // Log operation
+                pthis.logger.log("INFO", "Received file via REST request", "Config.processRun",
+                        {path: "uploaded/" + id + ext, serverPath: serverPath});
+                //
+                nOfSavedFiles++;
+                //
+                // If last file, send to app
+                if (nOfSavedFiles === nOfFiles)
+                  newAppReq(req, res, session, {params: fields, files: postfiles});
+              });
             });
-          }
+          });
         }
       });
     }
@@ -1500,6 +1524,33 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.minAppUsersPerWorker = parseInt(query.minAppUsersPerWorker, 10);
   if (query.maxAppWorkers)
     this.maxAppWorkers = parseInt(query.maxAppWorkers, 10);
+  if (query.params !== undefined) {
+    if (query.params) {
+      // Callee will send every time all parameters as an array of NAME=VALUE couples
+      try {
+        var paramsArray = JSON.parse(query.params);
+        //
+        // Change from
+        //    ["par1=valuePar1", "par2=valuePar2", ...]
+        // to
+        //    {
+        //     "par1": "valuePar1",
+        //     "par2": "valuePar2",
+        //    }
+        this.params = {};
+        for (let i = 0; i < paramsArray.length; i++) {
+          var par = paramsArray[i].split("=");
+          this.params[par[0]] = par[1];
+        }
+      }
+      catch (ex) {
+        this.logger.log("WARN", "Can't update server's parameters: " + ex.message, "Config.configureServer", {newParams: query.params});
+        return callback("Can't update server's parameters: " + ex.message);
+      }
+    }
+    else  // No parameters
+      delete this.params;
+  }
   if (query.debug2log !== undefined) {
     if (query.debug2log === "false")
       this.logger.debug2log = false;
@@ -2233,7 +2284,7 @@ Node.Config.prototype.initTracking = function (callback)
   var Postgres = require("../../ide/app/server/postgres");
   var trackDB = new Postgres();
   /* jshint ignore:start */
-  trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "GMu4qCtqK2ylk1a9+xpSzw==", "name": "IssueApplicationID", "datatype": "id", "maxlen": 24}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "uuxk4NaVz0wfFNt9+NK2rw==", "name": "BuildName", "datatype": "vc"}, {"id": "zZqgdCi9k5ffG38wROQ4ug==", "name": "BuildFormat", "datatype": "vc", "maxlen": 3}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "LinkedObject", "datatype": "j"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}, {"id": "TneyghFUGS6pK5F5B9JGVA==", "name": "NotificationEmails", "datatype": "vc"}, {"id": "v/ljRAQzPtMNI8sRsL+yGg==", "name": "ForkChainID", "datatype": "id", "maxlen": 24}], "fks": [{"id": "dPSTX+LzXuTMSoAcVUIT4A==", "name": "fkIssueApplications", "t": "IssueApplications", "ur": "c", "dr": "c", "refs": {"GMu4qCtqK2ylk1a9+xpSzw==": "ID"}}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}, {"id": "kr3qP6vuLOc4E31EN0UVwQ==", "name": "IssueApplications", "fields": [{"id": "FSAY7uGwp8zhmf7mocRjTA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "D7rgv3xFaWjP3A7yUv82+A==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "KVVu0MTG5AtVzUC1xJdphg==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "cu2THSSWPeLnH8qKW0NMXA==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "VF7d2FtNzhEMBee1dGzOAQ==", "name": "ApplicationName", "datatype": "vc"}, {"id": "e0FdPOi5ITQlMXyKE5J6Pg==", "name": "Format", "datatype": "vc", "maxlen": 3, "notn": true}]}]};
+  trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "GMu4qCtqK2ylk1a9+xpSzw==", "name": "IssueApplicationID", "datatype": "id", "maxlen": 24}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "uuxk4NaVz0wfFNt9+NK2rw==", "name": "BuildName", "datatype": "vc"}, {"id": "zZqgdCi9k5ffG38wROQ4ug==", "name": "BuildFormat", "datatype": "vc", "maxlen": 3}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "LinkedObject", "datatype": "j"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "c9eqpXDdFKkI+QeIdbXKmw==", "name": "AuthorLanguage", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}, {"id": "TneyghFUGS6pK5F5B9JGVA==", "name": "NotificationEmails", "datatype": "vc"}, {"id": "v/ljRAQzPtMNI8sRsL+yGg==", "name": "ForkChainID", "datatype": "id", "maxlen": 24}], "fks": [{"id": "dPSTX+LzXuTMSoAcVUIT4A==", "name": "fkIssueApplications", "t": "IssueApplications", "ur": "c", "dr": "c", "refs": {"GMu4qCtqK2ylk1a9+xpSzw==": "ID"}}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}, {"id": "kr3qP6vuLOc4E31EN0UVwQ==", "name": "IssueApplications", "fields": [{"id": "FSAY7uGwp8zhmf7mocRjTA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "D7rgv3xFaWjP3A7yUv82+A==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "KVVu0MTG5AtVzUC1xJdphg==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "cu2THSSWPeLnH8qKW0NMXA==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "VF7d2FtNzhEMBee1dGzOAQ==", "name": "ApplicationName", "datatype": "vc"}, {"id": "e0FdPOi5ITQlMXyKE5J6Pg==", "name": "Format", "datatype": "vc", "maxlen": 3, "notn": true}]}]};
   /* jshint ignore:end */
   trackDB.initDbConString("postgres://" + this.dbUser + ":" + this.dbPassword + "@" + this.dbAddress + ":" + this.dbPort);
   //

@@ -4,7 +4,7 @@
       "script": "server.js",
       "args": [],
       "watch": false,
-      "node_args": ["--harmony_object_observe"],
+      "node_args": [],
       "out_file": "./../log/console.out.log",
       "error_file": "./../log/console.error.log",
       "merge_logs": true

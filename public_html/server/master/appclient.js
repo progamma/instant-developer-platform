@@ -103,7 +103,7 @@ Node.AppClient.prototype.init = function (req, res)
   // the app client is deleted
   this.killClient = setTimeout(function () {
     pthis.log("DEBUG", "Client did not confirm its connection within 10 sec -> deleted", "AppClient.init");
-    pthis.session.deleteAppClient(pthis);
+    pthis.session.deleteAppClient(pthis, true);
   }, 10000);
 };
 

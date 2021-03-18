@@ -152,7 +152,8 @@ Node.Worker.prototype.createChild = function ()
   // Initialize app child
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
-    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this), params: this.app.params});
+    publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this),
+    params: Object.assign({}, this.config.params, this.app.params)});
   //
   // HACK per back-compatibilità con app 19.0 o precedenti su server 19.5 o successivi (dove pg è aggiornato ed ha una breaking change sulla connect)
   // TODO: RIMUOVERE PRIMA O POI...)

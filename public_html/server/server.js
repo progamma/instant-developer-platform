@@ -182,45 +182,32 @@ Node.Server.prototype.initServer = function ()
         return cb("No valid certificate for domain " + domain);
       }
       //
-      // Prepare certificate
-      var cred = (this.customSSLCertsData ? this.customSSLCertsData[certToUse.SSLDomain] : null);
-      if (!cred) {
-        this.logger.log("ERROR", "Can't locate certificate data for domain " + certToUse.SSLDomain, "Server.initServer");
-        return cb("Can't locate certificate data for domain " + certToUse.SSLDomain);
-      }
-      //
-      // Reply with TLS secure context
-      try {
-        cb(null, Node.tls.createSecureContext(cred).context);
-      }
-      catch (ex) {
-        this.logger.log("ERROR", "Can't create secure context with given certificate for domain " + domain + ": " + ex, "Server.initServer");
-        return cb(null, Node.tls.createSecureContext(ssl).context);
-      }
-    }.bind(this);
-    //
-    // If there are custom certificates, load them now (for letsencrypt I need to be root)
-    if (this.config.customSSLCerts) {
-      for (i = 0; i < this.config.customSSLCerts.length; i++) {
-        var cert = this.config.customSSLCerts[i];
+      // If I haven't read file data yet, do it now
+      this.loadCustomCert(certToUse, function (err) {
+        if (err) {
+          this.logger.log("ERROR", "Error while reading custom certificate's file", "Server.initServer");
+          return cb("Can't read certificate's file for domani " + domain);
+        }
         //
+        // I have all needed files.
+        let cred = {key: certToUse.SSLKey_data,
+          cert: certToUse.SSLCert_data,
+          secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
+        cred.ca = [];
+        if (cert.SSLCABundles)
+          for (var j = 0; j < cert.SSLCABundles.length; j++)
+            cred.ca.push(certToUse.SSLCABundles_data[j]);
+        //
+        // Reply with TLS secure context
         try {
-          var cred = {key: Node.fs.readFileSync(cert.SSLKey, "utf8"),
-            cert: Node.fs.readFileSync(cert.SSLCert, "utf8"),
-            secureProtocol: ssl.secureProtocol, secureOptions: ssl.secureOptions, ciphers: ssl.ciphers};
-          cred.ca = [];
-          if (cert.SSLCABundles)
-            for (var j = 0; j < cert.SSLCABundles.length; j++)
-              cred.ca.push(Node.fs.readFileSync(cert.SSLCABundles[j], "utf8"));
-          //
-          this.customSSLCertsData = this.customSSLCertsData || {};
-          this.customSSLCertsData[cert.SSLDomain] = cred;
+          cb(null, Node.tls.createSecureContext(cred).context);
         }
         catch (ex) {
-          console.error("ERROR", "Can't load certificate for domain " + cert.SSLDomain + ": " + ex, "Server.initServer");
+          this.logger.log("ERROR", "Can't create secure context with given certificate for domain " + domain + ": " + ex, "Server.initServer");
+          return cb("Can't create secure context with given certificate for domain " + domain + ": " + ex);
         }
-      }
-    }
+      }.bind(this));
+    }.bind(this);
     //
     // Create an https Server
     Node.httpsServer = require("https").createServer(ssl, Node.app);
@@ -322,12 +309,11 @@ Node.Server.prototype.start = function ()
   //
   // App service worker
   this.createServiceWorker();
-  Node.app.get("/serviceWorker.js", function (req, res) {
-    pthis.sendServiceWorker(req, res);
-  });
-  Node.app.get("/:app/client/serviceWorker.js", function (req, res) {
-    pthis.sendServiceWorker(req, res);
-  });
+  Node.app.get("/serviceWorker.js", Node.Server.prototype.sendServiceWorker.bind(this));
+  Node.app.get("/:app/client/serviceWorker.js", Node.Server.prototype.sendServiceWorker.bind(this));
+  Node.app.get("/:app/client/serviceWorkerOffline.js", Node.Server.prototype.sendServiceWorker.bind(this));
+  Node.app.get("/:app/client/app.webmanifest", Node.Server.prototype.sendAppManifest.bind(this));
+  Node.app.get("/:app/client/appOffline.webmanifest", Node.Server.prototype.sendAppManifest.bind(this));
   //
   // Invalidate old manifest used by 19.5-
   // (https://www.html5rocks.com/en/tutorials/appcache/beginner/
@@ -1516,28 +1502,24 @@ Node.Server.prototype.startLogRotate = function ()
  */
 Node.Server.prototype.createServiceWorker = function ()
 {
-  var i;
-  var idePath = Node.path.resolve(__dirname + "/../ide");
+  let idePath = Node.path.resolve(__dirname + "/../ide");
   //
   // The servers my-cloud don't have the ide folder
   if (!Node.fs.existsSync(idePath))
     return;
   //
-  var files = {};
+  let filesMap = {};
   function parseHead(path, filename) {
-    var fullPath = idePath + (path ? "/" + path : "");
-    var index = Node.fs.readFileSync(fullPath + "/" + filename, "utf8");
-    var cssList = index.split("<" + "link href=\"");
-    var jsList = index.split("<" + "script src=\"");
+    let fullPath = idePath + (path ? "/" + path : "");
+    let index = Node.fs.readFileSync(fullPath + "/" + filename, "utf8");
+    let cssList = index.split("<" + "link href=\"");
+    let jsList = index.split("<" + "script src=\"");
     //
-    for (i = 0; i < 2; i++) {
-      var list = (i === 0 ? cssList : jsList);
-      for (var j = 1; j < list.length; j++) {
-        var file = list[j].substring(0, list[j].indexOf("\"", 1));
-        if (Node.fs.existsSync(fullPath + "/" + file)) {
-          var stats = Node.fs.statSync(fullPath + "/" + file);
-          files[(path ? path + "/" : "") + file] = stats.mtime.toUTCString();
-        }
+    for (let i = 0; i < 2; i++) {
+      let list = (i === 0 ? cssList : jsList);
+      for (let j = 1; j < list.length; j++) {
+        let file = list[j].substring(0, list[j].indexOf("\"", 1));
+        filesMap[fullPath + "/" + file] = (path ? path + "/" : "") + file;
       }
     }
   }
@@ -1546,16 +1528,13 @@ Node.Server.prototype.createServiceWorker = function ()
   parseHead("", "index2.html");
   parseHead("app/client", "index.html");
   //
-  var sw = "[\n";
-  var urls = Object.keys(files);
-  urls.forEach(function (url, index) {
-    sw += "  " + JSON.stringify({url: url, lastModified: files[url]});
-    if (index !== urls.length - 1)
-      sw += ",";
-    sw += "\n";
+  let filesArray = [];
+  Object.keys(filesMap).map(function (filePath) {
+    if (Node.fs.existsSync(filePath))
+      filesArray.push({url: filesMap[filePath], lastModified: Node.fs.statSync(filePath).mtime.toUTCString()});
   });
-  sw += "]";
   //
+  let sw = JSON.stringify(filesArray, null, 2);
   Node.fs.writeFileSync(idePath + "/serviceWorker.json", sw, "utf8");
   return sw;
 };
@@ -1569,18 +1548,18 @@ Node.Server.prototype.createServiceWorker = function ()
 Node.Server.prototype.sendServiceWorker = function (req, res)
 {
   try {
-    var basePath;
-    var isAppIDE = (req.params.app === "app");
-    var isAppMaster = (req.params.app && !isAppIDE);
-    var isIDE = (!isAppIDE && !isAppMaster);
+    let basePath;
+    let isAppIDE = (req.params.app === "app");
+    let isAppMaster = (req.params.app && !isAppIDE);
+    let isIDE = (!isAppIDE && !isAppMaster);
     //
     if (isIDE || isAppIDE)
       basePath = Node.path.resolve(__dirname + "/../ide");
     else if (isAppMaster)
       basePath = this.config.appDirectory + "/apps/" + req.params.app + "/client";
     //
-    var swConf;
-    var configPath = basePath + "/serviceWorker.json";
+    let swConf;
+    let configPath = `${basePath}/${req.url.split("/").pop()}on`;
     if (Node.fs.existsSync(configPath))
       swConf = Node.fs.readFileSync(configPath, "utf8");
     //
@@ -1593,7 +1572,7 @@ Node.Server.prototype.sendServiceWorker = function (req, res)
     //
     // If I have a config, send it
     if (swConf) {
-      var sw = "const precachingItems = " + swConf + ";\n";
+      let sw = "const precachingItems = " + swConf + ";\n";
       sw += "const cacheName = \"" + (isAppMaster ? req.params.app : "ide") + "\";\n\n";
       sw += Node.fs.readFileSync(basePath + "/serviceWorker.js", "utf8");
       //
@@ -1605,7 +1584,43 @@ Node.Server.prototype.sendServiceWorker = function (req, res)
       res.status(404).end();
   }
   catch (ex) {
-    this.logger.log("ERROR", "Error while sending serviceWorker.js: " + ex.message, "Server.sendServiceWorker");
+    this.logger.log("ERROR", `Error while sending ${req.url.split("/").pop()}: ${ex.message}`, "Server.sendServiceWorker");
+    res.status(500).end();
+  }
+};
+
+
+/**
+ * Send the app.webmanifest to client (IDE & APP)
+ * @param {Request} req
+ * @param {Response} res
+ */
+Node.Server.prototype.sendAppManifest = function (req, res)
+{
+  try {
+    let basePath;
+    let isAppIDE = (req.params.app === "app");
+    //
+    if (isAppIDE)
+      basePath = Node.path.resolve(__dirname + "/../ide");
+    else
+      basePath = this.config.appDirectory + "/apps/" + req.params.app + "/client";
+    //
+    let manifest;
+    let manifestPath = `${basePath}/${req.url.split("/").pop()}`;
+    if (Node.fs.existsSync(manifestPath)) {
+      manifest = Node.fs.readFileSync(manifestPath, "utf8");
+      res.header("Last-Modified", Node.fs.statSync(manifestPath).mtime.toUTCString());
+    }
+    else
+      manifest = JSON.stringify({name: ""});
+    //
+    res.header("Content-Type", "application/json");
+    res.header("Content-Length", Buffer.from(manifest).length);
+    res.status(200).send(manifest);
+  }
+  catch (ex) {
+    this.logger.log("ERROR", `Error while sending ${req.url.split("/").pop()}: ${ex.message}`, "Server.sendAppManifest");
     res.status(500).end();
   }
 };
@@ -1644,6 +1659,61 @@ Node.Server.prototype.setOwnerToIndert = function ()
       this.logger.log("DEBUG", "File's ownership fixed", "Server.setOwnerToIndert");
     }.bind(this));
   }
+};
+
+
+/**
+ * Load custom certificate's files if needed and report to callee when done
+ * @param {Object} cert
+ * @param {function} callback (err)
+ */
+Node.Server.prototype.loadCustomCert = function (cert, callback)
+{
+  if (cert.SSLKey && !cert.SSLKey_data) {
+    // Load missing file
+    return this.execFileAsRoot("/bin/cat", [cert.SSLKey], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.logger.log("ERROR", "Error while reading SSLKey " + cert.SSLKey + ": " + (stderr || err), "Server.initServer");
+        return callback(stderr || err);
+      }
+      //
+      cert.SSLKey_data = stdout;   // Got it!
+      this.loadCustomCert(cert, callback); // Re-check
+    }.bind(this));
+  }
+  //
+  if (cert.SSLCert && !cert.SSLCert_data) {
+    // Load missing file
+    return this.execFileAsRoot("/bin/cat", [cert.SSLCert], function (err, stdout, stderr) {   // jshint ignore:line
+      if (err) {
+        this.logger.log("ERROR", "Error while reading SSLCert " + cert.SSLCert + ": " + (stderr || err), "Server.initServer");
+        return callback(stderr || err);
+      }
+      //
+      cert.SSLCert_data = stdout;   // Got it!
+      this.loadCustomCert(cert, callback); // Re-check
+    }.bind(this));
+  }
+  //
+  if (cert.SSLCABundles) {
+    cert.SSLCABundles_data = cert.SSLCABundles_data || [];
+    for (var j = 0; j < cert.SSLCABundles.length; j++)
+      if (cert.SSLCABundles[j] && !cert.SSLCABundles_data[j]) {
+        // Load missing file
+        return this.execFileAsRoot("/bin/cat", [cert.SSLCABundles[j]], function (err, stdout, stderr) {   // jshint ignore:line
+          if (err) {
+            this.logger.log("ERROR", "Error while reading SSLCABundles(" + j + ") " + cert.SSLCABundles[j] + ": " + (stderr || err), "Server.initServer");
+            return callback(stderr || err);
+          }
+          //
+          cert.SSLCABundles_data[j] = stdout;   // Got it!
+          this.loadCustomCert(cert, callback); // Re-check
+        }.bind(this));
+      }
+  }
+  //
+  // I have all needed files!
+  callback();
 };
 
 

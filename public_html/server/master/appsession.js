@@ -10,6 +10,7 @@ var Node = Node || {};
 // Import modules
 Node.zlib = require("zlib");
 Node.cookie = require("cookie");
+Node.rimraf = require("rimraf");
 
 // Import Classes
 Node.AppClient = require("./appclient");
@@ -209,8 +210,9 @@ Node.AppSession.prototype.createAppClient = function (req, res)
 /**
  * Delete an appClient
  * @param {appClient} appClient
+ * @param {bool} neverAck - indicates if the client ever connected (see AppClient::Init)
  */
-Node.AppSession.prototype.deleteAppClient = function (appClient)
+Node.AppSession.prototype.deleteAppClient = function (appClient, neverAck)
 {
   // Delete the app client from the array
   var idx = this.appClients.indexOf(appClient);
@@ -233,6 +235,18 @@ Node.AppSession.prototype.deleteAppClient = function (appClient)
   }
   else
     this.log("DEBUG", "Terminated SLAVE client " + idx + " from session", "AppSession.deleteAppClient");
+  //
+  // If the client never acknowleged and there are uploaded files -> delete them
+  // (app never responded and I don't want those files to sit on my HD forever)
+  if (neverAck && this.request.files) {
+    this.request.files.forEach(function (f) {
+      var fp = this.config.appDirectory + "/apps/" + this.app.name + "/files/" + f.path;
+      Node.rimraf(fp, function (err) {
+        if (err)
+          this.log("WARN", "Can't delete file " + fp + ": " + err, "AppSession.deleteAppClient");
+      }.bind(this));
+    }.bind(this));
+  }
 };
 
 
@@ -276,9 +290,16 @@ Node.AppSession.prototype.terminate = function ()
 Node.AppSession.prototype.protectSID = function (req, res)
 {
   // Add another HTTP-only cookie that will "protect" the SID/CID cookie
-  var secure = (!this.config.local && this.config.protocol === "https");
   this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
-  res.cookie(this.id + "_secureSID", this.secureSID, {path: "/", httpOnly: true, secure: secure});
+  var cookieOpt = {path: "/", httpOnly: true};
+  //
+  // If I'm working "securely"
+  var secure = (!this.config.local && this.config.protocol === "https");
+  if (secure) {
+    cookieOpt.secure = true;
+    cookieOpt.sameSite = "none";  // Allow embedding the app in an IFRAME
+  }
+  res.cookie(this.id + "_secureSID", this.secureSID, cookieOpt);
   //
   // Remove old _secureSID cookies
   // (for every cookie there have to be a valid IDE/APP session...

@@ -94,7 +94,7 @@ Node.Commit.prototype.reverseCommit = function (transList)
     //
     // Undo the transaction (here I'm not expecting conflicts, so I'm auto-resolving them)
     // Ask the transaction to give back inverted items
-    var options = {confilcts: [], revertItems: []};
+    var options = {confilcts: [], revertItems: [], revertItemsLateSP: []};
     tr.twOperation = true;    // Inform the client that this transaction can be UNDOED even if he does not have it
     tr.undo(undefined, options);
     delete tr.twOperation;    // Don't need to save it
@@ -102,6 +102,16 @@ Node.Commit.prototype.reverseCommit = function (transList)
     tr.transItems = options.revertItems;  // Replace transItems with the list of inverted items
     tr.id = Node.Utils.generateUID24();   // Change transaction's ID (I don't want this transaction to be equal to the original one)
     tr.date = new Date();                 // Update transaction's date
+    //
+    // If there are "late-SP" to be added, append them at the end...
+    // now all object should have resurrected and all SP can be executed (see Transaction::undo)
+    options.revertItemsLateSP.forEach(function (ti) {
+      // Now that all objects have resurrected, I can "relink" this SP
+      ti.new = twManager.doc.getObjectById(ti.new);
+      //
+      // Move the relinked item into the final transaction
+      tr.transItems.push(ti);
+    });
     //
     // Add the inverted transaction the given trans list
     tr.tw = true;
@@ -307,6 +317,7 @@ Node.Commit.prototype.merge = function (checkConflicts, callback)
     newCommit.date = pthis.date;
     newCommit.author = pthis.author;
     newCommit.workdays = pthis.workdays;
+    newCommit.editingTime = pthis.editingTime;
     //
     // Remember when this commit was merged
     newCommit.merged = new Date();

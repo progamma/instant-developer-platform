@@ -1352,18 +1352,34 @@ Node.User.prototype.getDeviceByName = function (deviceName)
  */
 Node.User.prototype.addCloudConnector = function (socket, data)
 {
-  // Create a new cloudConnector instance
-  var connector = {};
+  // Find if already exists
+  let connector = this.cloudConnectors.find(function (cc) {
+    return cc.socket === socket;
+  });
+  //
+  let event = {name: data.name};
+  if (!connector) {
+    // Create a new cloudConnector instance
+    connector = {};
+    connector.socket = socket;
+    connector.callbacks = [];
+    //
+    // Add the cloudConnector to the owner's list
+    this.cloudConnectors.push(connector);
+    event.connected = true;
+  }
+  else
+    event.changed = true;
+  //
   connector.name = data.name;
-  connector.socket = socket;
+  connector.version = data.version;
+  connector.nodeVersion = data.nodeVersion;
+  connector.hostname = data.hostname;
   connector.dmlist = data.dmlist;
   connector.fslist = data.fslist;
   connector.pluginslist = data.pluginslist;
-  connector.callbacks = [];
   //
-  // Add the cloudConnector to the owner's list
-  this.cloudConnectors.push(connector);
-  this.updateAvailableCloudConnectorsList({name: connector.name, connected: true});
+  this.updateAvailableCloudConnectorsList(event);
 };
 
 
@@ -1446,6 +1462,8 @@ Node.User.prototype.getCloudConnector = function (msg)
         list = cc.pluginslist;
         name = msg.data.plugin;
       }
+      else if (msg.data.app)
+        return cc;
       //
       for (var j = 0; j < list.length; j++) {
         var obj = list[j];
@@ -1464,7 +1482,6 @@ Node.User.prototype.getCloudConnector = function (msg)
  */
 Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
 {
-  var i;
   switch (msg.type) {
     case "connectorListRequest":
       sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
@@ -1472,18 +1489,67 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       break;
 
     case "remoteCmd":
-      var conn = this.getCloudConnector(msg);
+      if (msg.data.cmd === "listCC") {
+        let m = {};
+        m.type = Node.User.msgTypeMap.cloudConnectorMsg;
+        m.cnt = {
+          type: "response",
+          appid: msg.data.appid,
+          sid: msg.data.sid,
+          cbid: msg.data.cbid,
+          app: true,
+          data: {result: this.cloudConnectors.map(function (cc) {
+              return {
+                name: cc.name,
+                version: cc.version,
+                nodeVersion: cc.nodeVersion,
+                hostname: cc.hostname
+              };
+            })
+          }
+        };
+        return sender.sendToChild(m);
+      }
+      //
+      let conn = this.getCloudConnector(msg);
       //
       // Connector not found -> invoke callback with error
       if (!conn) {
         if (msg.data.cbid) {
-          var m = {};
+          let m = {};
           m.type = Node.User.msgTypeMap.cloudConnectorMsg;
-          m.cnt = {type: "response", appid: msg.data.appid, cbid: msg.data.cbid, data: {error: "Remote connector not found"}};
+          m.cnt = {
+            type: "response",
+            appid: msg.data.appid,
+            cbid: msg.data.cbid,
+            sid: msg.data.sid,
+            data: {error: "Remote connector not found"}};
           if (msg.data.fs)
             m.cnt.fs = true;
           else if (msg.data.plugin)
             m.cnt.plugin = true;
+          else if (msg.data.app)
+            m.cnt.app = true;
+          //
+          sender.sendToChild(m);
+        }
+        return;
+      }
+      //
+      // New command for remote configuration cause old cloud connectors to restart
+      // It's better to protect
+      if (msg.data.app && !conn.nodeVersion) {
+        if (msg.data.cbid) {
+          let m = {};
+          m.type = Node.User.msgTypeMap.cloudConnectorMsg;
+          m.cnt = {
+            type: "response",
+            appid: msg.data.appid,
+            cbid: msg.data.cbid,
+            sid: msg.data.sid,
+            app: true,
+            data: {error: `Command '${msg.data.cmd}' not supported by cloud connectors in versions prior to 21.0`}
+          };
           //
           sender.sendToChild(m);
         }
@@ -1492,8 +1558,8 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       //
       // Check if an exadecimal string need to be converted to ArrayBuffer
       if (msg.data && msg.data.args) {
-        for (i = 0; i < msg.data.args.length; i++) {
-          var arg = msg.data.args[i];
+        for (let i = 0; i < msg.data.args.length; i++) {
+          let arg = msg.data.args[i];
           if (arg && typeof arg === "object" && arg._t === "buffer" && arg.data)
             msg.data.args[i] = Node.Utils.base64ToBuffer(arg.data);
         }
@@ -1508,10 +1574,10 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       break;
 
     case "response":
-      for (i = 0; i < this.cloudConnectors.length; i++) {
-        var cc = this.cloudConnectors[i];
+      for (let i = 0; i < this.cloudConnectors.length; i++) {
+        let cc = this.cloudConnectors[i];
         if (cc.socket === sender) {
-          var recipient = cc.callbacks[msg.cbid];
+          let recipient = cc.callbacks[msg.cbid];
           if (!recipient)
             return false;
           //

@@ -739,6 +739,14 @@ Node.Config.prototype.processRun = function (req, res)
   //
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
+  // If caller is a bot -> go REST
+  if (!isRest && !!req.useragent.isBot) {
+    req.query.mode = "rest";
+    isRest = true;
+    //
+    this.logger.log("DEBUG", "Bot request -> activate REST", "Config.processRun", {url: req.originalUrl, userAgent: req.useragent.source});
+  }
+  //
   if (req.method === "OPTIONS") {
     // Accept only "OPTIONS" that comes from webAPI requests or a DROPZONE element
     // (that will send a POST with mode=rest in the query string)
@@ -1029,6 +1037,7 @@ Node.Config.prototype.processRun = function (req, res)
     if (req.connection && req.connection.remoteAddress)
       session.request.remoteAddress = req.connection.remoteAddress.replace(/^.*:/, "");
     session.request.headers = req.headers;
+    session.request.isBot = !!req.useragent.isBot;
     session.cookies = req.cookies;
     //
     if (isRest || isWebApi) {

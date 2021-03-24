@@ -18,6 +18,7 @@ Node.Utils = require("./utils");
 
 // Import modules
 Node.express = require("express");
+Node.useragent = require('express-useragent');
 Node.app = Node.express();
 Node.http = require("http");
 Node.https = require("https");
@@ -291,6 +292,9 @@ Node.Server.prototype.start = function ()
   //
   // Enable gzip compression
   Node.app.use(Node.compress());
+  //
+  // Enable user-agent parser
+  Node.app.use(Node.useragent.express());
   //
   // Enable cookie parser
   Node.app.use(Node.cookieParser());

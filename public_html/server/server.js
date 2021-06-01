@@ -1671,54 +1671,57 @@ Node.Server.prototype.setOwnerToIndert = function ()
  * @param {Object} cert
  * @param {function} callback (err)
  */
-Node.Server.prototype.loadCustomCert = function (cert, callback)
-{
-  if (cert.SSLKey && !cert.SSLKey_data) {
-    // Load missing file
-    return this.execFileAsRoot("/bin/cat", [cert.SSLKey], function (err, stdout, stderr) {   // jshint ignore:line
-      if (err) {
-        this.logger.log("ERROR", "Error while reading SSLKey " + cert.SSLKey + ": " + (stderr || err), "Server.initServer");
-        return callback(stderr || err);
-      }
-      //
-      cert.SSLKey_data = stdout;   // Got it!
-      this.loadCustomCert(cert, callback); // Re-check
-    }.bind(this));
-  }
-  //
-  if (cert.SSLCert && !cert.SSLCert_data) {
-    // Load missing file
-    return this.execFileAsRoot("/bin/cat", [cert.SSLCert], function (err, stdout, stderr) {   // jshint ignore:line
-      if (err) {
-        this.logger.log("ERROR", "Error while reading SSLCert " + cert.SSLCert + ": " + (stderr || err), "Server.initServer");
-        return callback(stderr || err);
-      }
-      //
-      cert.SSLCert_data = stdout;   // Got it!
-      this.loadCustomCert(cert, callback); // Re-check
-    }.bind(this));
-  }
-  //
-  if (cert.SSLCABundles) {
-    cert.SSLCABundles_data = cert.SSLCABundles_data || [];
-    for (var j = 0; j < cert.SSLCABundles.length; j++)
-      if (cert.SSLCABundles[j] && !cert.SSLCABundles_data[j]) {
-        // Load missing file
-        return this.execFileAsRoot("/bin/cat", [cert.SSLCABundles[j]], function (err, stdout, stderr) {   // jshint ignore:line
-          if (err) {
-            this.logger.log("ERROR", "Error while reading SSLCABundles(" + j + ") " + cert.SSLCABundles[j] + ": " + (stderr || err), "Server.initServer");
-            return callback(stderr || err);
-          }
-          //
-          cert.SSLCABundles_data[j] = stdout;   // Got it!
-          this.loadCustomCert(cert, callback); // Re-check
-        }.bind(this));
-      }
-  }
-  //
-  // I have all needed files!
-  callback();
-};
+ Node.Server.prototype.loadCustomCert = function (cert, callback)
+ {
+   var catCmd = (/^win/.test(process.platform) ? "more" : "/bin/cat");
+   //
+   if (cert.SSLKey && !cert.SSLKey_data) {
+     // Load missing file
+     return this.execFileAsRoot(catCmd, [cert.SSLKey], function (err, stdout, stderr) {   // jshint ignore:line
+       if (err) {
+         this.logger.log("ERROR", "Error while reading SSLKey " + cert.SSLKey + ": " + (stderr || err), "Server.initServer");
+         return callback(stderr || err);
+       }
+       //
+       cert.SSLKey_data = stdout;   // Got it!
+       this.loadCustomCert(cert, callback); // Re-check
+     }.bind(this));
+   }
+   //
+   if (cert.SSLCert && !cert.SSLCert_data) {
+     // Load missing file
+     return this.execFileAsRoot(catCmd, [cert.SSLCert], function (err, stdout, stderr) {   // jshint ignore:line
+       if (err) {
+         this.logger.log("ERROR", "Error while reading SSLCert " + cert.SSLCert + ": " + (stderr || err), "Server.initServer");
+         return callback(stderr || err);
+       }
+       //
+       cert.SSLCert_data = stdout;   // Got it!
+       this.loadCustomCert(cert, callback); // Re-check
+     }.bind(this));
+   }
+   //
+   if (cert.SSLCABundles) {
+     cert.SSLCABundles_data = cert.SSLCABundles_data || [];
+     for (var j = 0; j < cert.SSLCABundles.length; j++)
+       if (cert.SSLCABundles[j] && !cert.SSLCABundles_data[j]) {
+         // Load missing file
+         return this.execFileAsRoot(catCmd, [cert.SSLCABundles[j]], function (err, stdout, stderr) {   // jshint ignore:line
+           if (err) {
+             this.logger.log("ERROR", "Error while reading SSLCABundles(" + j + ") " + cert.SSLCABundles[j] + ": " + (stderr || err), "Server.initServer");
+             return callback(stderr || err);
+           }
+           //
+           cert.SSLCABundles_data[j] = stdout;   // Got it!
+           this.loadCustomCert(cert, callback); // Re-check
+         }.bind(this));
+       }
+   }
+   //
+   // I have all needed files!
+   callback();
+ };
+ 
 
 
 // Starts the server

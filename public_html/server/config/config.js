@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module, process, __dirname */
@@ -78,6 +78,24 @@ Node.Config.prototype.save = function ()
     maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
     params: this.params, users: this.users
   };
+  //
+  // Remove certificate's file content
+  if (r.customSSLCerts) {
+    // I want to keep it in memory... but I don't want to store it
+    var oldcustomSSLCerts = r.customSSLCerts;
+    r.customSSLCerts = [];
+    //
+    oldcustomSSLCerts.forEach(function (cert) {
+      // Create a copy of the certificate and remove file's content
+      var certClone = JSON.parse(JSON.stringify(cert));
+      delete certClone.SSLKey_data;
+      delete certClone.SSLCert_data;
+      delete certClone.SSLCABundles_data;
+      //
+      r.customSSLCerts.push(certClone);
+    });
+  }
+  //
   return r;
 };
 
@@ -629,6 +647,19 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
   if (!toRemove && !toAdd)
     return callback();
   //
+  // If toAdd and toRemove are the same, return to callee
+  if (toRemove && toAdd && toRemove.length === toAdd.length) {
+    var toRemoveSorted = toRemove.slice().sort();
+    var sameList = (toAdd.slice().sort().every(function (pckg, idx) {
+      return (pckg === toRemoveSorted[idx]);
+    }));
+    //
+    if (sameList) {
+      this.logger.log("DEBUG", "Nothing to do (add list equal to remove list)", "Config.updatePackageJson", {toRemove: toRemove, toAdd: toAdd});
+      return callback();
+    }
+  }
+  //
   var packageJSONfile = __dirname + "/../../package.json";
   //
   var errorFnc = function (err) {
@@ -740,7 +771,7 @@ Node.Config.prototype.processRun = function (req, res)
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
   //
   // If caller is a bot -> go REST
-  if (!isRest && !!req.useragent.isBot) {
+  if (!isRest && !!req.useragent.isBot && !isWebApi) {
     req.query.mode = "rest";
     isRest = true;
     //
@@ -816,20 +847,24 @@ Node.Config.prototype.processRun = function (req, res)
           if (al[0] === host)
             defApp = al[1];
         }
+      }
+      //
+      defApp = defApp || this.defaultApp;   // Use server's default app if not found
+      if (defApp) {
+        // Redirect to default app
+        this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
+                {defaultApp: defApp, url: req.originalUrl});
         //
-        defApp = defApp || this.defaultApp;   // Use server's default app if not found
-        if (defApp) {
-          // Redirect to default app
-          this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
-                  {defaultApp: defApp, url: req.originalUrl});
-          //
-          // Don't use
-          //     this.getUrl() + "/" + this.defaultApp
-          // because I want to reply using the domain used in the request (that is not always equal to the server url
-          // if DNS or custom certificates defines several domains)
-          res.redirect(defApp);
-          return;
-        }
+        // Don't use
+        //     this.getUrl() + "/" + this.defaultApp
+        // because I want to reply using the domain used in the request (that is not always equal to the server url
+        // if DNS or custom certificates defines several domains)
+        var redirUrl = defApp;
+        if (req.originalUrl.indexOf('?') !== -1)
+          redirUrl += req.originalUrl.substring(req.originalUrl.indexOf('?'));
+        //
+        res.redirect(redirUrl);
+        return;
       }
     }
     else if (urlParts.length === 1) { // [app] and [app]?sid={SID}
@@ -1315,110 +1350,34 @@ Node.Config.prototype.sendStatus = function (params, callback)
     stdout = stdout.split("\n")[1];   // Remove headers
     stdout = stdout.split(/\s+/);     // Split spaces
     //
-    if (!/^win/.test(process.platform))    // linux
+    if (!/^win/.test(process.platform)) {    // linux
       result.serverInfo.disk = {size: stdout[1], used: stdout[2], available: stdout[3], capacity: stdout[4]};
-    else {  // windows
-      result.serverInfo.disk = {size: stdout[1] / 1024, available: stdout[0] / 1024};
-      result.serverInfo.disk.used = result.serverInfo.disk.size - result.serverInfo.disk.available;
-      result.serverInfo.disk.capacity = Math.ceil(result.serverInfo.disk.available * 100 / result.serverInfo.disk.size) + "%";
-    }
-    //
-    // On linux add NTP info and CPU load
-    if (process.platform === "freebsd") {   // freebsd
-      this.server.execFileAsRoot("/usr/bin/ntpq", ["-p"], function (err, stdout, stderr) {   // jshint ignore:line
-        if (err) {
-          this.logger.log("ERROR", "Error getting NTP info: " + (stderr || err), "Config.sendStatus");
-          return callback("Error getting NTP info: " + (stderr || err));
-        }
-        //
-        stdout = stdout.split("\n")[2];   // Remove headers
-        stdout = stdout.trim().split(/\s+/);     // Split spaces
-        //
-        result.serverInfo.time = {synch: (stdout[0][0] === "*" ? "on" : "off"), date: new Date(), offset: stdout[8]};
-        //
-        // Add more info (per-process CPU load)
-        this.server.execFileAsRoot("/bin/ps", ["-o", "pcpu", "-p", process.pid], function (err, stdout, stderr) {   // jshint ignore:line
-          if (err) {
-            this.logger.log("ERROR", "Error getting the CPU load: " + (stderr || err), "Config.sendStatus");
-            return callback("Error getting the CPU load: " + (stderr || err));
-          }
-          //
-          stdout = stdout.split("\n")[1];   // Remove headers
-          result.serverInfo.cpuLoad = parseFloat(stdout);
-          //
-          // Finally, get CPU load
-          Node.Utils.getCPUload(function (cpuLoad) {
-            result.serverInfo.globalCpuLoad = cpuLoad;
-            //
-            // Finally, finally... get memory usage
-            this.server.execFileAsRoot("/usr/bin/top", ["-n"], function (err, stdout, stderr) {   // jshint ignore:line
-              if (err) {
-                this.logger.log("ERROR", "Error getting the memory status: " + (stderr || err), "Config.sendStatus");
-                return callback("Error getting the memory status: " + (stderr || err));
-              }
-              //
-              // Mem: 719M Active, 3832M Inact, 1196M Wired, 736M Buf, 1679M Free
-              stdout = stdout.split("\n")[3];   // Remove headers
-              stdout = stdout.split(", ")[4];   // Get Free memory value
-              stdout = stdout.substring(0, stdout.length - 5);      // remove " Free"
-              result.serverInfo.freeMemory = stdout;
-              //
-              callback({msg: JSON.stringify(result)});
-            }.bind(this));
-          }.bind(this));
-        }.bind(this));
-      }.bind(this));
-    }
-    else if (process.platform === "linux") {   // linux
       result.serverInfo.time = {date: new Date()};
       //
-      // Add more info (per-process CPU load)
+      // Add more info (TOP)
       this.server.execFileAsRoot("/usr/bin/top", ["-b", "-n", "1"], function (err, stdout, stderr) {   // jshint ignore:line
         if (err) {
           this.logger.log("ERROR", "Error getting the CPU load and memory status: " + (stderr || err), "Config.sendStatus");
           return callback("Error getting the CPU load and memory status: " + (stderr || err));
         }
         //
-        // Mem: 719M Active, 3832M Inact, 1196M Wired, 736M Buf, 1679M Free
-        var memstat = stdout.split("\n")[0];   // Get values
-        memstat = memstat.split(", ")[1];   // Get Free memory value
-        memstat = memstat.substring(0, memstat.length - 5);      // remove " Free"
+        result.serverInfo.top = stdout;
         //
-        // "Convert" from K to M
-        result.serverInfo.freeMemory = Math.floor(parseFloat(memstat) / 1024) + "M";
-        //
-        stdout = stdout.split("\n").slice(4);   // Remove headers
-        for (var i = 0; i < stdout.length; i++) {
-          // Search right PID
-          var procstat = stdout[i].trim().split(/\s+/);
-          if (parseInt(procstat[0]) === process.pid) {
-            result.serverInfo.cpuLoad = parseFloat(procstat[7].replace("%", ""));
-            break;
-          }
-        }
-        //
-        // If not found... could be that PID is more than 999999... try "starts-with"
-        if (result.serverInfo.cpuLoad === undefined) {
-          for (var i = 0; i < stdout.length; i++) {
-            // Search right PID
-            var procstat = stdout[i].trim().split(/\s+/);
-            if (procstat[0].startsWith(process.pid + "")) {
-              result.serverInfo.cpuLoad = parseFloat(procstat[6].replace("%", ""));
-              break;
-            }
-          }
-        }
-      });
-      //
-      // Finally, get CPU load
-      Node.Utils.getCPUload(function (cpuLoad) {
-        result.serverInfo.globalCpuLoad = cpuLoad;
-        //
-        callback({msg: JSON.stringify(result)});
+        // Finally, get CPU load
+        Node.Utils.getCPUload(function (cpuLoad) {
+          result.serverInfo.globalCpuLoad = cpuLoad;
+          //
+          callback({msg: JSON.stringify(result)});
+        });
       });
     }
-    else
+    else {  // windows
+      result.serverInfo.disk = {size: stdout[1] / 1024, available: stdout[0] / 1024};
+      result.serverInfo.disk.used = result.serverInfo.disk.size - result.serverInfo.disk.available;
+      result.serverInfo.disk.capacity = Math.ceil(result.serverInfo.disk.available * 100 / result.serverInfo.disk.size) + "%";
+      //
       callback({msg: JSON.stringify(result)});
+    }
   }.bind(this));
 };
 
@@ -1549,7 +1508,22 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
         this.params = {};
         for (let i = 0; i < paramsArray.length; i++) {
           var par = paramsArray[i].split("=");
-          this.params[par[0]] = par[1];
+          //
+          var parName = par[0];
+          if (par[1] === this.params[parName])
+            continue;   // Value hasn't changed
+          //
+          // Tell every app and every session that the parameter has changed
+          this.users.forEach(function (user) {
+            if (!user.apps)
+              return; // Skip users with no apps
+            //
+            user.apps.forEach(function (app) {
+              app.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : par[1]}, true);   // SkipSave
+            }.bind(this));
+          }.bind(this));
+          //
+          this.params[parName] = par[1];
         }
       }
       catch (ex) {

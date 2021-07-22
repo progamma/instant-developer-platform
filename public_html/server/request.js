@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -220,7 +220,7 @@ Node.Request.prototype.getParentProject = function (userName, projectName, callb
   if (this.config.local && projectName.substring(0, 16) === "cccmaster-forked")
     return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
   if (this.config.local && projectName.substring(0, 17) === "cccmaster-forked2")
-    return callback({ server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
+    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
   //
   var pthis = this;
   //
@@ -776,7 +776,7 @@ Node.Request.prototype.executeRemoteQuery = function (options, callback)
   var form = new Node.FormData();
   form.append("server", options.server);
   form.append("database", options.database);
-  form.append("sql", options.sql);
+  form.append("sql", encodeURIComponent(options.sql));
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var postOpt = {

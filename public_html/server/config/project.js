@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -439,11 +439,25 @@ Node.Project.prototype.downloadFile = function (params, callback)
     return callback("Double dot operator (..) not allowed");
   }
   //
+  // Accept only a single ".." (Console uses it... :-|)
+  if (folder.split("..").length > 2) {
+    this.log("WARN", "Double dot operator (..) not allowed", "Project.downloadFile");
+    return callback("Double dot operator (..) not allowed");
+  }
+  //
+  // If it's a resource inside a branch (PR)
+  //   resources/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources
+  // translates to
+  //   [DIRECTORY]/[USERNAME]/[PRJNAME]/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources/[FILENAME]
+  var sfolder = folder.split("/");
+  if (sfolder.length === 4 && sfolder[0] === "resources" && sfolder[1] === "branches" && sfolder[3] === "resources")  // resources/branhces/[BRANCH_NAME]/resources
+    path = pthis.config.directory + "/" + pthis.user.userName + "/" + pthis.name + "/" + folder.substring("resources/".length) + "/" + filename;
+  //
   // Full path must be valid and not a directory
   Node.fs.stat(path, function (err, pathStats) {
     if (err) {
       pthis.log("WARN", "Can't get path info: " + err, "Project.downloadFile");
-      return callback({err: "Can't get path info: " + err, code: 404});
+      return callback({err: "Can't get file info (file is missing?)", code: 404});
     }
     if (pathStats.isDirectory()) {
       pthis.log("WARN", "Invalid path (file is a directory)", "Project.downloadFile");
@@ -955,7 +969,7 @@ Node.Project.prototype.restore = function (params, callback)
       return successFnc();
     //
     // Create a new session for setting properly the TW
-    pthis.server.createSession(pthis, {type: "TWrestore"}, function (result) {
+    pthis.server.createSession(pthis, {type: "TWrestore", mode: mode}, function (result) {
       if (result.err)
         return errorFnc("Error while resetting changes: " + result.err);
       //

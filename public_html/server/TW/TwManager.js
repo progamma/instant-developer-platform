@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -986,19 +986,22 @@ Node.TwManager.prototype.getBranchList = function (PR)
       continue;
     //
     let brinfo;
-    if (bra.type !== Node.Branch.PR)
-    {
+    if (bra.type !== Node.Branch.PR) {
       brinfo = {name: bra.name, owner: bra.owner};
       //
       // If There are uncommitted changes, tell the client if the user can safely switch to this branch
-      if (this.localModif())
-      {
+      if (this.localModif()) {
         // I can switch only if the new branch's HEAD and old branch's HEAD are the same
         var oldFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
         var newFile = this.path + "/branches/" + bra.name + "/project.json";
-        var oldFileStat = Node.fs.statSync(oldFile);
-        var newFileStat = Node.fs.statSync(newFile);
-        brinfo.canSwitch = (oldFileStat.mtime.getTime() === newFileStat.mtime.getTime() && oldFileStat.size === newFileStat.size);
+        try {
+          var oldFileStat = Node.fs.statSync(oldFile);
+          var newFileStat = Node.fs.statSync(newFile);
+          brinfo.canSwitch = (oldFileStat.mtime.getTime() === newFileStat.mtime.getTime() && oldFileStat.size === newFileStat.size);
+        }
+        catch (ex) {
+          brinfo.canSwitch = false;
+        }
       }
     }
     else

@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -855,7 +855,7 @@ Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
       return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, err: "Database not found"});
     }
     //
-    var params = {req: {query: {query: options.sql}}};
+    var params = {req: {query: {query: encodeURIComponent(options.sql)}}};
     db.query(params, function (response) {
       var result, err;
       if (response.msg)

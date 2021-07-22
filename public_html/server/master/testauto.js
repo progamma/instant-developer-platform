@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -144,11 +144,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
     if (req[i].cnt)
       this.addObjToMap(req[i].cnt);
     //
-    if (req[i].id === "initTestAuto") {
+    if (req[i].id === "initTestAuto" && !this.realInitTestAuto) {
+      this.realInitTestAuto = true;
       this.startTime = new Date().getTime();
-      if (this.mode !== Node.TestAuto.ModeMap.rec) {
-        // In step by step mode, check if need to wait for files to be read
-        if (this.mode === Node.TestAuto.ModeMap.stepByStep && !this.filesReady) {
+      //
+      // In step by step mode, check if need to wait for files to be read
+      if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
+        if (!this.filesReady) {
           this.waitFilesInterval = setInterval(function () {
             if (this.filesReady) {
               this.playRequest();
@@ -157,10 +159,8 @@ Node.TestAuto.prototype.sniff = function (req, cts)
             }
           }.bind(this), 200);
         }
-        else {
-          if (this.mode === Node.TestAuto.ModeMap.stepByStep)
-            this.playRequest();
-        }
+        else
+          this.playRequest();
       }
       continue;
     }
@@ -245,10 +245,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
     //
     // Cookies are in the client and server ask it for them. But in case of non reg or load test,
     // I have not a client. So save cookies in onStart request to simulate cookies request in those kind of tests
-    if (req[i].id === "onStart" && this.mode === Node.TestAuto.ModeMap.rec) {
-      req[i].cookies = req[i].cookies || this.session.cookies;
+    if (req[i].id === "onStart") {
       this.onStartArrived = true;
-      this.playTime = new Date().getTime();
+      //
+      if (this.mode === Node.TestAuto.ModeMap.rec) {
+        req[i].cookies = req[i].cookies || this.session.cookies;
+        this.playTime = new Date().getTime();
+      }
     }
   }
   //
@@ -453,6 +456,8 @@ Node.TestAuto.prototype.getMode = function ()
  * */
 Node.TestAuto.prototype.playRequest = function (stepForward)
 {
+  clearTimeout(this.playTimeout);
+  delete this.playTimeout;
   clearTimeout(this.slowSessionTimeout);
   delete this.slowSessionTimeout;
   clearTimeout(this.killSessionTimeout);
@@ -584,7 +589,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         for (var k = 0; k < input.length; k++)
           input[k].obj = this.getNewIdFromOldId(input[k].obj) || input[k].obj;
         //
-        this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input});
+        this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input, request: {}});
       }.bind(this), timer);
     }.bind(this);
     //
@@ -620,7 +625,7 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       var slowDelay = st ? Math.max(st, nextDelay) : nextDelay;
       var killDelay = kt ? Math.max(kt, nextDelay) : nextDelay;
       //
-      // If the dalyes are the same, posticipate killDelay
+      // If the delayes are the same, posticipate killDelay
       if (slowDelay === killDelay)
         killDelay = slowDelay + 500;
       //
@@ -1231,6 +1236,7 @@ Node.TestAuto.prototype.saveNoResponse = function (req, timeout, slowness)
   //
   var obj = {};
   obj.requestNumber = this.reqIndex - 1;
+  obj.originalRequestDuration = this.getReqDuration(req);
   obj.message = slowness ? "Session was slow" : "Server didn't respond";
   obj.operation = operation;
   obj.object = object;
@@ -1347,7 +1353,7 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
 {
   if (obj.pid) {
     // The objectsMap elements have to be arrays, because there are some objects having
-    // the same pid (i.e. dataMap rows)
+    // the same pid (i.e. dataMap rows or cloned objects)
     this.objectsMap[obj.pid] = this.objectsMap[obj.pid] || [];
     //
     var oldIdPos = -1;
@@ -1363,7 +1369,9 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
     }
     else {
       for (var i = 0; i < this.objectsMap[obj.pid].length; i++) {
-        if (!this.objectsMap[obj.pid][i].newId) {
+        if (this.objectsMap[obj.pid][i].newId === obj.id)
+          break;
+        else if (!this.objectsMap[obj.pid][i].newId) {
           this.objectsMap[obj.pid][i].newId = obj.id;
           break;
         }

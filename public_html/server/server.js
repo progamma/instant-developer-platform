@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, __dirname, process */
@@ -180,14 +180,14 @@ Node.Server.prototype.initServer = function ()
       // If not found
       if (!certToUse) {
         this.logger.log("WARN", "No valid certificate for domain " + domain, "Server.initServer");
-        return cb("No valid certificate for domain " + domain);
+        return cb(null, Node.tls.createSecureContext(ssl).context);
       }
       //
       // If I haven't read file data yet, do it now
       this.loadCustomCert(certToUse, function (err) {
         if (err) {
           this.logger.log("ERROR", "Error while reading custom certificate's file", "Server.initServer");
-          return cb("Can't read certificate's file for domani " + domain);
+          return cb(null, Node.tls.createSecureContext(ssl).context);
         }
         //
         // I have all needed files.
@@ -225,7 +225,7 @@ Node.Server.prototype.initServer = function ()
   });
   //
   // Set socket io on top of server
-  Node.io = require("socket.io")(server);
+  Node.io = require("socket.io")(server, {allowEIO3: true});
 };
 
 
@@ -353,7 +353,7 @@ Node.Server.prototype.start = function ()
     if (expOpts)
       expOpts.setHeaders = function (res, path) {
         path = path.replace(/\\/g, "/").toLowerCase();    // Win junk
-        if (path.indexOf("/uploaded/") !== -1 || path.indexOf("/resources/") !== -1)
+        if (path.indexOf("/uploaded/") !== -1)
           res.setHeader("Cache-Control", "public, max-age=31536000");
       };
     //
@@ -431,6 +431,9 @@ Node.Server.prototype.start = function ()
   if (Node.httpsServer) {
     // Create a new App
     var httpApp = Node.express();
+    //
+    // No redirect for letsencrypt's challenges
+    httpApp.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
     //
     // Create a new Router and use it in the App
     var httpRouter = Node.express.Router();
@@ -794,112 +797,7 @@ Node.Server.prototype.handleDeviceMessage = function (socket, msg)
  */
 Node.Server.prototype.handleSyncMessage = function (socket, msg)
 {
-  // If sync is not enabled, tell it to callee
-  if (msg.cnt.id === "connect" && (!this.config.services || this.config.services.split(",").indexOf("sync") === -1))
-    msg.cnt.serviceDisabled = true;
-  //
-  // Search the session I've to route this message to
-  var session = this.appSessions[msg.sid.sidsrv];
-  if (!session) {
-    session = this.IDESessions[msg.sid.sidcli];
-    if (session) {
-      // If there is at least an online app I use IDe session to open sync connection
-      var onlineAppClient;
-      for (var i = 0; i < session.appClients.length; i++) {
-        if (session.appClients[i].mode !== "offline") {
-          // This is a sync message in febe mode
-          msg.sid.febe = true;
-          //
-          // I want to merge sync session with online preview session
-          msg.sid.sidsrv = msg.sid.sidcli;
-          //
-          onlineAppClient = true;
-          break;
-        }
-      }
-      if (!onlineAppClient)
-        session = undefined;
-    }
-  }
-  //
-  // Handle CONNECT
-  if (msg.cnt.id === "connect") {
-    // If there is no session try to connect
-    if (!session) {
-      // First get the user that owns the app (or use MANAGER)
-      var user = this.config.getUser(msg.sid.username || "manager");
-      if (!user) {
-        socket.disconnect();
-        return this.logger.log("WARN", "Sync connect not handled: user not found", "Server.handleSyncMessage", msg);
-      }
-      //
-      // Search the app
-      var app = user.getApp(msg.sid.appname.toLowerCase());
-      if (!app) {
-        socket.disconnect();
-        return this.logger.log("WARN", "Sync connect not handled: app not found", "Server.handleSyncMessage", msg);
-      }
-      //
-      // If the app has been stopped
-      if (app.stopped) {
-        socket.disconnect();
-        return this.logger.log("WARN", "Sync connect not handled: app stopped", "Server.handleSyncMessage", msg);
-      }
-      //
-      // If the app is updating
-      if (app.updating) {
-        socket.disconnect();
-        return this.logger.log("WARN", "Sync connect not handled: app updating", "Server.handleSyncMessage", msg);
-      }
-      //
-      this.logger.log("DEBUG", "A new sync session begins", "Server.handleSyncMessage", msg);
-      //
-      // Ask the app to create a new AppSession
-      session = app.createNewSession({type: "sync"});
-      //
-      // If a session can't be created -> do nothing
-      if (!session) {
-        socket.disconnect();
-        return this.logger.log("WARN", "Session can't be created: too many users", "Server.handleSyncMessage", msg);
-      }
-      //
-      // If needed ask the worker to create the physical child process
-      if (!session.worker.child)
-        session.worker.createChild();
-      //
-      // Insert the new session id into the message so that the sync object can store it somewhere
-      msg.sid.sidsrv = session.id;
-      //
-      this.logger.log("DEBUG", "Created new sync session", "Server.handleSyncMessage", msg);
-    }
-    else if (session.syncSocket && session.syncSocket !== socket) {
-      // This session had a socket: client had gone offline and returned online;
-      // It was born a new socket, and old socket had not yet triggered the disconnect timeout.
-      // I unplug the old socket not notifying the onDisconnect.
-      session.syncSocket.removeAllListeners("disconnect");
-      session.syncSocket.disconnect();
-      delete session.syncSocket;
-    }
-    //
-    // Open the sync connection (if not already connected)
-    if (!session.syncSocket)
-      session.openSyncConnection(socket, msg);
-    //
-    // Add useful info (see App.handleSync)
-    msg.request = msg.request || {};
-    if (socket.handshake && socket.handshake.address)
-      msg.request.remoteAddress = socket.handshake.address.replace(/^.*:/, "");
-  }
-  //
-  // If I don't have a session I can't continue
-  if (!session) {
-    socket.disconnect();
-    return this.logger.log("WARN", "Sync message not handled: session not found", "Server.handleSyncMessage", msg);
-  }
-  //
-  // Assign a message type and route it to the proper child process
-  msg.type = Node.Server.msgTypeMap.sync;
-  session.sendToChild(msg);
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -910,54 +808,7 @@ Node.Server.prototype.handleSyncMessage = function (socket, msg)
  */
 Node.Server.prototype.handleCloudConnectorMessage = function (socket, msg)
 {
-  var sendErrorToClient = function (errmsg) {
-    this.logger.log("WARN", "Error handling a cloudConnector msg: " + errmsg, "Server.handleCloudConnectorMessage",
-            {clientip: socket.handshake.address});
-    //
-    socket.emit("indeError", {type: "auth", msg: errmsg});
-  }.bind(this);
-  //
-  // If cloud connector is not enabled, tell it to callee
-  if ((this.config.services || "").split(",").indexOf("cc") === -1)
-    return sendErrorToClient("CloudConnector service not enabled");
-  //
-  // Create list of users recipient from this connector
-  var users = [];
-  if (msg.userName) {
-    var user = this.config.getUser(msg.userName);
-    if (!user)
-      return sendErrorToClient("user " + msg.userName + " not found");
-    //
-    users.push(user);
-  }
-  else
-    users = this.config.users.slice();
-  //
-  var i;
-  if (msg.type === "init") {
-    // Informs all recipient users that a connector is connected
-    for (i = 0; i < users.length; i++)
-      users[i].addCloudConnector(socket, msg.data);
-    //
-    socket.on("disconnect", function () {
-      // Informs all recipient users that a connector is disconnected
-      for (i = 0; i < users.length; i++)
-        users[i].removeCloudConnector(socket);
-    });
-  }
-  else {
-    // I turn the message to the users.
-    // Each user check if the message started from a its own session and handle the response
-    var handled = false;
-    for (i = 0; i < users.length; i++)
-      if (users[i].handleCloudConnectorMessage(msg, socket)) {
-        handled = true;
-        break;
-      }
-    //
-    if (!handled)
-      return sendErrorToClient("session not found");
-  }
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1671,57 +1522,62 @@ Node.Server.prototype.setOwnerToIndert = function ()
  * @param {Object} cert
  * @param {function} callback (err)
  */
- Node.Server.prototype.loadCustomCert = function (cert, callback)
- {
-   var catCmd = (/^win/.test(process.platform) ? "more" : "/bin/cat");
-   //
-   if (cert.SSLKey && !cert.SSLKey_data) {
-     // Load missing file
-     return this.execFileAsRoot(catCmd, [cert.SSLKey], function (err, stdout, stderr) {   // jshint ignore:line
-       if (err) {
-         this.logger.log("ERROR", "Error while reading SSLKey " + cert.SSLKey + ": " + (stderr || err), "Server.initServer");
-         return callback(stderr || err);
-       }
-       //
-       cert.SSLKey_data = stdout;   // Got it!
-       this.loadCustomCert(cert, callback); // Re-check
-     }.bind(this));
-   }
-   //
-   if (cert.SSLCert && !cert.SSLCert_data) {
-     // Load missing file
-     return this.execFileAsRoot(catCmd, [cert.SSLCert], function (err, stdout, stderr) {   // jshint ignore:line
-       if (err) {
-         this.logger.log("ERROR", "Error while reading SSLCert " + cert.SSLCert + ": " + (stderr || err), "Server.initServer");
-         return callback(stderr || err);
-       }
-       //
-       cert.SSLCert_data = stdout;   // Got it!
-       this.loadCustomCert(cert, callback); // Re-check
-     }.bind(this));
-   }
-   //
-   if (cert.SSLCABundles) {
-     cert.SSLCABundles_data = cert.SSLCABundles_data || [];
-     for (var j = 0; j < cert.SSLCABundles.length; j++)
-       if (cert.SSLCABundles[j] && !cert.SSLCABundles_data[j]) {
-         // Load missing file
-         return this.execFileAsRoot(catCmd, [cert.SSLCABundles[j]], function (err, stdout, stderr) {   // jshint ignore:line
-           if (err) {
-             this.logger.log("ERROR", "Error while reading SSLCABundles(" + j + ") " + cert.SSLCABundles[j] + ": " + (stderr || err), "Server.initServer");
-             return callback(stderr || err);
-           }
-           //
-           cert.SSLCABundles_data[j] = stdout;   // Got it!
-           this.loadCustomCert(cert, callback); // Re-check
-         }.bind(this));
-       }
-   }
-   //
-   // I have all needed files!
-   callback();
- };
- 
+Node.Server.prototype.loadCustomCert = function (cert, callback)
+{
+  var catCmd = (/^win/.test(process.platform) ? "more" : "/bin/cat");
+  //
+  if (cert.SSLKey && cert.SSLKey_data === undefined) {
+    // Load missing file
+    return this.execFileAsRoot(catCmd, [cert.SSLKey], function (err, stdout, stderr) {   // jshint ignore:line
+      if (cert.SSLKey_data === undefined) {  // If still empty (no one else read it while I was reading...)
+        if (err) {
+          this.logger.log("ERROR", "Error while reading SSLKey " + cert.SSLKey + ": " + (stderr || err), "Server.initServer");
+          return callback(stderr || err);
+        }
+        //
+        cert.SSLKey_data = stdout || "";   // Got it!
+      }
+      this.loadCustomCert(cert, callback); // Re-check
+    }.bind(this));
+  }
+  //
+  if (cert.SSLCert && cert.SSLCert_data === undefined) {
+    // Load missing file
+    return this.execFileAsRoot(catCmd, [cert.SSLCert], function (err, stdout, stderr) {   // jshint ignore:line
+      if (cert.SSLCert_data === undefined) {  // If still empty (no one else read it while I was reading...)
+        if (err) {
+          this.logger.log("ERROR", "Error while reading SSLCert " + cert.SSLCert + ": " + (stderr || err), "Server.initServer");
+          return callback(stderr || err);
+        }
+        //
+        cert.SSLCert_data = stdout || "";   // Got it!
+      }
+      this.loadCustomCert(cert, callback); // Re-check
+    }.bind(this));
+  }
+  //
+  if (cert.SSLCABundles) {
+    cert.SSLCABundles_data = cert.SSLCABundles_data || [];
+    for (var j = 0; j < cert.SSLCABundles.length; j++)
+      if (cert.SSLCABundles[j] && cert.SSLCABundles_data[j] === undefined) {
+        // Load missing file
+        return this.execFileAsRoot(catCmd, [cert.SSLCABundles[j]], function (err, stdout, stderr) {   // jshint ignore:line
+          if (cert.SSLCABundles_data[j] === undefined) {  // If still empty (no one else read it while I was reading...)
+            if (err) {
+              this.logger.log("ERROR", "Error while reading SSLCABundles(" + j + ") " + cert.SSLCABundles[j] + ": " + (stderr || err), "Server.initServer");
+              return callback(stderr || err);
+            }
+            //
+            cert.SSLCABundles_data[j] = stdout || "";   // Got it!
+          }
+          this.loadCustomCert(cert, callback); // Re-check
+        }.bind(this));
+      }
+  }
+  //
+  // I have all needed files!
+  callback();
+};
 
 
 // Starts the server

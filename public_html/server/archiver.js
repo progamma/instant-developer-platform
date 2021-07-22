@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -13,7 +13,6 @@ Node.Utils = require("./utils");
 // Import Modules
 Node.tar = require("tar");
 Node.archiver = require("archiver");
-Node.AWS = require("aws-sdk");
 Node.rimraf = require("rimraf");
 Node.fs = require("fs");
 Node.googleCloudStorage = require("@google-cloud/storage").Storage;
@@ -84,26 +83,6 @@ Node.Archiver.prototype.upload = function (pathFile, pathCloud, callback)
       callback();
     });
   }
-  else if (this.config.storage === "aws") {  // If the storage is S3
-    // Read the full file
-    Node.fs.readFile(pathFile, function (err, data) {
-      if (err) {
-        pthis.log("ERROR", "Error reading the file " + pathFile + ": " + err, "Archiver.upload");
-        return callback("Error reading the file " + pathFile + ": " + err);
-      }
-      //
-      Node.AWS.config.update(pthis.config.configS3);
-      var S3 = new Node.AWS.S3();
-      S3.putObject({Bucket: pthis.config.bucketS3, Key: pathCloud, Body: data}, function (err) {
-        if (err) {
-          pthis.logger.log("ERROR", "Error uploading the file " + pathFile + " to S3 " + pathCloud + ": " + err, "Archiver.upload");
-          return callback("Error uploading the file " + pathFile + " to S3 " + pathCloud + ": " + err);
-        }
-        //
-        callback();
-      });
-    });
-  }
 };
 
 
@@ -169,26 +148,6 @@ Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
     writeStream.on("finish", function () {
       if (!readError)
         callback();
-    });
-  }
-  else if (this.config.storage === "aws") {
-    Node.AWS.config.update(this.config.configS3);
-    var S3 = new Node.AWS.S3();
-    //
-    S3.getObject({Bucket: this.config.bucketS3, Key: pathCloud}, function (err, data) {
-      if (err) {
-        pthis.logger.log("ERROR", "Error while downloading the file " + pathCloud + " from S3: " + err, "Archiver.download");
-        return callback("Error while downloading the file " + pathCloud + " from S3: " + err);
-      }
-      //
-      Node.fs.writeFile(pathFile, data.Body, function (err) {
-        if (err) {
-          pthis.logger.log("ERROR", "Error while writing the file " + pathFile + ": " + err, "Archiver.download");
-          return callback("Error while writing the file " + pathFile + ": " + err);
-        }
-        //
-        callback();
-      });
     });
   }
 };
@@ -460,18 +419,6 @@ Node.Archiver.prototype.saveObject = function (pathCloud, obj, callback)
       wsFile.write(obj);
     wsFile.end();
   }
-  else if (this.config.storage === "aws") {
-    Node.AWS.config.update(pthis.config.configS3);
-    var S3 = new Node.AWS.S3();
-    //
-    var data = (typeof obj === "object" ? JSON.stringify(obj) : obj);
-    S3.putObject({Bucket: pthis.config.bucketS3, Key: pathCloud, Body: data}, function (err) {
-      if (err)
-        pthis.logger.log("ERROR", "Error uploading the object in S3 storage (" + pathCloud + "): " + err, "Archiver.saveObject");
-      //
-      callback(err);
-    });
-  }
 };
 
 
@@ -504,16 +451,6 @@ Node.Archiver.prototype.readObject = function (pathCloud, callback)
       //
       pthis.logger.log("WARN", "Error reading the object from GCloud storage (" + pathCloud + "): " + err, "Archiver.readObject");
       callback(null, err);
-    });
-  }
-  else if (this.config.storage === "aws") {
-    Node.AWS.config.update(this.config.configS3);
-    var S3 = new Node.AWS.S3();
-    //
-    S3.getObject({Bucket: this.config.bucketS3, Key: pathCloud}, function (err, data) {
-      if (err)
-        pthis.logger.log("WARN", "Error reading the object from S3 storage (" + pathCloud + "): " + err, "Archiver.readObject");
-      callback((err ? null : data), err);
     });
   }
 };

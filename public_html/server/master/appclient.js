@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -96,6 +96,12 @@ Node.AppClient.prototype.init = function (req, res)
     this.startUnsecured = true;
   }
   //
+  // If there was a query string, add it
+  var qryKeys = JSON.parse(JSON.stringify(req.query));
+  delete qryKeys.addsid;
+  if (Object.keys(qryKeys).length)
+    qrys += (qrys ? "&" : "?") + Node.querystring.stringify(qryKeys);
+  //
   // Redirect to the main page
   res.redirect("/" + this.app.name + "/" + this.config.getAppMainFile(req.query.mode) + qrys);
   //
@@ -166,6 +172,12 @@ Node.AppClient.prototype.openConnection = function (socket)
     // Route this message to the child
     pthis.session.sendToChild({type: Node.AppClient.msgTypeMap.appmsg, sid: msg.sid, cid: pthis.id,
       content: msg.events, master: (pthis.session.masterAppClient === pthis), request: pthis.session.request, cookies: pthis.session.cookies});
+    //
+    // During a test auto some requests may arrive before onStart (for example onPause/onResume...).
+    // So I don't have to delete request and cookies until onStart message arrives
+    var testAuto = pthis.app.getTestById(pthis.session.testAutoId);
+    if (testAuto && !testAuto.onStartArrived)
+      return;
     //
     // Delete the content of the request after it has been sent
     delete pthis.session.request;

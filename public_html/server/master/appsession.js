@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -329,9 +329,6 @@ Node.AppSession.prototype.invalidSID = function (socket, client)
   // If there are no cookies and this session was started "unsecured" (see appclient::init)
   if (!socket.request.headers.cookie && client.startUnsecured) {
     this.log("INFO", "Missing cookies with ADDSID -> 'unsecure' connection accepted", "AppSession.invalidSID");
-    //
-    // Forget it... it's one shot!
-    delete client.startUnsecured;
     return false;
   }
   //

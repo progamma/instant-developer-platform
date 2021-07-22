@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, process, module, __dirname, __filename */
@@ -84,8 +84,8 @@ Node.Logger.prototype.initLogFile = function ()
 {
   var logPath = Node.path.resolve(__dirname + "/../log");
   //
-  // If local check if LOG directory exists
-  if (this.config && this.config.local && !Node.fs.existsSync(logPath))
+  // If LOG directory does not exist, create it
+  if (!Node.fs.existsSync(logPath))
     Node.fs.mkdirSync(logPath);
   //
   // If I haven't done it yet

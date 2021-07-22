@@ -1,6 +1,6 @@
 /*
- * Instant Developer Next
- * Copyright Pro Gamma Spa 2000-2016
+ * Instant Developer Cloud
+ * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
 /* global require, module */
@@ -272,10 +272,13 @@ Node.Commit.prototype.redo = function (checkConflicts)
     twManager.logger.log("DEBUG", "Update commit", "Commit.redo", {commit: this.id});
     //
     var pathCommit = twManager.path + "/branches/" + twManager.actualBranch.name + "/" + this.id;
-    Node.fs.writeFile(pathCommit, JSON.stringify(trans), function (err) {
-      if (err)
-        twManager.logger.log("WARN", "Error while re-saving commit: " + err, "Commit.redo", {pathCommit: pathCommit});
-    });
+    try {
+      Node.fs.writeFileSync(pathCommit, JSON.stringify(trans));
+    }
+    catch (ex) {
+      twManager.logger.log("WARN", "Error while re-saving commit: " + ex, "Commit.redo", {pathCommit: pathCommit});
+      throw ex;
+    }
   }
 };
 

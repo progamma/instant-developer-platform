@@ -225,7 +225,7 @@ Node.Server.prototype.initServer = function ()
   });
   //
   // Set socket io on top of server
-  Node.io = require("socket.io")(server, {allowEIO3: true});
+  Node.io = require("socket.io")(server, {allowEIO3: true, maxHttpBufferSize: 1e8, cors: {origin: "*"}});
 };
 
 

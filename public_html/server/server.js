@@ -797,7 +797,112 @@ Node.Server.prototype.handleDeviceMessage = function (socket, msg)
  */
 Node.Server.prototype.handleSyncMessage = function (socket, msg)
 {
-  console.error("NOT SUPPORTED FOR SELF");
+  // If sync is not enabled, tell it to callee
+  if (msg.cnt.id === "connect" && (!this.config.services || this.config.services.split(",").indexOf("sync") === -1))
+    msg.cnt.serviceDisabled = true;
+  //
+  // Search the session I've to route this message to
+  var session = this.appSessions[msg.sid.sidsrv];
+  if (!session) {
+    session = this.IDESessions[msg.sid.sidcli];
+    if (session) {
+      // If there is at least an online app I use IDe session to open sync connection
+      var onlineAppClient;
+      for (var i = 0; i < session.appClients.length; i++) {
+        if (session.appClients[i].mode !== "offline") {
+          // This is a sync message in febe mode
+          msg.sid.febe = true;
+          //
+          // I want to merge sync session with online preview session
+          msg.sid.sidsrv = msg.sid.sidcli;
+          //
+          onlineAppClient = true;
+          break;
+        }
+      }
+      if (!onlineAppClient)
+        session = undefined;
+    }
+  }
+  //
+  // Handle CONNECT
+  if (msg.cnt.id === "connect") {
+    // If there is no session try to connect
+    if (!session) {
+      // First get the user that owns the app (or use MANAGER)
+      var user = this.config.getUser(msg.sid.username || "manager");
+      if (!user) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: user not found", "Server.handleSyncMessage", msg);
+      }
+      //
+      // Search the app
+      var app = user.getApp(msg.sid.appname.toLowerCase());
+      if (!app) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: app not found", "Server.handleSyncMessage", msg);
+      }
+      //
+      // If the app has been stopped
+      if (app.stopped) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: app stopped", "Server.handleSyncMessage", msg);
+      }
+      //
+      // If the app is updating
+      if (app.updating) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Sync connect not handled: app updating", "Server.handleSyncMessage", msg);
+      }
+      //
+      this.logger.log("DEBUG", "A new sync session begins", "Server.handleSyncMessage", msg);
+      //
+      // Ask the app to create a new AppSession
+      session = app.createNewSession({type: "sync"});
+      //
+      // If a session can't be created -> do nothing
+      if (!session) {
+        socket.disconnect();
+        return this.logger.log("WARN", "Session can't be created: too many users", "Server.handleSyncMessage", msg);
+      }
+      //
+      // If needed ask the worker to create the physical child process
+      if (!session.worker.child)
+        session.worker.createChild();
+      //
+      // Insert the new session id into the message so that the sync object can store it somewhere
+      msg.sid.sidsrv = session.id;
+      //
+      this.logger.log("DEBUG", "Created new sync session", "Server.handleSyncMessage", msg);
+    }
+    else if (session.syncSocket && session.syncSocket !== socket) {
+      // This session had a socket: client had gone offline and returned online;
+      // It was born a new socket, and old socket had not yet triggered the disconnect timeout.
+      // I unplug the old socket not notifying the onDisconnect.
+      session.syncSocket.removeAllListeners("disconnect");
+      session.syncSocket.disconnect();
+      delete session.syncSocket;
+    }
+    //
+    // Open the sync connection (if not already connected)
+    if (!session.syncSocket)
+      session.openSyncConnection(socket, msg);
+    //
+    // Add useful info (see App.handleSync)
+    msg.request = msg.request || {};
+    if (socket.handshake && socket.handshake.address)
+      msg.request.remoteAddress = socket.handshake.address.replace(/^.*:/, "");
+  }
+  //
+  // If I don't have a session I can't continue
+  if (!session) {
+    socket.disconnect();
+    return this.logger.log("WARN", "Sync message not handled: session not found", "Server.handleSyncMessage", msg);
+  }
+  //
+  // Assign a message type and route it to the proper child process
+  msg.type = Node.Server.msgTypeMap.sync;
+  session.sendToChild(msg);
 };
 
 

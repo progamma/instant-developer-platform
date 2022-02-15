@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
+/* global require, module, process */
 
 var Node = Node || {};
 
@@ -151,6 +151,10 @@ Node.Request.prototype.sendTokenToConsole = function ()
   var form = new Node.FormData();
   form.append("server", this.config.name);
   form.append("tk", this.config.autk);
+  if (this.config.server.version)
+    form.append("version", this.config.server.version);
+  if (process.env["DOCKER_NAME"])
+    form.append("dockerName", process.env["DOCKER_NAME"]);
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {
@@ -698,6 +702,7 @@ Node.Request.prototype.listUsers = function (msg, callback)
   form.append("company", this.config.serverType);
   form.append("matchingString", msg.matchingString);
   form.append("organizationOnly", (msg.organizationOnly ? 1 : 0));
+  form.append("onlineStatus", (msg.onlineStatus ? 1 : 0));
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {

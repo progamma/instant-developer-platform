@@ -344,17 +344,41 @@ Node.Project.prototype.editProject = function (params, callback)
     this.log("DEBUG", "Create a new IDE session", "Project.editProject");
     //
     var qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
-    session = this.server.createSession(this, {openParams: qry});
+    //
+    // Do not check if there is no limit...
+    let getFreeDiskSize = Node.Utils.getFreeDiskSize;
+    if (!this.config.lowDiskThreshold)
+      getFreeDiskSize = function (callback) {
+        callback(1E12);
+      };
+    //
+    // Check free space on disk... if it's too low open the project as readonly (so that
+    // the developer will be unable to save)
+    getFreeDiskSize(function (available, err) {
+      if (err) {
+        this.log("ERROR", "Can't get free disk space: " + err, "Project.editProject");
+        return callback("Can't get free disk space: " + err);
+      }
+      //
+      let readOnly;
+      if (available < this.config.lowDiskThreshold) {
+        this.log("WARN", "Disk space left on device is too low -> project opened as readonly", "Project.editProject", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
+        readOnly = true;
+        qry = qry || {};
+        qry.lowDiskSpace = true;  // Tell the process that we are low on disk space (it will tell the user)
+      }
+      session = this.server.createSession(this, {readOnly: readOnly, openParams: qry});
+      //
+      // Protects SID cookie
+      session.protectSID(params.req, params.res);
+      //
+      // Redirect to the MAIN page with the sid as querystring
+      params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
+      //
+      // Done
+      callback({skipReply: true});
+    }.bind(this));
   }
-  //
-  // Protects SID cookie
-  session.protectSID(params.req, params.res);
-  //
-  // Redirect to the MAIN page with the sid as querystring
-  params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
-  //
-  // Done
-  callback({skipReply: true});
 };
 
 
@@ -419,8 +443,8 @@ Node.Project.prototype.downloadFile = function (params, callback)
   //
   // The URL is in the following form:
   //   http://servername/username/projectname/folder/filename
-  var folder = params.tokens.slice(0, params.tokens.length - 1).join("/");   // resources, tutorials, files (with AUTK)
-  var filename = params.tokens[params.tokens.length - 1];
+  var folder = params.tokens.slice(0, params.tokens.length - 1).join("/").replace(/\+/g, " ");   // resources, tutorials, files (with AUTK)
+  var filename = params.tokens[params.tokens.length - 1].replace(/\+/g, " ");
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/" + folder + "/" + filename;
   //
   // Send the file only if there is an editing session
@@ -541,6 +565,7 @@ Node.Project.prototype.handleFileSystem = function (params, callback)
   var options = {
     path: prjFilesPath + objPath,
     command: params.tokens[1],
+    basePath: prjFilesPath,
     tempPath: prjFilesPath + "/temp/"
   };
   //

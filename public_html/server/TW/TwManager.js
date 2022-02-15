@@ -989,8 +989,8 @@ Node.TwManager.prototype.getBranchList = function (PR)
     if (bra.type !== Node.Branch.PR) {
       brinfo = {name: bra.name, owner: bra.owner};
       //
-      // If There are uncommitted changes, tell the client if the user can safely switch to this branch
-      if (this.localModif()) {
+      // If the branch is not the active one
+      if (this.actualBranch.name !== bra.name) {
         // I can switch only if the new branch's HEAD and old branch's HEAD are the same
         var oldFile = this.path + "/branches/" + this.actualBranch.name + "/project.json";
         var newFile = this.path + "/branches/" + bra.name + "/project.json";
@@ -1997,6 +1997,9 @@ Node.TwManager.prototype.reset = function (callback)
           //
           // Reload document (both server-side and client-side)
           pthis.doc.reload();
+          //
+          // Invalidate keys used for crypting on the client-side
+          pthis.doc.regenerateSaveKeys();
           //
           // Log the reset
           pthis.logger.log("DEBUG", "Project resetted", "TwManager.reset");

@@ -76,7 +76,7 @@ Node.Config.prototype.save = function ()
     numHoursSnapshot: this.numHoursSnapshot, numMaxSnapshot: this.numMaxSnapshot, timeSnapshot: this.timeSnapshot,
     appDirectory: this.appDirectory, defaultApp: this.defaultApp, services: this.services,
     maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
-    params: this.params, users: this.users
+    lowDiskThreshold: this.lowDiskThreshold, params: this.params, users: this.users
   };
   //
   // Remove certificate's file content
@@ -196,6 +196,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.minAppUsersPerWorker = v.minAppUsersPerWorker;
   if (v.maxAppWorkers)
     this.maxAppWorkers = v.maxAppWorkers;
+  if (v.lowDiskThreshold)
+    this.lowDiskThreshold = v.lowDiskThreshold;
   if (v.params)
     this.params = v.params;
   if (v.local)
@@ -282,29 +284,55 @@ Node.Config.prototype.saveConfig = function ()
       return v;
   });
   //
-  // Remove the old BACK if present
-  Node.rimraf(configFile + ".bak", function (err) {
+  // Write a new config file
+  Node.fs.open(configFile + ".new", "w", 0600, function (err, fd) {     // Owner RW only
     if (err) {
       delete pthis.savingConf;  // End save
-      return pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "Config.saveConfig");
+      return pthis.logger.log("ERROR", "Error saving the CONFIG file (OPEN) " + configFile + ".new: " + err, "Config.saveConfig");
     }
-    //
-    // Backup the the config file into a .bak file
-    Node.fs.rename(configFile, configFile + ".bak", function (err) {
+    Node.fs.writeFile(fd, docjson, function (err) {
       if (err) {
         delete pthis.savingConf;  // End save
-        return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + " to " + configFile + ".bak: " + err, "Config.saveConfig");
+        return pthis.logger.log("ERROR", "Error saving the CONFIG file (WRITE) " + configFile + ".new: " + err, "Config.saveConfig");
       }
-      //
-      // Write the config file
-      Node.fs.writeFile(configFile, docjson, {mode: 0600}, function (err) {     // Owner RW only
+      Node.fs.fsync(fd, function (err) {
         if (err) {
           delete pthis.savingConf;  // End save
-          return pthis.logger.log("ERROR", "Error saving the CONFIG file " + configFile + ": " + err, "Config.saveConfig");
+          return pthis.logger.log("ERROR", "Error saving the CONFIG file (FSYNC) " + configFile + ".new: " + err, "Config.saveConfig");
         }
-        //
-        delete pthis.savingConf;  // End save
-        pthis.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
+        Node.fs.close(fd, function (err) {
+          if (err) {
+            delete pthis.savingConf;  // End save
+            return pthis.logger.log("ERROR", "Error saving the CONFIG file (CLOSE) " + configFile + ".new: " + err, "Config.saveConfig");
+          }
+          //
+          // Everything went fine... Remove the old .BAK if present
+          Node.rimraf(configFile + ".bak", function (err) {
+            if (err) {
+              delete pthis.savingConf;  // End save
+              return pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "Config.saveConfig");
+            }
+            //
+            // Backup the config file into a .bak file
+            Node.fs.rename(configFile, configFile + ".bak", function (err) {
+              if (err) {
+                delete pthis.savingConf;  // End save
+                return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + " to " + configFile + ".bak: " + err, "Config.saveConfig");
+              }
+              //
+              // Rename the .new into the final file
+              Node.fs.rename(configFile + ".new", configFile, function (err) {
+                if (err) {
+                  delete pthis.savingConf;  // End save
+                  return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + ".new to " + configFile + ": " + err, "Config.saveConfig");
+                }
+                //
+                delete pthis.savingConf;  // End save
+                pthis.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
+              });
+            });
+          });
+        });
       });
     });
   });
@@ -1108,19 +1136,31 @@ Node.Config.prototype.processRun = function (req, res)
     // Check if it's a multi-part POST
     var contentType = req.get("Content-Type");
     if (contentType && contentType.indexOf("multipart/form-data") >= 0) {
+      // It's a file upload -> this is a rest request...
+      if (!isRest) {
+        isRest = true;
+        req.query = req.query || {};
+        req.query.mode = "rest";
+      }
+      //
+      // Compute maximum file size
+      var maxFilesSize = parseInt(app && app.params ? app.params.maxUploadFileSize : 0) ||
+              parseInt(this.params ? this.params.maxUploadFileSize : 0) ||
+              50 * 1024 * 1024;   // Default: 50 MB
+      //
       // Multi part request. Parse it
       var form;
       if (isIDE)
-        form = new Node.multiparty.Form({autoFields: true, autoFiles: true,
+        form = new Node.multiparty.Form({autoFields: true, autoFiles: true, maxFilesSize: maxFilesSize,
           uploadDir: pthis.directory + "/" + session.project.user.userName + "/" +
                   session.project.name + "/files/uploaded"});
       else
-        form = new Node.multiparty.Form({autoFields: true, autoFiles: true,
+        form = new Node.multiparty.Form({autoFields: true, autoFiles: true, maxFilesSize: maxFilesSize,
           uploadDir: pthis.appDirectory + "/apps/" + app.name + "/files/uploaded"});
       form.parse(req, function (err, fields, files) {
         if (err) {
-          pthis.logger.log("ERROR", "Error parsing post request: " + err, "Config.processRun");
-          return res.status(400).end();
+          pthis.logger.log("ERROR", "Error parsing post request: " + err, "Config.processRun", {maxFilesSize: maxFilesSize});
+          return res.status(500).end(err.message);
         }
         //
         // Check if the session is still there
@@ -1237,7 +1277,9 @@ Node.Config.prototype.initTokenTimer = function ()
     }.bind(this), this.timerTokenConsole);
   //
   // Send token now (server startup)
-  this.server.request.sendTokenToConsole();
+  setImmediate(function () {
+    this.server.request.sendTokenToConsole();
+  }.bind(this));
 };
 
 
@@ -1329,7 +1371,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
   //
   // Add server info
   var srvFile = Node.path.resolve(__dirname + "/../server.js");
-  result.serverInfo = {version: this.server.version, startTime: this.server.startTime, pid: process.pid, lastWrite: Node.fs.statSync(srvFile).mtime};
+  result.serverInfo = {version: this.server.version, startTime: this.server.startTime, pid: process.pid, lastWrite: Node.fs.statSync(srvFile).mtime, dockerName: process.env["DOCKER_NAME"]};
   //
   // Add current disk status
   var cmd, cmdParams;
@@ -1492,6 +1534,8 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.minAppUsersPerWorker = parseInt(query.minAppUsersPerWorker, 10);
   if (query.maxAppWorkers)
     this.maxAppWorkers = parseInt(query.maxAppWorkers, 10);
+  if (query.lowDiskThreshold !== undefined)
+    this.lowDiskThreshold = (query.lowDiskThreshold ? parseInt(query.lowDiskThreshold, 10) || 0 : 0);
   if (query.params !== undefined) {
     if (query.params) {
       // Callee will send every time all parameters as an array of NAME=VALUE couples

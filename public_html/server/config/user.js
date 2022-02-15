@@ -945,6 +945,9 @@ Node.User.prototype.createApp = function (appName)
 Node.User.prototype.deleteApp = function (app)
 {
   var idx = this.apps.indexOf(app);
+  if (idx === -1)
+    return this.log("WARN", "App not found", "User.deleteApp", {app: app.name});
+  //
   this.apps.splice(idx, 1);
   //
   // Save the new configuration

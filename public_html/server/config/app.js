@@ -124,7 +124,8 @@ Node.App.prototype.setParent = function (p)
   // I need to do it synchronously because I need to do it before starting the ServerSession (if enabled)
   if (Node.fs.existsSync(filename)) {
     var json = Node.fs.readFileSync(filename);
-    this.params = JSON.parse(json);
+    if (json.length)
+      this.params = JSON.parse(json);
   }
 };
 
@@ -170,7 +171,7 @@ Node.App.prototype.createNewSession = function (options)
         continue;
       //
       // If the configuration is specific to a particular query string
-      if (conf.query && (!options.query || options.query.indexOf(conf.guery) === -1))
+      if (conf.query && (!options.query || options.query.indexOf(conf.query) === -1))
         continue;
       //
       // Found it! Use this custom configuration settings (if given)

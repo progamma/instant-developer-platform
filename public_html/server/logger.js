@@ -12,6 +12,7 @@ Node.fs = require("fs");
 Node.rimraf = require("rimraf");
 Node.child = require("child_process");
 Node.path = require("path");
+Node.Utils = require("./utils");
 
 
 /**
@@ -271,42 +272,32 @@ Node.Logger.prototype.startCheckTimer = function ()
         }
       }.bind(this));
     //
+    // If there is no limit, do nothing
+    if (!this.config.lowDiskThreshold) {
+      delete this.stopLogDiskSize;  // Maybe "they" changed the parameter when I was stopped
+      return;
+    }
+    //
     // Check disk size
-    var cmd, cmdParams;
-    if (!/^win/.test(process.platform)) {   // linux
-      cmd = "/bin/df";
-      cmdParams = ["."];
-    }
-    else {  // windows
-      cmd = "wmic";
-      cmdParams = ["logicaldisk", "where", "DeviceID='" + __filename[0] + ":'", "get", "freespace,size", "/format:table"];
-    }
-    this.parent.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {   // jshint ignore:line
+    Node.Utils.getFreeDiskSize(function (available, err) {
       if (err)
-        return this.log("ERROR", "Error getting the disk size: " + (stderr || err), "Logger.startCheckTimer");
+        return this.log("ERROR", "Can't get free disk space: " + err, "Logger.startCheckTimer");
       //
-      stdout = stdout.split("\n")[1];   // Remove headers
-      stdout = stdout.split(/\s+/);     // Split spaces
-      //
-      var diskStat;
-      if (!/^win/.test(process.platform))    // linux
-        diskStat = {size: stdout[1] * 1024, available: stdout[3] * 1024};
-      else   // windows
-        diskStat = {size: stdout[1], available: stdout[0]};
-      //
-      // If disk left is less than 1GB stop writing
-      if (diskStat.available < 1 * 1024 * 1024 * 1024) {
+      // If disk left is less than "lowDiskThreshold" stop writing
+      if (available < this.config.lowDiskThreshold) {
         // LOG file is too big... stop writing to disk
-        this.log("WARN", "Disk space left on device is too low", "Logger.startCheckTimer", diskStat);
-        this.stopLogDiskSize = true;
+        if (!this.stopLogDiskSize) {
+          this.log("WARN", "Disk space left on device is too low", "Logger.startCheckTimer", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
+          this.stopLogDiskSize = true;
+        }
       }
       else if (this.stopLogDiskSize) {
         // LOG file was too big... now it's good... restart log writing
         delete this.stopLogDiskSize;
-        this.log("WARN", "Disk space left on device is good -> resume logging", "Logger.startCheckTimer", diskStat);
+        this.log("WARN", "Disk space left on device is enough -> resume logging", "Logger.startCheckTimer", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
       }
     }.bind(this));
-  }.bind(this), 3 * 60 * 1000);    // Every 3 minutes
+  }.bind(this), 60 * 1000);    // Every minute
 };
 
 

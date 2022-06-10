@@ -95,7 +95,13 @@ Per avviare server.js con PM2 e impostare il reboot automatico eseguire i comand
 #### Attivare la Server Session per una applicazione
 Per attivare la server session è necessario editare *idcloud/config/config.json* impostando a true la proprietà *startSS* dei parametri dell'applicazione.
 ```
-{ "cl" : "Node.App", "name" : "app-name", "date" : "current-date in ISO string", "stopped" : false,  "startSS": true}
+{ 
+  "cl" : "Node.App",
+  "name" : "app-name",
+  "date" : "current-date in ISO string",
+  "stopped" : false,
+  "startSS": true
+}
 ```
 #### Gestione dei certificati
 Per attivare il protocollo https ed utilizzare i propri certificati SSL sul server, è sufficiente

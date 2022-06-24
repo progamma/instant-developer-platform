@@ -91,3 +91,58 @@ Per avviare server.js con PM2 e impostare il reboot automatico eseguire i comand
 1. scaricare la build e decoprimerla in *idcloud/apps/apps/app-name*
 1. editare *idcloud/config/config.json*
   1. *apps* = *[{ "cl" : "Node.App", "name" : "app-name", "date" : "current-date in ISO string", "stopped" : false}]*
+
+#### Attivare la Server Session per una applicazione
+Per attivare la server session è necessario editare *idcloud/config/config.json* impostando a true la proprietà *startSS* dei parametri dell'applicazione.
+```
+{ 
+  "cl" : "Node.App",
+  "name" : "app-name",
+  "date" : "current-date in ISO string",
+  "stopped" : false,
+  "startSS": true
+}
+```
+#### Gestione dei certificati
+Per attivare il protocollo https ed utilizzare i propri certificati SSL sul server, è sufficiente
+copiare i file sul server stesso e modificare opportunamente il file *idcloud/config/config.json*.
+
+Ipotizzando che il server risponda all'indirizzo https://mysrv.mydomain.it sulla porta default
+443 e che i file dei certificati siano stati copiati nella directory */idcloud/config/cert* il file
+*idcloud/config/config.json* deve essere modificato nel seguente modo:
+```
+"domain": "mydomain.com",
+"alias" : "mysrv.mydomain.it",
+"protocol": "https",
+"portHttps": 443,
+"SSLCert": "/idcloud/config/cert/mydomain_it_certificate.crt",
+"SSLKey": "/idcloud/config/cert/mydomain_it_private.key",
+"SSLCABundles": [
+"/idcloud/config/cert/mydomain_it_ca_bundle.crt"
+],
+```
+È possibile aggiungere al file di configurazione la proprietà customSSLCerts per fare in
+modo di utilizzare uno specifico certificato a seconda della URL di destinazione del server.
+
+Se ad esempio il server è configurato, tramite DNS, a rispondere anche all’indirizzo
+https://mysrv.myotherdomain.it, modificando la proprietà alias ed aggiungendo
+customSSLCerts è possibile utilizzare un diverso certificato se il server è stato raggiunto
+utilizzando questo nome. Ad esempio:
+```
+“alias” : “mysrv.mydomain.it, mysrv.myotherdomain.it”,
+…
+"customSSLCerts": [{
+  "SSLDomain": "myotherdomain.it",
+  "SSLCert": "/idcloud/config/cert/myotherdomain_it_certificate.crt",
+  "SSLKey": "/idcloud/config/cert/myotherdomain_it_private.key",
+  "SSLCABundles": [
+  "/idcloud/config/cert/myotherdomain_it_ca_bundle.crt"
+]
+}],
+```
+#### Impostare l'applicazione di default
+È possibile impostare quale applicazione deve essere eseguita impostando nel file *idcloud/config/config.json* la proprietà *alias* aggiungendo il nome dell'applicazione al nome del dominio o indirizzo ip preceduta dal carattere '|'.
+Ad esempio:
+```
+"alias" : "mysrv.mydomain.it|app-name"
+```

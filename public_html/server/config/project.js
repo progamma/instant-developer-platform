@@ -339,46 +339,51 @@ Node.Project.prototype.editProject = function (params, callback)
     }
   }
   //
-  // If not found, create a new session for this project
-  if (!session) {
-    this.log("DEBUG", "Create a new IDE session", "Project.editProject");
+  // Do not check if there is no limit...
+  let getFreeDiskSize = Node.Utils.getFreeDiskSize;
+  if (!this.config.lowDiskThreshold)
+    getFreeDiskSize = function (callback) {
+      callback(1E12);
+    };
+  //
+  // Check free space on disk... if it's too low open the project as readonly (so that
+  // the developer will be unable to save)
+  getFreeDiskSize(function (available, err) {
+    if (err) {
+      this.log("ERROR", "Can't get free disk space: " + err, "Project.editProject");
+      return callback("Can't get free disk space: " + err);
+    }
     //
-    var qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
-    //
-    // Do not check if there is no limit...
-    let getFreeDiskSize = Node.Utils.getFreeDiskSize;
-    if (!this.config.lowDiskThreshold)
-      getFreeDiskSize = function (callback) {
-        callback(1E12);
-      };
-    //
-    // Check free space on disk... if it's too low open the project as readonly (so that
-    // the developer will be unable to save)
-    getFreeDiskSize(function (available, err) {
-      if (err) {
-        this.log("ERROR", "Can't get free disk space: " + err, "Project.editProject");
-        return callback("Can't get free disk space: " + err);
-      }
+    let qry = (Object.keys(params.req.query).length ? params.req.query : undefined);
+    let readOnly;
+    if (available < this.config.lowDiskThreshold) {
+      this.log("WARN", "Disk space left on device is too low -> project opened as readonly", "Project.editProject", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
+      readOnly = true;
+      qry = qry || {};
+      qry.lowDiskSpace = true;  // Tell the process that we are low on disk space (it will tell the user)
       //
-      let readOnly;
-      if (available < this.config.lowDiskThreshold) {
-        this.log("WARN", "Disk space left on device is too low -> project opened as readonly", "Project.editProject", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
-        readOnly = true;
-        qry = qry || {};
-        qry.lowDiskSpace = true;  // Tell the process that we are low on disk space (it will tell the user)
+      // If I had a session but it was not readonly, I can't use that!
+      if (session && !session.options.readOnly) {
+        session.closeAllConnections();  // Don't live it alive
+        session = undefined;
       }
+    }
+    //
+    // If not found, create a new session for this project
+    if (!session) {
+      this.log("DEBUG", "Create a new IDE session", "Project.editProject");
       session = this.server.createSession(this, {readOnly: readOnly, openParams: qry});
-      //
-      // Protects SID cookie
-      session.protectSID(params.req, params.res);
-      //
-      // Redirect to the MAIN page with the sid as querystring
-      params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
-      //
-      // Done
-      callback({skipReply: true});
-    }.bind(this));
-  }
+    }
+    //
+    // Protects SID cookie
+    session.protectSID(params.req, params.res);
+    //
+    // Redirect to the MAIN page with the sid as querystring
+    params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
+    //
+    // Done
+    callback({skipReply: true});
+  }.bind(this));
 };
 
 
@@ -821,6 +826,21 @@ Node.Project.prototype.setToken = function (params, callback)
 {
   // Read and store the token
   this.token = params.req.query.t;
+  //
+  // Done
+  callback();
+};
+
+
+/*
+ * Resets the keys used for storing the project into browser's file system
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.Project.prototype.resetKeys = function (params, callback)
+{
+  this.log("INFO", "Reset encryption keys", "Project.resetKeys");
+  this.updateInfo({lastSaveID: null, ivAES: null});
   //
   // Done
   callback();
@@ -1543,6 +1563,9 @@ Node.Project.prototype.execCommand = function (params, callback)
           break;
         case "token":
           this.setToken(params, callback);
+          break;
+        case "resetkeys":
+          this.resetKeys(params, callback);
           break;
         case "backup":
           this.backup(params, callback);

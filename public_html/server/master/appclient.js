@@ -102,8 +102,16 @@ Node.AppClient.prototype.init = function (req, res)
   if (Object.keys(qryKeys).length)
     qrys += (qrys ? "&" : "?") + Node.querystring.stringify(qryKeys);
   //
-  // Redirect to the main page
-  res.redirect("/" + this.app.name + "/" + this.config.getAppMainFile(req.query.mode) + qrys);
+  // If the app has been started in OFFLINE mode and the app CAN'T be started in offline mode
+  let mode = req.query.mode;
+  if (mode === "offline" && (!this.app.params || !this.app.params.allowOffline)) {
+    this.log("WARN", "Requested OFFLINE mode but the app does not allow it (apps' allowOffline parameter must be true for the app to work in offline mode)", "AppClient.init");
+    mode = undefined;
+  }
+  //
+  // Redirect to the main app page
+  var appPage = (this.app.params ? this.app.params.startPage : "") || this.config.getAppMainFile(mode);
+  res.redirect("/" + this.app.name + "/" + appPage + qrys);
   //
   // Create a timer. If an openConnection does not arrive within 10 seconds,
   // the app client is deleted

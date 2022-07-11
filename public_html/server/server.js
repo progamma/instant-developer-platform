@@ -270,9 +270,6 @@ Node.Server.prototype.start = function ()
   // Get external IP (if available)
   this.config.getExternalIp();
   //
-  // Start default server session of all apps
-  this.startServerSessions();
-  //
   // Activate HELMET: hide "powered by express"
   Node.app.use(Node.helmet.hidePoweredBy());
   //
@@ -457,6 +454,9 @@ Node.Server.prototype.start = function ()
     //
     this.setOwnerToIndert();
   }
+  //
+  // Start default server session of all apps
+  this.startServerSessions();
   //
   // Start socket listener
   this.socketListener();
@@ -1297,6 +1297,9 @@ Node.Server.prototype.backupDisk = function (scheduled)
   if (!this.config.numHoursSnapshot || !this.config.numMaxSnapshot)
     return this.logger.log("INFO", "Automatic disk backup not configured", "Server.backupDisk",
             {numHoursSnapshot: this.config.numHoursSnapshot || 0, numMaxSnapshot: this.config.numMaxSnapshot || 0});
+  else if (!scheduled)
+    this.logger.log("INFO", "Automatic disk backup timer started", "Server.backupDisk",
+            {numHoursSnapshot: this.config.numHoursSnapshot, numMaxSnapshot: this.config.numMaxSnapshot, timeSnapshot: this.config.timeSnapshot});
   //
   // This algorithm uses the following 3 config parameters:
   //  - "numHoursSnapshot": number of hours between snapshots (24 -> 1 snapshot per day)
@@ -1375,64 +1378,82 @@ Node.Server.prototype.backupDisk = function (scheduled)
     });
   }
   //
+  var unfreezeDisk = function () {
+    this.config.handleSnapshot({req: {}, tokens: ["", "end"]}, function (err) {
+      if (err)
+        this.logger.log("WARN", "Can't unfreeze the disk: " + err, "Server.backupDisk");
+    }.bind(this));
+  }.bind(this);
+  //
   // Function that schedules the backup of the data disk and clean up old snapshots
   var doBackup = function () {
     this.logger.log("INFO", "Start disk backup", "Server.backupDisk", this.backupInfo);
     //
-    var gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
-    var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
-    var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
-    //
-    var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
-            snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
-    snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
+    this.config.handleSnapshot({req: {}, unlockTimeout: 240000, tokens: ["", "start"]}, function (err) {
       if (err)
-        return this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
+        this.logger.log("WARN", "Can't freeze the disk: " + err, "Server.backupDisk");
       //
-      // Wait for completition
-      operation.on("error", function (err) {
-        this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
-      }.bind(this));
+      var gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
+      var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
+      var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
       //
-      operation.on("complete", function (metadata) {    // jshint ignore:line
-        this.logger.log("INFO", "Disk backup completed", "Server.backupDisk", this.backupInfo);
+      var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
+              snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
+      snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
+        if (err) {
+          this.logger.log("WARN", "Can't create the snapshot (1): " + err, "Server.backupDisk");
+          return unfreezeDisk();
+        }
         //
-        // Snapshot created, now clean up (if needed)
-        // List all snapshots for this disk
-        gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
-          if (err)
-            return this.logger.log("WARN", "Can't list all snapshots for this server: " + err, "Server.backupDisk");
+        // Wait for completition
+        operation.on("error", function (err) {
+          this.logger.log("WARN", "Can't create the snapshot (2): " + err, "Server.backupDisk");
+          unfreezeDisk();
+        }.bind(this));
+        //
+        operation.on("complete", function (metadata) {    // jshint ignore:line
+          this.logger.log("INFO", "Disk backup completed", "Server.backupDisk", this.backupInfo);
           //
-          this.logger.log("DEBUG", "#snapshot: " + snapshots.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
-          if (snapshots.length > this.config.numMaxSnapshot) {
-            // Remove older ones. First I need to sort them by date
-            snapshots.sort(function (f1, f2) {
-              var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
-              var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
-              dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
-                      dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
-              dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
-                      dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
-              return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
-            });
+          // Unfreeze the disk
+          unfreezeDisk();
+          //
+          // Snapshot created, now clean up (if needed)
+          // List all snapshots for this disk
+          gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
+            if (err)
+              return this.logger.log("WARN", "Can't list all snapshots for this server: " + err, "Server.backupDisk");
             //
-            // Now I can remove older one
-            for (var i = this.config.numMaxSnapshot; i < snapshots.length; i++) {
-              (function (sname) {
-                this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
-                //
-                var snapshot = gce.snapshot(sname);
-                snapshot.delete(function (err, operation, apiResponse) {    // jshint ignore:line
-                  if (err)
-                    return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+            this.logger.log("DEBUG", "#snapshot: " + snapshots.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
+            if (snapshots.length > this.config.numMaxSnapshot) {
+              // Remove older ones. First I need to sort them by date
+              snapshots.sort(function (f1, f2) {
+                var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
+                var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
+                dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
+                        dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
+                dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
+                        dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
+                return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
+              });
+              //
+              // Now I can remove older one
+              for (var i = this.config.numMaxSnapshot; i < snapshots.length; i++) {
+                (function (sname) {
+                  this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
                   //
-                  operation.on("error", function (err) {
-                    this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                  var snapshot = gce.snapshot(sname);
+                  snapshot.delete(function (err, operation, apiResponse) {    // jshint ignore:line
+                    if (err)
+                      return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                    //
+                    operation.on("error", function (err) {
+                      this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                    }.bind(this));
                   }.bind(this));
-                }.bind(this));
-              }.bind(this))(snapshots[i].name);    // jshint ignore:line
+                }.bind(this))(snapshots[i].name);    // jshint ignore:line
+              }
             }
-          }
+          }.bind(this));
         }.bind(this));
       }.bind(this));
     }.bind(this));

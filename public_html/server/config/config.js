@@ -758,8 +758,17 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
           //
           // Last: update packages
           this.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
-            if (err)
-              return errorFnc("Error while updating packages: " + (stderr || err));
+            if (err) {
+              // Restore old package.json file
+              Node.fs.rename(packageJSONfile + ".bak", packageJSONfile, function (errRestore) {
+                if (errRestore)
+                  this.logger.log("ERROR", "Can't restore package.json file!: " + errRestore, "Config.updatePackageJson");
+                //
+                return errorFnc("Error while updating packages: " + (stderr || err));
+              }.bind(this));
+              //
+              return;
+            }
             //
             // Done
             this.logger.log("INFO", "Package.json and node_modules updated", "Config.updatePackageJson", {toRemove: toRemove, toAdd: toAdd});
@@ -969,7 +978,7 @@ Node.Config.prototype.processRun = function (req, res)
     }
     //
     // If the app has been started in OFFLINE mode and the app CAN be started in offline mode
-    if (req.query.mode === "offline" && app.params && app.params.allowOffline) {
+    if (req.query.mode === "offline" && app.params && app.params.allowOffline && !app.params.startPage) {
       this.logger.log("DEBUG", "Start app in OFFLINE mode", "Config.processRun", {user: userName, app: app.name});
       return res.redirect("/" + app.name + "/" + this.getAppMainFile(req.query.mode));
     }
@@ -2270,7 +2279,7 @@ Node.Config.prototype.handleSnapshot = function (params, callback)
             if (err)
               this.logger.log("ERROR", "Error while auto-unlocking FS: " + err, "Config.handleSnapshot");
           }.bind(this));
-        }.bind(this), 15000);
+        }.bind(this), (params.unlockTimeout || 15000));
       }.bind(this));
     }.bind(this));
   }

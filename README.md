@@ -9,7 +9,7 @@
 ### Installazione di Node.js
 La versione di riferimento è Node.js 16.4.0. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 
-> curl -sL https://deb.nodesource.com/setup_12.x | sudo bash
+> curl -sL https://deb.nodesource.com/setup_16.x | sudo bash
 
 > sudo apt-get install -y nodejs
 

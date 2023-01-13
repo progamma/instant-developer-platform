@@ -146,3 +146,5 @@ Ad esempio:
 ```
 "alias" : "mysrv.mydomain.it|app-name"
 ```
+### Nota Bene
+L’accesso al Servizio di Supporto Tecnico non è consentito per richieste di supporto relative a problematiche riguardanti la pubblicazione su server manuale.

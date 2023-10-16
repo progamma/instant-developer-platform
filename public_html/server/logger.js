@@ -53,19 +53,21 @@ Node.Logger.prototype.init = function ()
   if (this.parentType === "SERVER") {
     // If I need to log exceptions, add listener
     if (this.config.handleException) {
-      process.on("uncaughtException", function (err) {
+      let unhandledExceptionFnc = err => {
         this.log("ERROR", "Uncaught server exception : " + (err.stack || err), "Logger.init");
         //
-        var crashAll = true;
-        if ((err.stack + "").indexOf("node_modules/gcloud") !== -1)
+        let crashAll = true;
+        if ((err.stack + "").includes("node_modules/gcloud"))
           crashAll = false;   // Do not exit if the problem was inside gcloud
-        else if ((err.stack + "").indexOf("incorrect header check\n    at Zlib._handle.onerror (zlib.js:370:17)") !== -1)
+        else if ((err.stack + "").includes("incorrect header check\n    at Zlib._handle.onerror (zlib.js:370:17)"))
           crashAll = false;   // Do not exit if the problem is due to an "incorrect header check from the Zlib bugged library"
         //
         // If I have to... let's do it!!!
         if (crashAll)
           process.exit(1);
-      }.bind(this));
+      }
+      process.on("unhandledRejection", unhandledExceptionFnc);
+      process.on("uncaughtException", unhandledExceptionFnc);
     }
     //
     // Create the LOG file

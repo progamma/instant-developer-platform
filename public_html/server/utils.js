@@ -630,7 +630,7 @@ Node.Utils.forkArgs = function ()
         if (/^win/.test(process.platform))
           nProcs = parseInt(Node.child.execSync("tasklist /FI \"imagename eq node.exe\" /fo csv | find /c \"node.exe\"").toString());
         else
-          nProcs = parseInt(Node.child.execSync("ps aux | grep \"node\\ \" | wc -l").toString()) - 1;
+          nProcs = parseInt(Node.child.execSync("ps aux | grep \"node\\ \" | wc -l").toString());
         return "--inspect=" + (9229 + nProcs);
       }
       return e;

@@ -10,6 +10,7 @@ var Node = Node || {};
 // Import modules
 Node.zlib = require("zlib");
 Node.querystring = require("querystring");
+Node.url = require("url");
 
 // Import Classes
 Node.Utils = require("../utils");
@@ -125,8 +126,9 @@ Node.AppClient.prototype.init = function (req, res)
 /**
  * OpenConnection of the appclient
  * @param {socket} socket
+ * @param {object} lastMsg - if it's a reconnect attemt this is the last message handled by client
  */
-Node.AppClient.prototype.openConnection = function (socket)
+Node.AppClient.prototype.openConnection = function (socket, lastMsg)
 {
   var pthis = this;
   //
@@ -176,7 +178,12 @@ Node.AppClient.prototype.openConnection = function (socket)
   }
   //
   // Listen for "appmsg" (sent by client app.js)
-  socket.on("appmsg", function (msg) {
+  socket.on("appmsg", function (msg, callback) {
+    // Update query string
+    let query = Node.url.parse(socket.request.headers.referer).query;
+    if (pthis.session.request)
+      pthis.session.request.query = (query ? Node.querystring.parse(query) : undefined);
+    //
     // Route this message to the child
     pthis.session.sendToChild({type: Node.AppClient.msgTypeMap.appmsg, sid: msg.sid, cid: pthis.id,
       content: msg.events, master: (pthis.session.masterAppClient === pthis), request: pthis.session.request, cookies: pthis.session.cookies});
@@ -188,8 +195,11 @@ Node.AppClient.prototype.openConnection = function (socket)
       return;
     //
     // Delete the content of the request after it has been sent
-    delete pthis.session.request;
+//    delete pthis.session.request;
     delete pthis.session.cookies;
+    //
+    if (callback) // Old apps does not provide the callback
+      callback(); // Message received
   });
   //
   // Listen for disconnect
@@ -216,9 +226,9 @@ Node.AppClient.prototype.openConnection = function (socket)
     }
     //
     // Ask my parent to delete me
-    // Wait 1 minute (or more/less if app changed session parameter) before actually deleting this session
+    // Wait 15 seconds before actually deleting this session...
     // So that if the client has been disconnected and comes back I'm here waiting for him
-    var sessTimeout = Math.max(3000, pthis.session.sessionTimeout) || 60000;    // Min: 3 sec for REFRESH handling
+    var sessTimeout = 15000; // 15 sec for REFRESH handling
     pthis.killClient = setTimeout(function () {
       pthis.log("DEBUG", "Client did not return within " + (sessTimeout / 1000) + " sec -> deleted", "AppClient.openConnection");
       pthis.session.deleteAppClient(pthis);
@@ -229,6 +239,24 @@ Node.AppClient.prototype.openConnection = function (socket)
   var testAuto = this.app.getTestById(this.session.testAutoId);
   if (testAuto)
     testAuto.init(this);
+  //
+  // If there are unsent messages, resynch with client
+  if (lastMsg && this.sentMsgs) {
+    // First search inside the unsent messages the last client message
+    // If not found it means that we were in synch and I just need to send all messages
+    let lastidx = Math.max(this.sentMsgs.findIndex(function (el) { return (JSON.stringify(el) === JSON.stringify(lastMsg)); }), 0);
+    for (let i=lastidx; i<this.sentMsgs.length; i++) {
+      let msg = this.sentMsgs[i];
+      socket.emit("appmsg", msg, function() {
+        let index = this.sentMsgs.indexOf(msg);
+        if (index > -1) {
+          this.sentMsgs.splice(index, 1);
+          if (this.sentMsgs.length === 0)
+            delete this.sentMsgs;
+        }
+      }.bind(this));
+    }
+  }
 };
 
 
@@ -241,7 +269,16 @@ Node.AppClient.prototype.sendAppMessage = function (msg)
   if (!this.socket)
     return this.log("WARN", "Can't send message to app client (no socket)", "AppClient.sendAppMessage", msg);
   //
-  this.socket.emit("appmsg", msg);
+  // Remember the messages that have been sent to client
+  this.sentMsgs = this.sentMsgs || [];
+  this.sentMsgs.push(msg);
+  //
+  this.socket.emit("appmsg", msg, function() {
+    // Client received the message -> remove from the sent messages list
+    let index = this.sentMsgs.indexOf(msg);
+    if (index > -1)
+      this.sentMsgs.splice(index, 1);
+  }.bind(this));
 };
 
 

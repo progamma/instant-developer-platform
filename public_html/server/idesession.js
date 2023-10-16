@@ -628,7 +628,7 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
   // Handle some default content-type
   if (!msg.options.contentType) {
     if (typeof msg.text === "string")
-      msg.options.contentType = "text/plain";
+      msg.options.contentType = "text/plain; charset=utf-8";
     else if (!msg.options.type && msg.text && typeof msg.text === "object")
       msg.options.contentType = "application/json";
   }

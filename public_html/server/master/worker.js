@@ -681,6 +681,10 @@ Node.Worker.prototype.getStatus = function (params, callback)
 {
   var stat = {sessions: this.sessions.length};
   //
+  // If I'm hibernated, inform callee
+  if (this.hibernated)
+    stat.hibernated = true;
+  //
   // If a FULL status is requested, replace sessions count with an array of SIDs
   if (params.req.query.full) {
     stat.options = this.options;
@@ -710,7 +714,12 @@ Node.Worker.prototype.getStatus = function (params, callback)
     };
     callback = function () {
       // Ask my child the sessions count
-      this.child.send({type: Node.Worker.msgTypeMap.getStatus});
+      if (this.child)
+        this.child.send({type: Node.Worker.msgTypeMap.getStatus});
+      else {
+        this.statusResultCallback({sessions: []});
+        delete this.statusResultCallback;
+      }
     }.bind(this);
   }
   //
@@ -787,7 +796,7 @@ Node.Worker.prototype.getStatus = function (params, callback)
  */
 Node.Worker.prototype.handleServerStatus = function (msg)
 {
-  this.server.config.sendStatus(null, function (result) {
+  this.server.config.sendStatus({req: {query: {}}}, function (result) {
     var response = {type: Node.Worker.msgTypeMap.serverStatusResult, cnt: {sid: msg.cnt.sid, cbId: msg.cnt.cbId}};
     if (!result.msg)
       response.cnt.error = result.err || result;

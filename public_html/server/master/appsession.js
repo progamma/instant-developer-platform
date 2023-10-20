@@ -426,6 +426,14 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
   if (!msg.code || msg.code < 100 || msg.code >= 600)
     msg.code = 500;              // Don't send an invalid value (server crashes!!!)
   //
+  // Handle some default content-type
+  if (!msg.options.contentType) {
+    if (typeof msg.text === "string")
+      msg.options.contentType = "text/plain; charset=utf-8";
+    else if (!msg.options.type && msg.text && typeof msg.text === "object")
+      msg.options.contentType = "application/json";
+  }
+  //
   // Handle content-type
   if (msg.options.contentType) {
     msg.options.headers = msg.options.headers || {};

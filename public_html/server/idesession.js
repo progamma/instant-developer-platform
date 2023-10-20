@@ -80,6 +80,7 @@ Node.IDESession.msgTypeMap = {
   initNewClient: "inc",
   profile: "prf",
   reconnectedClient: "recon",
+  copyPrjFile: "cpf",
   //
   createDB: "cdb",
   createDBresult: "cdbres",
@@ -516,6 +517,10 @@ Node.IDESession.prototype.processMessage = function (msg)
       this.handleRemoteQueryMessage(msg.options);
       break;
 
+    case Node.IDESession.msgTypeMap.copyPrjFile:
+      this.handleCopyPrjFile(msg.cnt);
+      break;
+
     default:
       this.handleOtherMessages(msg);
       break;
@@ -619,6 +624,14 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
     msg.code = parseInt(msg.code);      // Change code to INT if needed
   if (!msg.code || msg.code < 100 || msg.code >= 600)
     msg.code = 500;              // Don't send an invalid value (server crashes!!!)
+  //
+  // Handle some default content-type
+  if (!msg.options.contentType) {
+    if (typeof msg.text === "string")
+      msg.options.contentType = "text/plain; charset=utf-8";
+    else if (!msg.options.type && msg.text && typeof msg.text === "object")
+      msg.options.contentType = "application/json";
+  }
   //
   // Handle content-type
   if (msg.options.contentType) {
@@ -875,6 +888,19 @@ Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
   }.bind(this));
 };
 
+/**
+ * Handles a file copy between projects
+ * @param {Object} options
+ */
+Node.IDESession.prototype.handleCopyPrjFile = function (options)
+{
+  this.log("DEBUG", "Copy project file", "IDESession.handleCopyPrjFile", options);
+  //
+  Node.fs.copyFile(this.config.directory + "/" + options.src, this.config.directory + "/" + options.dst, function (err) {
+    if (err)
+      return this.log("WARN", "Can't copy file: " + err, "IDESession.handleCopyPrjFile", options);
+  }.bind(this));
+};
 
 // Export module
 module.exports = Node.IDESession;

@@ -76,7 +76,7 @@ Node.Config.prototype.save = function ()
     numHoursSnapshot: this.numHoursSnapshot, numMaxSnapshot: this.numMaxSnapshot, timeSnapshot: this.timeSnapshot,
     appDirectory: this.appDirectory, defaultApp: this.defaultApp, services: this.services,
     maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
-    params: this.params, users: this.users
+    lowDiskThreshold: this.lowDiskThreshold, responseHeaders: this.responseHeaders, params: this.params, users: this.users
   };
   //
   // Remove certificate's file content
@@ -196,6 +196,10 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.minAppUsersPerWorker = v.minAppUsersPerWorker;
   if (v.maxAppWorkers)
     this.maxAppWorkers = v.maxAppWorkers;
+  if (v.lowDiskThreshold)
+    this.lowDiskThreshold = v.lowDiskThreshold;
+  if (v.responseHeaders)
+    this.responseHeaders = v.responseHeaders;
   if (v.params)
     this.params = v.params;
   if (v.local)
@@ -282,29 +286,55 @@ Node.Config.prototype.saveConfig = function ()
       return v;
   });
   //
-  // Remove the old BACK if present
-  Node.rimraf(configFile + ".bak", function (err) {
+  // Write a new config file
+  Node.fs.open(configFile + ".new", "w", 0600, function (err, fd) {     // Owner RW only
     if (err) {
       delete pthis.savingConf;  // End save
-      return pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "Config.saveConfig");
+      return pthis.logger.log("ERROR", "Error saving the CONFIG file (OPEN) " + configFile + ".new: " + err, "Config.saveConfig");
     }
-    //
-    // Backup the the config file into a .bak file
-    Node.fs.rename(configFile, configFile + ".bak", function (err) {
+    Node.fs.writeFile(fd, docjson, function (err) {
       if (err) {
         delete pthis.savingConf;  // End save
-        return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + " to " + configFile + ".bak: " + err, "Config.saveConfig");
+        return pthis.logger.log("ERROR", "Error saving the CONFIG file (WRITE) " + configFile + ".new: " + err, "Config.saveConfig");
       }
-      //
-      // Write the config file
-      Node.fs.writeFile(configFile, docjson, {mode: 0600}, function (err) {     // Owner RW only
+      Node.fs.fsync(fd, function (err) {
         if (err) {
           delete pthis.savingConf;  // End save
-          return pthis.logger.log("ERROR", "Error saving the CONFIG file " + configFile + ": " + err, "Config.saveConfig");
+          return pthis.logger.log("ERROR", "Error saving the CONFIG file (FSYNC) " + configFile + ".new: " + err, "Config.saveConfig");
         }
-        //
-        delete pthis.savingConf;  // End save
-        pthis.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
+        Node.fs.close(fd, function (err) {
+          if (err) {
+            delete pthis.savingConf;  // End save
+            return pthis.logger.log("ERROR", "Error saving the CONFIG file (CLOSE) " + configFile + ".new: " + err, "Config.saveConfig");
+          }
+          //
+          // Everything went fine... Remove the old .BAK if present
+          Node.rimraf(configFile + ".bak", function (err) {
+            if (err) {
+              delete pthis.savingConf;  // End save
+              return pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "Config.saveConfig");
+            }
+            //
+            // Backup the config file into a .bak file
+            Node.fs.rename(configFile, configFile + ".bak", function (err) {
+              if (err) {
+                delete pthis.savingConf;  // End save
+                return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + " to " + configFile + ".bak: " + err, "Config.saveConfig");
+              }
+              //
+              // Rename the .new into the final file
+              Node.fs.rename(configFile + ".new", configFile, function (err) {
+                if (err) {
+                  delete pthis.savingConf;  // End save
+                  return pthis.logger.log("ERROR", "Error renaming the CONFIG file " + configFile + ".new to " + configFile + ": " + err, "Config.saveConfig");
+                }
+                //
+                delete pthis.savingConf;  // End save
+                pthis.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
+              });
+            });
+          });
+        });
       });
     });
   });
@@ -730,8 +760,17 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
           //
           // Last: update packages
           this.server.execFileAsRoot("UpdNodePackages", [], function (err, stdout, stderr) {   // jshint ignore:line
-            if (err)
-              return errorFnc("Error while updating packages: " + (stderr || err));
+            if (err) {
+              // Restore old package.json file
+              Node.fs.rename(packageJSONfile + ".bak", packageJSONfile, function (errRestore) {
+                if (errRestore)
+                  this.logger.log("ERROR", "Can't restore package.json file!: " + errRestore, "Config.updatePackageJson");
+                //
+                return errorFnc("Error while updating packages: " + (stderr || err));
+              }.bind(this));
+              //
+              return;
+            }
             //
             // Done
             this.logger.log("INFO", "Package.json and node_modules updated", "Config.updatePackageJson", {toRemove: toRemove, toAdd: toAdd});
@@ -941,7 +980,7 @@ Node.Config.prototype.processRun = function (req, res)
     }
     //
     // If the app has been started in OFFLINE mode and the app CAN be started in offline mode
-    if (req.query.mode === "offline" && app.params && app.params.allowOffline) {
+    if (req.query.mode === "offline" && app.params && app.params.allowOffline && !app.params.startPage) {
       this.logger.log("DEBUG", "Start app in OFFLINE mode", "Config.processRun", {user: userName, app: app.name});
       return res.redirect("/" + app.name + "/" + this.getAppMainFile(req.query.mode));
     }
@@ -1058,7 +1097,7 @@ Node.Config.prototype.processRun = function (req, res)
       }
       res.cookie("sid", sid, cookieOpt);
       res.cookie("cid", cid, cookieOpt);
-      res.cookie("exitUrl", this.saveProperties().exitUrl, {expires: expires, path: "/" + app.name});
+      res.cookie("exitUrl", this.saveProperties().exitUrl, cookieOpt);
       //
       // Protects SID cookie
       session.protectSID(req, res);
@@ -1108,19 +1147,31 @@ Node.Config.prototype.processRun = function (req, res)
     // Check if it's a multi-part POST
     var contentType = req.get("Content-Type");
     if (contentType && contentType.indexOf("multipart/form-data") >= 0) {
+      // It's a file upload -> this is a rest request...
+      if (!isRest) {
+        isRest = true;
+        req.query = req.query || {};
+        req.query.mode = "rest";
+      }
+      //
+      // Compute maximum file size
+      var maxFilesSize = parseInt(app && app.params ? app.params.maxUploadFileSize : 0) ||
+              parseInt(this.params ? this.params.maxUploadFileSize : 0) ||
+              50 * 1024 * 1024;   // Default: 50 MB
+      //
       // Multi part request. Parse it
       var form;
       if (isIDE)
-        form = new Node.multiparty.Form({autoFields: true, autoFiles: true,
+        form = new Node.multiparty.Form({autoFields: true, autoFiles: true, maxFilesSize: maxFilesSize,
           uploadDir: pthis.directory + "/" + session.project.user.userName + "/" +
                   session.project.name + "/files/uploaded"});
       else
-        form = new Node.multiparty.Form({autoFields: true, autoFiles: true,
+        form = new Node.multiparty.Form({autoFields: true, autoFiles: true, maxFilesSize: maxFilesSize,
           uploadDir: pthis.appDirectory + "/apps/" + app.name + "/files/uploaded"});
       form.parse(req, function (err, fields, files) {
         if (err) {
-          pthis.logger.log("ERROR", "Error parsing post request: " + err, "Config.processRun");
-          return res.status(400).end();
+          pthis.logger.log("ERROR", "Error parsing post request: " + err, "Config.processRun", {maxFilesSize: maxFilesSize});
+          return res.status(500).end(err.message);
         }
         //
         // Check if the session is still there
@@ -1237,7 +1288,9 @@ Node.Config.prototype.initTokenTimer = function ()
     }.bind(this), this.timerTokenConsole);
   //
   // Send token now (server startup)
-  this.server.request.sendTokenToConsole();
+  setImmediate(function () {
+    this.server.request.sendTokenToConsole();
+  }.bind(this));
 };
 
 
@@ -1329,7 +1382,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
   //
   // Add server info
   var srvFile = Node.path.resolve(__dirname + "/../server.js");
-  result.serverInfo = {version: this.server.version, startTime: this.server.startTime, pid: process.pid, lastWrite: Node.fs.statSync(srvFile).mtime};
+  result.serverInfo = {version: this.server.version, startTime: this.server.startTime, pid: process.pid, lastWrite: Node.fs.statSync(srvFile).mtime, dockerName: process.env["DOCKER_NAME"]};
   //
   // Add current disk status
   var cmd, cmdParams;
@@ -1492,6 +1545,43 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     this.minAppUsersPerWorker = parseInt(query.minAppUsersPerWorker, 10);
   if (query.maxAppWorkers)
     this.maxAppWorkers = parseInt(query.maxAppWorkers, 10);
+  if (query.lowDiskThreshold !== undefined)
+    this.lowDiskThreshold = (query.lowDiskThreshold ? parseInt(query.lowDiskThreshold, 10) || 0 : 0);
+  if (query.responseHeaders !== undefined) {
+    if (query.responseHeaders) {
+      // Callee will send every time all headers as an array of NAME=VALUE couples
+      try {
+        var responseHeadersArray = JSON.parse(query.responseHeaders);
+        //
+        // Change from
+        //    ["par1=valuePar1", "par2=valuePar2", ...]
+        // to
+        //    {
+        //     "par1": "valuePar1",
+        //     "par2": "valuePar2",
+        //    }
+        this.responseHeaders = {};
+        for (let i = 0; i < responseHeadersArray.length; i++) {
+          var head = responseHeadersArray[i].split("=");
+          var headName = head[0];
+          var headValue = head.slice(1).join("=");
+          //
+          if (headValue)
+            this.responseHeaders[headName] = headValue;
+          else
+            delete this.responseHeaders[headName];
+        }
+        if (Object.keys(this.responseHeaders).length === 0)
+          delete this.responseHeaders;
+      }
+      catch (ex) {
+        this.logger.log("WARN", "Can't update server's responseHeaders: " + ex.message, "Config.configureServer", {newResponseHeaders: query.responseHeaders});
+        return callback("Can't update server's responseHeaders: " + ex.message);
+      }
+    }
+    else  // No responseHeaders
+      delete this.responseHeaders;
+  }
   if (query.params !== undefined) {
     if (query.params) {
       // Callee will send every time all parameters as an array of NAME=VALUE couples
@@ -1505,25 +1595,29 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
         //     "par1": "valuePar1",
         //     "par2": "valuePar2",
         //    }
+        var olparams = (this.params || {});
+        //
         this.params = {};
         for (let i = 0; i < paramsArray.length; i++) {
           var par = paramsArray[i].split("=");
           //
           var parName = par[0];
-          if (par[1] === this.params[parName])
-            continue;   // Value hasn't changed
+          var parValue = par.slice(1).join("=");
           //
-          // Tell every app and every session that the parameter has changed
-          this.users.forEach(function (user) {
-            if (!user.apps)
-              return; // Skip users with no apps
-            //
-            user.apps.forEach(function (app) {
-              app.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : par[1]}, true);   // SkipSave
+          // If the param value has changed
+          if (parValue !== olparams[parName]) {
+            // Tell every app and every session that the parameter has changed
+            this.users.forEach(function (user) {
+              if (!user.apps)
+                return; // Skip users with no apps
+              //
+              user.apps.forEach(function (app) {
+                app.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : parValue}, true);   // SkipSave
+              }.bind(this));
             }.bind(this));
-          }.bind(this));
+          }
           //
-          this.params[parName] = par[1];
+          this.params[parName] = parValue;
         }
       }
       catch (ex) {
@@ -1586,7 +1680,7 @@ Node.Config.prototype.configureServer = function (params, callback)   /*jshint m
     if (query.consoleURL !== undefined || query.timerTokenConsole)
       this.initTokenTimer();
     if ((query.services || "").split(",").indexOf("track") !== -1)
-      return this.initTracking(callback);
+      return this.initTracking().then(() => callback(), error => callback(error));
     //
     callback();
   }.bind(this);
@@ -2226,7 +2320,7 @@ Node.Config.prototype.handleSnapshot = function (params, callback)
             if (err)
               this.logger.log("ERROR", "Error while auto-unlocking FS: " + err, "Config.handleSnapshot");
           }.bind(this));
-        }.bind(this), 15000);
+        }.bind(this), (params.unlockTimeout || 15000));
       }.bind(this));
     }.bind(this));
   }
@@ -2252,57 +2346,52 @@ Node.Config.prototype.handleSnapshot = function (params, callback)
 
 /**
  * Initialize tracking
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Config.prototype.initTracking = function (callback)
+Node.Config.prototype.initTracking = async function ()
 {
-  // At start-up there is no callback
-  callback = callback || function () {
-  };
-  //
   // If tracking is not active, do nothing
   if ((this.services || "").split(",").indexOf("track") === -1)
-    return callback();
+    return;
   //
-  var Postgres = require("../../ide/app/server/postgres");
-  var trackDB = new Postgres();
+  let Postgres = require("../../ide/app/server/postgres");
+  let trackDB = new Postgres();
   /* jshint ignore:start */
   trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "GMu4qCtqK2ylk1a9+xpSzw==", "name": "IssueApplicationID", "datatype": "id", "maxlen": 24}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "uuxk4NaVz0wfFNt9+NK2rw==", "name": "BuildName", "datatype": "vc"}, {"id": "zZqgdCi9k5ffG38wROQ4ug==", "name": "BuildFormat", "datatype": "vc", "maxlen": 3}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "LinkedObject", "datatype": "j"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "c9eqpXDdFKkI+QeIdbXKmw==", "name": "AuthorLanguage", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}, {"id": "TneyghFUGS6pK5F5B9JGVA==", "name": "NotificationEmails", "datatype": "vc"}, {"id": "v/ljRAQzPtMNI8sRsL+yGg==", "name": "ForkChainID", "datatype": "id", "maxlen": 24}], "fks": [{"id": "dPSTX+LzXuTMSoAcVUIT4A==", "name": "fkIssueApplications", "t": "IssueApplications", "ur": "c", "dr": "c", "refs": {"GMu4qCtqK2ylk1a9+xpSzw==": "ID"}}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}, {"id": "kr3qP6vuLOc4E31EN0UVwQ==", "name": "IssueApplications", "fields": [{"id": "FSAY7uGwp8zhmf7mocRjTA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "D7rgv3xFaWjP3A7yUv82+A==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "KVVu0MTG5AtVzUC1xJdphg==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "cu2THSSWPeLnH8qKW0NMXA==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "VF7d2FtNzhEMBee1dGzOAQ==", "name": "ApplicationName", "datatype": "vc"}, {"id": "e0FdPOi5ITQlMXyKE5J6Pg==", "name": "Format", "datatype": "vc", "maxlen": 3, "notn": true}]}]};
   /* jshint ignore:end */
-  trackDB.initDbConString("postgres://" + this.dbUser + ":" + this.dbPassword + "@" + this.dbAddress + ":" + this.dbPort);
+  trackDB.initDbConString(`postgres://${this.dbUser}:${this.dbPassword}@${this.dbAddress}:${this.dbPort}`);
   //
   // Replace the standard createDb function (normally the updateSchema method is called from a child process
   // thus the createDb method sends a message to the parent process... but not this time)
-  trackDB.createDb = function (cb) {      // cb - result, error
-    var manager = this.getUser("manager");     // It must exist
-    var db = manager.getDatabase(trackDB.schema.name);
-    if (!db) {
-      // $tracking$ DB is not there -> create one
-      manager.createDatabase(trackDB.schema.name, function (err) {
+  trackDB.createDb = async () => {
+    let manager = this.getUser("manager");     // It must exist
+    let db = manager.getDatabase(trackDB.schema.name);
+    if (db)
+      return;
+    //
+    // $tracking$ DB is not there -> create one
+    await new Promise((resolve, reject) => {
+      manager.createDatabase(trackDB.schema.name, err => {
         if (err) {
-          this.logger.log("ERROR", "Error while creating " + trackDB.schema.name + " database: " + (err.msg || err), "Config.initTracking");
-          return cb(null, err.msg || err);
+          this.logger.log("ERROR", `Error while creating ${trackDB.schema.name} database: ${err.msg || err}`, "Config.initTracking");
+          return reject(err.msg || err);
         }
         //
         // Now DB exists -> check DB schema
-        cb();
-      }.bind(this));
-    }
-    else
-      cb();
-  }.bind(this);
+        resolve();
+      });
+    });
+  };
   //
-  // Update database's schema
-  trackDB.updateSchema(function (result, error) {
-    if (error) {
-      this.logger.log("ERROR", "Error while updating " + trackDB.schema.name + " schema: " + error, "Config.initTracking");
-      callback("Error while updating " + trackDB.schema.name + " schema: " + error);
-    }
-    else {
-      this.logger.log("DEBUG", trackDB.schema.name + " schema updated", "Config.initTracking");
-      callback();
-    }
-  }.bind(this));
+  try {
+    // Update database's schema
+    await trackDB.updateSchema();
+    this.logger.log("DEBUG", `${trackDB.schema.name} schema updated`, "Config.initTracking");
+  }
+  catch (e) {
+    e = `Error while updating ${trackDB.schema.name} schema: ${e}`;
+    this.logger.log("ERROR", e, "Config.initTracking");
+    throw e;
+  }
 };
 
 

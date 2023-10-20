@@ -1123,8 +1123,10 @@ Node.TestAuto.prototype.saveTagResults = function (res)
         if ((res[i].props[k].oldValue !== res[i].props[k].newValue) || res[i].elNotFound) {
           var insert = true;
           var tagErr = {};
+          tagErr.requestNumber = testAuto.reqIndex - 1;
           tagErr.elId = res[i].elId;
           tagErr.elName = res[i].elName;
+          tagErr.viewName = res[i].viewName;
           tagErr.error = true;
           tagErr.elNotFound = res[i].elNotFound;
           tagErr.propName = res[i].props[k].propName;

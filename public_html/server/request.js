@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
+/* global require, module, process */
 
 var Node = Node || {};
 
@@ -39,46 +39,71 @@ Node.Request.prototype.postRequest = function (options, form, callback)
 {
   // If there is a pending GET/POST request, better wait
   if (this.pendingRequest) {
-    // If I've not written a message, yet... do it now
-    if (!this.pendingRequest.msg) {
-      this.pendingRequest.msg = true;
-      this.logger.log("WARN", "Pending request", "Request.postRequest", {options: options, pendingOptions: this.pendingRequest.options});
-    }
-    return setTimeout(function () {
-      this.postRequest(options, form, callback);
-    }.bind(this), 50);
+    this.logger.log("WARN", "Pending request -> enqueue", "Request.postRequest", {options: options, pendingOptions: this.pendingRequest});
+    this.reqQueue = this.reqQueue || [];
+    return this.reqQueue.push({options: options, form: form, callback: callback});
   }
   //
   // Set semaphore
-  this.pendingRequest = {options: options, msg: false};
+  this.pendingRequest = options;
   //
   // Set method to POST
   options.method = "POST";
   //
-  var readReply = function (res) {
+  // Timeout (if not specified -> 60 sec)
+  if (options.timeout === undefined)
+    options.timeout = 60000;
+  //
+  var done = (statusCode, data, err) => {
+    // I can't call the callback more than once!
+    if (this.pendingRequest) {
+      delete this.pendingRequest;
+      callback(statusCode, data, err);
+    }
+    //
+    if (this.timeoutReq) {
+      clearTimeout(this.timeoutReq);
+      delete this.timeoutReq;
+    }
+    //
+    if (this.reqQueue) {
+      let req = this.reqQueue.shift();
+      this.logger.log("INFO", "Handle next request", "Request.postRequest", {req: req});
+      if (this.reqQueue.length === 0)
+        delete this.reqQueue;
+      //
+      // Handle request
+      if (req.options.method === "POST")
+        this.postRequest(req.options, req.form, req.callback);
+      else
+        this.getRequest(req.options, req.callback);
+    }
+  };
+  //
+  var readReply = (res) => {
     var data = "";
-    res.on("data", function (chunk) {
+    res.on("data", (chunk) => {
       data += chunk;
     });
-    res.on("end", function () {
-      delete this.pendingRequest;
-      callback(res.statusCode, data);
-    }.bind(this));
-  }.bind(this);
+    res.on("end", () => {
+      done(res.statusCode, data);
+    });
+  };
   //
   // If procotol is missing
   if (!options.protocol) {
     this.logger.log("ERROR", "Missing protocol", "Request.postRequest", {options: options});
-    delete this.pendingRequest;
-    return callback(null, null, "Missing protocol");
+    return done(null, null, "Missing protocol");
   }
   //
   var proto = options.protocol.substring(0, options.protocol.length - 1);
   var req = Node[proto].request(options, readReply);
-  req.on("error", function (err) {
-    delete this.pendingRequest;
-    callback(null, null, err);
-  }.bind(this));
+  req.on("error", (err) => {
+    done(null, null, err);
+  });
+  req.on("timeout", () => {
+    req.destroy("POST request timeout");
+  });
   //
   form.pipe(req);
 };
@@ -93,46 +118,71 @@ Node.Request.prototype.getRequest = function (options, callback)
 {
   // If there is a pending GET/POST request, better wait
   if (this.pendingRequest) {
-    // If I've not written a message, yet... do it now
-    if (!this.pendingRequest.msg) {
-      this.pendingRequest.msg = true;
-      this.logger.log("WARN", "Pending request", "Request.getRequest", {options: options, pendingOptions: this.pendingRequest.options});
-    }
-    return setTimeout(function () {
-      this.getRequest(options, callback);
-    }.bind(this), 50);
+    this.logger.log("WARN", "Pending request", "Request.getRequest", {options: options, pendingOptions: this.pendingRequest});
+    this.reqQueue = this.reqQueue || [];
+    return this.reqQueue.push({options: options, callback: callback});
   }
   //
   // Set semaphore
-  this.pendingRequest = {options: options, msg: false};
+  this.pendingRequest = options;
 
   // Set method to GET
   options.method = "GET";
   //
-  var readReply = function (res) {
+  // Timeout (if not specified -> 60 sec)
+  if (options.timeout === undefined)
+    options.timeout = 60000;
+  //
+  var done = (statusCode, data, err) => {
+    // I can't call the callback more than once!
+    if (this.pendingRequest) {
+      delete this.pendingRequest;
+      callback(statusCode, data, err);
+    }
+    //
+    if (this.timeoutReq) {
+      clearTimeout(this.timeoutReq);
+      delete this.timeoutReq;
+    }
+    //
+    if (this.reqQueue) {
+      let req = this.reqQueue.shift();
+      this.logger.log("INFO", "Handle next request", "Request.getRequest", {req: req});
+      if (this.reqQueue.length === 0)
+        delete this.reqQueue;
+      //
+      // Handle request
+      if (req.options.method === "POST")
+        this.postRequest(req.options, req.form, req.callback);
+      else
+        this.getRequest(req.options, req.callback);
+    }
+  };
+  //
+  var readReply = (res) => {
     var data = "";
-    res.on("data", function (chunk) {
+    res.on("data", (chunk) => {
       data += chunk;
     });
-    res.on("end", function () {
-      delete this.pendingRequest;
-      callback(res.statusCode, data);
-    }.bind(this));
-  }.bind(this);
+    res.on("end", () => {
+      done(res.statusCode, data);
+    });
+  };
   //
   // If procotol is missing
   if (!options.protocol) {
     this.logger.log("ERROR", "Missing protocol", "Request.getRequest", {options: options});
-    delete this.pendingRequest;
-    return callback(null, null, "Missing protocol");
+    return done(null, null, "Missing protocol");
   }
   //
   var proto = options.protocol.substring(0, options.protocol.length - 1);
   var req = Node[proto].request(options, readReply);
-  req.on("error", function (err) {
-    delete this.pendingRequest;
-    callback(null, null, err);
-  }.bind(this));
+  req.on("error", (err) => {
+    done(null, null, err);
+  });
+  req.on("timeout", () => {
+    req.destroy("GET request timeout");
+  });
   req.end();
 };
 
@@ -151,6 +201,10 @@ Node.Request.prototype.sendTokenToConsole = function ()
   var form = new Node.FormData();
   form.append("server", this.config.name);
   form.append("tk", this.config.autk);
+  if (this.config.server.version)
+    form.append("version", this.config.server.version);
+  if (process.env["DOCKER_NAME"])
+    form.append("dockerName", process.env["DOCKER_NAME"]);
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {
@@ -698,6 +752,7 @@ Node.Request.prototype.listUsers = function (msg, callback)
   form.append("company", this.config.serverType);
   form.append("matchingString", msg.matchingString);
   form.append("organizationOnly", (msg.organizationOnly ? 1 : 0));
+  form.append("onlineStatus", (msg.onlineStatus ? 1 : 0));
   //
   var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
   var options = {

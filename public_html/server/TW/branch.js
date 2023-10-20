@@ -391,7 +391,7 @@ Node.Branch.prototype.loadAllCommits = function ()
   for (var i = 0; i < this.commits.length; i++) {
     var comm = this.commits[i];
     //
-    if (comm.originBranch) {
+    if (comm.originBranch && this.type !== Node.Branch.PR) {
       // The commit is a link to the commit into the parent branch
       // Add all commits in the parent branch, up to this commit
       var parentBranch = twManager.getBranchByName(comm.originBranch);

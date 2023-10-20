@@ -14,10 +14,12 @@ Node.path = require("path");
 Node.rimraf = require("rimraf");
 Node.tar = require("tar");
 Node.multiparty = require("multiparty");
+Node.mime = require("mime");
 Node.os = require("os");
 Node.child = require("child_process");
 Node.zlib = require("zlib");
 Node.yauzl = require("yauzl");
+Node.ncp = require("./ncp_fixed");
 
 /**
  * Utils object class
@@ -218,9 +220,11 @@ Node.Utils.handleFileSystem = function (options, callback)
                 headerSent = true;
                 //
                 var stat = Node.fs.statSync(path);
+                var mimetype = Node.mime.getType(path);
                 options.params.res.writeHead(200, {
-                  "Content-disposition": "attachment; filename = " + path.substring(path.lastIndexOf("/") + 1),
-                  "Content-Length": stat.size
+                  "Content-disposition": (options.params.req.query.inline ? "inline" : "attachment; filename = " + path.substring(path.lastIndexOf("/") + 1)),
+                  "Content-Length": stat.size,
+                  "Content-Type": mimetype
                 });
               }
             });
@@ -240,10 +244,7 @@ Node.Utils.handleFileSystem = function (options, callback)
               //
               sendFile(tarFile, function (err) {
                 // Remove temporary TAR file
-                Node.rimraf(tarFile, function (err1) {
-                  if (err1)
-                    this.log("WARN", "Can't remove temporary TAR.GZ file: " + err1, "Project.handleFileSystem");
-                  //
+                Node.rimraf(tarFile, function () {
                   if (err)
                     return callback("Can't send file: " + err);
                   //
@@ -275,6 +276,11 @@ Node.Utils.handleFileSystem = function (options, callback)
             // Allow the callee to create a single directory and nothing more...
             if (pathStats === undefined) {
               Node.fs.mkdir(options.path, function (err) {
+                // Delete the "dummy" file I've used to create the directory
+                var farr = Object.keys(files);
+                if (farr.length && files[farr[0]] && files[farr[0]][0])
+                  Node.rimraf(files[farr[0]][0].path, function () {});
+                //
                 if (err)
                   return callback("Error while creating the new directory: " + err);
                 //
@@ -418,10 +424,11 @@ Node.Utils.handleFileSystem = function (options, callback)
           }.bind(this));
           break;
 
+        case "copy":
         case "move":
-          // Can't rename the "main" FILES directory
+          // Can't copy/rename the "main" FILES directory
           if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.substr(-7) === "/files/")
-            return callback("Can't rename FILES directory");
+            return callback("Can't " + (options.command === "move" ? "move" : "copy") + " FILES directory");
           //
           var newName = (options.params.req.query || {}).newname;
           if (!newName)
@@ -432,13 +439,9 @@ Node.Utils.handleFileSystem = function (options, callback)
           if (newName.indexOf("..") !== -1)
             return callback("Double dot operator (..) not allowed");
           //
-          // "relocate" new name. The idea is "keep" all path pieces and replace only the pieces inside newName
-          var pathPieces = options.path.split("/");
-          pathPieces.splice(pathPieces.length - newName.split("/").length);
-          newName = pathPieces.join("/") + "/" + newName;
-          Node.fs.rename(options.path, newName, function (err) {
+          (options.command === "move" ? Node.fs.rename : Node.ncp)(options.path, options.basePath + "/" + newName, function (err) {
             if (err)
-              return callback("Error while renaming the file/directory: " + err);
+              return callback("Error while " + (options.command === "move" ? "moving" : "copying") + " the file/directory: " + err);
             //
             callback();
           }.bind(this));
@@ -482,6 +485,39 @@ Node.Utils.getCPUload = function (callback)
     //
     callback(percentageCPU);
   }, 200);    // Wait 200ms and measure again
+};
+
+
+/**
+ * Returns free disk size
+ * @param {function} callback (result, error)
+ */
+Node.Utils.getFreeDiskSize = function (callback)
+{
+  // Check disk size
+  var cmd, cmdParams;
+  if (!/^win/.test(process.platform)) {   // linux
+    cmd = "/bin/df";
+    cmdParams = ["."];
+  }
+  else {  // windows
+    cmd = "wmic";
+    cmdParams = ["logicaldisk", "where", "DeviceID='" + __filename[0] + ":'", "get", "freespace,size", "/format:table"];
+  }
+  require("child_process").execFile(cmd, cmdParams, function (err, stdout, stderr) {   // jshint ignore:line
+    if (err)
+      return callback(null, (stderr || err));
+    //
+    stdout = stdout.split("\n")[1];   // Remove headers
+    stdout = stdout.split(/\s+/);     // Split spaces
+    //
+    let available;
+    if (!/^win/.test(process.platform))    // linux
+      available = stdout[3] * 1024;
+    else   // windows
+      available = stdout[0];
+    callback(available);
+  });
 };
 
 
@@ -594,7 +630,7 @@ Node.Utils.forkArgs = function ()
         if (/^win/.test(process.platform))
           nProcs = parseInt(Node.child.execSync("tasklist /FI \"imagename eq node.exe\" /fo csv | find /c \"node.exe\"").toString());
         else
-          nProcs = parseInt(Node.child.execSync("ps aux | grep \"node\\ \" | wc -l").toString()) - 1;
+          nProcs = parseInt(Node.child.execSync("ps aux | grep \"node\\ \" | wc -l").toString());
         return "--inspect=" + (9229 + nProcs);
       }
       return e;

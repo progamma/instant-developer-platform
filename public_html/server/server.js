@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, __dirname, process */
+/* global require, __dirname, process, Buffer */
 
 var Node = Node || {};
 
@@ -219,10 +219,16 @@ Node.Server.prototype.initServer = function ()
   // Set peerjs server
 //  Node.app.use("/peerjs", Node.expressPeerServer(server));    // Collide con socket.io:2.2.0
   Node.app.use(function (req, res, next) {
-    res.header("Access-Control-Allow-Origin", "*");
-    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    if (this.config.responseHeaders) {
+      for (let headName in this.config.responseHeaders) 
+        res.header(headName, this.config.responseHeaders[headName]);
+    }
+    else {
+      res.header("Access-Control-Allow-Origin", "*");
+      res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept");
+    }
     next();
-  });
+  }.bind(this));
   //
   // Set socket io on top of server
   Node.io = require("socket.io")(server, {allowEIO3: true, maxHttpBufferSize: 1e8, cors: {origin: "*"}});
@@ -269,9 +275,6 @@ Node.Server.prototype.start = function ()
   //
   // Get external IP (if available)
   this.config.getExternalIp();
-  //
-  // Start default server session of all apps
-  this.startServerSessions();
   //
   // Activate HELMET: hide "powered by express"
   Node.app.use(Node.helmet.hidePoweredBy());
@@ -361,7 +364,7 @@ Node.Server.prototype.start = function ()
     // Protect APP's private files directoriy (for every app) before EXPRESS-STATIC kicks in
     // Protect PROJECT's private files directoriy (for every user/project) before EXPRESS-STATIC kicks in
     Node.app.use("/", function (req, res, next) {
-      var pathParts = req.path.toLowerCase().split("/");
+      var pathParts = req.path.toLowerCase().replace(/\/{2,}/g, "/").split("/");
       var app = (pathParts.length > 1 ? this.config.getUser("manager").getApp(pathParts[1]) : null);
       if (pathParts.length > 2 && pathParts[2] === "server" && (!app || !app.params || !app.params.allowOffline)) {
         this.logger.log("WARN", "Access to app's server folder denied", "Server.start", {url: req.path, app: (app ? app.name : "<NULL>")});
@@ -383,8 +386,9 @@ Node.Server.prototype.start = function ()
     Node.app.use(Node.express.static(this.config.appDirectory + "/apps", expOpts));
   }
   //
-  // Handle letsencrypt challenge files
-  Node.app.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
+  // Handle letsencrypt challenge files (if it's a "standard" install (not for MyCloud))
+  if (Node.fs.existsSync("/mnt/disk"))
+    Node.app.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
   //
   // Handle commands (config class does everything)
   Node.app.all("", function (req, res) {
@@ -432,8 +436,9 @@ Node.Server.prototype.start = function ()
     // Create a new App
     var httpApp = Node.express();
     //
-    // No redirect for letsencrypt's challenges
-    httpApp.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
+    // No redirect for letsencrypt's challenges (if it's a "standard" install (not for MyCloud))
+    if (Node.fs.existsSync("/mnt/disk"))
+      httpApp.use("/.well-known", Node.express.static("/mnt/disk/config/cert/letsencrypt/.well-known", {dotfiles: 'allow'}));
     //
     // Create a new Router and use it in the App
     var httpRouter = Node.express.Router();
@@ -457,6 +462,9 @@ Node.Server.prototype.start = function ()
     //
     this.setOwnerToIndert();
   }
+  //
+  // Start default server session of all apps
+  this.startServerSessions();
   //
   // Start socket listener
   this.socketListener();
@@ -734,13 +742,6 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       return;
     }
     //
-    // If the app client is already connected with someone else, refuse connection
-    if (appcli.socket) {
-      this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
-      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
-      return;
-    }
-    //
     // If there is a session but the socket message comes from a different app redirect to right app
     // (this could happen if the user uses the same TAB switching between two different apps;
     // due to the sessionStorage we receive a SID and CID from the "old" app)
@@ -759,8 +760,73 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     if (!session.worker.child)
       session.worker.createChild();
     //
-    // Connect this socket with the app client
-    appcli.openConnection(socket);
+    // If the app client is already connected with someone else
+    if (appcli.socket) {
+      // Check if it's the same session... on a new socket
+      if (session.invalidSID(socket, appcli)) {
+        this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
+        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+        return;
+      }
+      //
+      // I need to distinguish between two cases:
+      // 1) change network (between wifi and phone network)
+      // 2) tab duplicate
+      // In both cases I get a new socket request with the same cookies
+      // How can I distinguish between the two cases? I can't...
+      // But I can try to ask the "old" socket if it's still alive... if so, refuse the new request...
+      // Wait 500 ms the answer from the supposedly-dead socket
+      //
+      if (this.pingTimeout)
+        return;
+      //
+      // Send PING and WAIT for PONG
+      let pongFunct = () => {
+        // PONG received -> socket is alive... tell the new socket that have to go away
+        // Detach the pong listener
+        appcli.socket.off("pong", pongFunct);
+        //
+        // Stop the ping timeout
+        clearTimeout(this.pingTimeout);
+        delete this.pingTimeout;
+        //
+        // Redirect to a new session
+        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+        this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
+        //
+        // Nothing else to do...
+      };
+      //
+      // Waif for PING and send PING
+      appcli.socket.on("pong", pongFunct);
+      appcli.socket.emit("ping");
+      //
+      // The PONG reply have to be here within 500 ms... otherwise the socket is dead 
+      // (normally it takes 20-30 ms)
+      this.pingTimeout = setTimeout(() => {
+        delete this.pingTimeout;
+        // PONG not received -> socket is dead... replace the socket with the new one
+        //
+        // Detach the pong listener (if the socket is still connected)
+        if (appcli.socket) {
+          appcli.socket.off("pong", pongFunct);
+          appcli.socket.disconnect();
+        }
+        //
+        // Connect this new socket with the app client
+        appcli.openConnection(socket, msg.lastMsg);
+        //
+        this.logger.log("WARN", "AppClient's socket replaced with a new socket with same ASID (valid SID)", "Server.handleSessionASID", msg);
+      }, 500);
+      //
+      // Do nothing more.
+      // Wait for the PONG message to arrive (reject and create a new session) 
+      // or for the timeout to terminate (accept the connection and replace the old socket)
+      return;
+    }
+    else
+      // Connect this socket with the app client
+      appcli.openConnection(socket, msg.lastMsg);
   }
 };
 
@@ -1297,6 +1363,9 @@ Node.Server.prototype.backupDisk = function (scheduled)
   if (!this.config.numHoursSnapshot || !this.config.numMaxSnapshot)
     return this.logger.log("INFO", "Automatic disk backup not configured", "Server.backupDisk",
             {numHoursSnapshot: this.config.numHoursSnapshot || 0, numMaxSnapshot: this.config.numMaxSnapshot || 0});
+  else if (!scheduled)
+    this.logger.log("INFO", "Automatic disk backup timer started", "Server.backupDisk",
+            {numHoursSnapshot: this.config.numHoursSnapshot, numMaxSnapshot: this.config.numMaxSnapshot, timeSnapshot: this.config.timeSnapshot});
   //
   // This algorithm uses the following 3 config parameters:
   //  - "numHoursSnapshot": number of hours between snapshots (24 -> 1 snapshot per day)
@@ -1375,64 +1444,82 @@ Node.Server.prototype.backupDisk = function (scheduled)
     });
   }
   //
+  var unfreezeDisk = function () {
+    this.config.handleSnapshot({req: {}, tokens: ["", "end"]}, function (err) {
+      if (err)
+        this.logger.log("WARN", "Can't unfreeze the disk: " + err, "Server.backupDisk");
+    }.bind(this));
+  }.bind(this);
+  //
   // Function that schedules the backup of the data disk and clean up old snapshots
   var doBackup = function () {
     this.logger.log("INFO", "Start disk backup", "Server.backupDisk", this.backupInfo);
     //
-    var gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
-    var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
-    var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
-    //
-    var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
-            snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
-    snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
+    this.config.handleSnapshot({req: {}, unlockTimeout: 240000, tokens: ["", "start"]}, function (err) {
       if (err)
-        return this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
+        this.logger.log("WARN", "Can't freeze the disk: " + err, "Server.backupDisk");
       //
-      // Wait for completition
-      operation.on("error", function (err) {
-        this.logger.log("WARN", "Can't create the snapshot: " + err, "Server.backupDisk");
-      }.bind(this));
+      var gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
+      var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
+      var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
       //
-      operation.on("complete", function (metadata) {    // jshint ignore:line
-        this.logger.log("INFO", "Disk backup completed", "Server.backupDisk", this.backupInfo);
+      var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
+              snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
+      snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
+        if (err) {
+          this.logger.log("WARN", "Can't create the snapshot (1): " + err, "Server.backupDisk");
+          return unfreezeDisk();
+        }
         //
-        // Snapshot created, now clean up (if needed)
-        // List all snapshots for this disk
-        gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
-          if (err)
-            return this.logger.log("WARN", "Can't list all snapshots for this server: " + err, "Server.backupDisk");
+        // Wait for completition
+        operation.on("error", function (err) {
+          this.logger.log("WARN", "Can't create the snapshot (2): " + err, "Server.backupDisk");
+          unfreezeDisk();
+        }.bind(this));
+        //
+        operation.on("complete", function (metadata) {    // jshint ignore:line
+          this.logger.log("INFO", "Disk backup completed", "Server.backupDisk", this.backupInfo);
           //
-          this.logger.log("DEBUG", "#snapshot: " + snapshots.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
-          if (snapshots.length > this.config.numMaxSnapshot) {
-            // Remove older ones. First I need to sort them by date
-            snapshots.sort(function (f1, f2) {
-              var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
-              var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
-              dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
-                      dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
-              dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
-                      dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
-              return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
-            });
+          // Unfreeze the disk
+          unfreezeDisk();
+          //
+          // Snapshot created, now clean up (if needed)
+          // List all snapshots for this disk
+          gce.getSnapshots({"filter": "name eq " + this.backupInfo.diskName + "-.*"}, function (err, snapshots) {
+            if (err)
+              return this.logger.log("WARN", "Can't list all snapshots for this server: " + err, "Server.backupDisk");
             //
-            // Now I can remove older one
-            for (var i = this.config.numMaxSnapshot; i < snapshots.length; i++) {
-              (function (sname) {
-                this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
-                //
-                var snapshot = gce.snapshot(sname);
-                snapshot.delete(function (err, operation, apiResponse) {    // jshint ignore:line
-                  if (err)
-                    return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+            this.logger.log("DEBUG", "#snapshot: " + snapshots.length + "/" + this.config.numMaxSnapshot, "Server.backupDisk");
+            if (snapshots.length > this.config.numMaxSnapshot) {
+              // Remove older ones. First I need to sort them by date
+              snapshots.sort(function (f1, f2) {
+                var dt1 = f1.name.substring(f1.name.lastIndexOf("-") + 1);
+                var dt2 = f2.name.substring(f2.name.lastIndexOf("-") + 1);
+                dt1 = new Date(dt1.substring(0, 4) + "-" + dt1.substring(4, 6) + "-" + dt1.substring(6, 8) + "T" +
+                        dt1.substring(8, 10) + ":" + dt1.substring(10, 12) + ":" + dt1.substring(12, 14));
+                dt2 = new Date(dt2.substring(0, 4) + "-" + dt2.substring(4, 6) + "-" + dt2.substring(6, 8) + "T" +
+                        dt2.substring(8, 10) + ":" + dt2.substring(10, 12) + ":" + dt2.substring(12, 14));
+                return (dt1 > dt2 ? -1 : (dt1 < dt2 ? 1 : 0));                  // Sort reversed (older is the last one)
+              });
+              //
+              // Now I can remove older one
+              for (var i = this.config.numMaxSnapshot; i < snapshots.length; i++) {
+                (function (sname) {
+                  this.logger.log("DEBUG", "Delete old snapshot " + sname, "Server.backupDisk");
                   //
-                  operation.on("error", function (err) {
-                    this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                  var snapshot = gce.snapshot(sname);
+                  snapshot.delete(function (err, operation, apiResponse) {    // jshint ignore:line
+                    if (err)
+                      return this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                    //
+                    operation.on("error", function (err) {
+                      this.logger.log("WARN", "Can't delete snapshot " + sname + ": " + err, "Server.backupDisk", this.backupInfo);
+                    }.bind(this));
                   }.bind(this));
-                }.bind(this));
-              }.bind(this))(snapshots[i].name);    // jshint ignore:line
+                }.bind(this))(snapshots[i].name);    // jshint ignore:line
+              }
             }
-          }
+          }.bind(this));
         }.bind(this));
       }.bind(this));
     }.bind(this));
@@ -1605,6 +1692,10 @@ Node.Server.prototype.setOwnerToIndert = function ()
   // The problem is that on older docker's versions the setUID and setGID functions crashed... so everything was running as ROOT
   // Now they've fixed it... but several files are now owned by ROOT... I want everything to be owned by IndeRT
   if (process.platform === "linux" && !this.config.local) {
+    // Only if it's a "standard" install (not for MyCloud)
+    if (!Node.fs.existsSync("/mnt/disk"))
+      return;
+    //
     var params = ["-R", "indert:indert",
       "/mnt/disk/IndeRT/ide",
       "/mnt/disk/IndeRT/server",

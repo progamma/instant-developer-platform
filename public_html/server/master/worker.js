@@ -153,7 +153,8 @@ Node.Worker.prototype.createChild = function ()
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
     publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this),
-    params: Object.assign({}, this.config.params, this.app.params)});
+    params: Object.assign({}, this.config.params, this.app.params, {_lowDiskThreshold: this.config.lowDiskThreshold})
+  });
   //
   // HACK per back-compatibilità con app 19.0 o precedenti su server 19.5 o successivi (dove pg è aggiornato ed ha una breaking change sulla connect)
   // TODO: RIMUOVERE PRIMA O POI...)
@@ -680,6 +681,10 @@ Node.Worker.prototype.getStatus = function (params, callback)
 {
   var stat = {sessions: this.sessions.length};
   //
+  // If I'm hibernated, inform callee
+  if (this.hibernated)
+    stat.hibernated = true;
+  //
   // If a FULL status is requested, replace sessions count with an array of SIDs
   if (params.req.query.full) {
     stat.options = this.options;
@@ -709,7 +714,12 @@ Node.Worker.prototype.getStatus = function (params, callback)
     };
     callback = function () {
       // Ask my child the sessions count
-      this.child.send({type: Node.Worker.msgTypeMap.getStatus});
+      if (this.child)
+        this.child.send({type: Node.Worker.msgTypeMap.getStatus});
+      else {
+        this.statusResultCallback({sessions: []});
+        delete this.statusResultCallback;
+      }
     }.bind(this);
   }
   //
@@ -786,7 +796,7 @@ Node.Worker.prototype.getStatus = function (params, callback)
  */
 Node.Worker.prototype.handleServerStatus = function (msg)
 {
-  this.server.config.sendStatus(null, function (result) {
+  this.server.config.sendStatus({req: {query: {}}}, function (result) {
     var response = {type: Node.Worker.msgTypeMap.serverStatusResult, cnt: {sid: msg.cnt.sid, cbId: msg.cnt.cbId}};
     if (!result.msg)
       response.cnt.error = result.err || result;

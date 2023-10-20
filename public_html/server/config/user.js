@@ -945,6 +945,9 @@ Node.User.prototype.createApp = function (appName)
 Node.User.prototype.deleteApp = function (app)
 {
   var idx = this.apps.indexOf(app);
+  if (idx === -1)
+    return this.log("WARN", "App not found", "User.deleteApp", {app: app.name});
+  //
   this.apps.splice(idx, 1);
   //
   // Save the new configuration
@@ -1013,11 +1016,20 @@ Node.User.prototype.sendStatus = function (params, callback)
  */
 Node.User.prototype.sendDatabasesList = function (params, callback)
 {
-  var databases = [];
-  for (var i = 0; i < this.databases.length; i++)
-    databases.push(this.databases[i].name);
+  if (!this.databases.length)
+    return callback({msg: JSON.stringify([])});
   //
-  callback({msg: JSON.stringify(databases)});
+  var databases = [];
+  this.databases.forEach(function (db) {
+    db.sendStatus(params, function (res) {   // For each database: database status
+      if (typeof res === "string")
+        return callback(res);
+      //
+      databases = databases.concat(JSON.parse(res.msg));
+      if (databases.length === this.databases.length)
+        return callback({msg: JSON.stringify(databases)});
+    }.bind(this));
+  }.bind(this));
 };
 
 
@@ -1028,13 +1040,20 @@ Node.User.prototype.sendDatabasesList = function (params, callback)
  */
 Node.User.prototype.sendAppsList = function (params, callback)
 {
-  var apps = [];
-  for (var i = 0; i < this.apps.length; i++) {
-    var app = this.apps[i];
-    apps.push({name: app.name, version: app.version, date: app.date});
-  }
+  if (!this.apps.length)
+    return callback({msg: JSON.stringify([])});
   //
-  callback({msg: JSON.stringify(apps)});
+  var apps = [];
+  this.apps.forEach(function (app) {
+    app.sendStatus(params, function (res) {   // For each app: status
+      if (typeof res === "string")
+        return callback(res);
+      //
+      apps = apps.concat(JSON.parse(res.msg));
+      if (apps.length === this.apps.length)
+        return callback({msg: JSON.stringify(apps)});
+    }.bind(this));
+  }.bind(this));
 };
 
 

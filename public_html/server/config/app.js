@@ -124,7 +124,8 @@ Node.App.prototype.setParent = function (p)
   // I need to do it synchronously because I need to do it before starting the ServerSession (if enabled)
   if (Node.fs.existsSync(filename)) {
     var json = Node.fs.readFileSync(filename);
-    this.params = JSON.parse(json);
+    if (json.length)
+      this.params = JSON.parse(json);
   }
 };
 
@@ -170,7 +171,7 @@ Node.App.prototype.createNewSession = function (options)
         continue;
       //
       // If the configuration is specific to a particular query string
-      if (conf.query && (!options.query || options.query.indexOf(conf.guery) === -1))
+      if (conf.query && (!options.query || options.query.indexOf(conf.query) === -1))
         continue;
       //
       // Found it! Use this custom configuration settings (if given)
@@ -191,6 +192,9 @@ Node.App.prototype.createNewSession = function (options)
   var minload, nusers = 0;
   for (var i = 0; i < this.workers.length; i++) {
     var wrk = this.workers[i];
+    //
+    if (wrk.hibernated)
+      continue; // Skip hibernated workers
     //
     // If this worker is not what I'm looking for -> skip it
     if (JSON.stringify(wrk.options) !== JSON.stringify(wrkConf))
@@ -214,7 +218,8 @@ Node.App.prototype.createNewSession = function (options)
   }
   //
   // If I've found a worker but it has already too many users and I can create new workers
-  if (worker && worker.getLoad() >= minAppUsersPerWorker && this.workers.length < maxAppWorkers)
+  var numwrk = this.workers.filter(function(w) { return (!w.hibernated); }).length;
+  if (worker && worker.getLoad() >= minAppUsersPerWorker && numwrk < maxAppWorkers)
     worker = undefined;   // Create a new worker
   //
   // If I haven't found one, create a new worker
@@ -404,7 +409,7 @@ Node.App.prototype.sendStatus = function (params, callback)
 {
   var pthis = this;
   //
-  var stat = {version: this.version, date: this.date, params: this.params};
+  var stat = {name: this.name, version: this.version, date: this.date, params: this.params};
   if (this.stopped)
     stat.status = "stopped";
   else if (this.updating)
@@ -608,6 +613,19 @@ Node.App.prototype.terminate = function (params, callback)
   //
   // Wait for them to terminate
   waitWorkersTerminate();
+};
+
+
+/**
+ * Flag all workers as hibernate (the will not accept new sessions)
+ */
+Node.App.prototype.hibernateWorkers = function ()
+{
+  // Server session must be stoped
+  this.stopDefaultServerSession();
+  //
+  for (var i = 0; i < this.workers.length; i++)
+    this.workers[i].hibernated = true;
 };
 
 
@@ -892,7 +910,11 @@ Node.App.prototype.configure = function (params, callback)
         //    }
         for (i = 0; i < paramsArray.length; i++) {
           var par = paramsArray[i].split("=");
-          newParams[par[0]] = par[1];
+          //
+          var parName = par[0];
+          var parValue = par.slice(1).join("=");
+          //
+          newParams[parName] = parValue;
         }
       }
       catch (ex) {

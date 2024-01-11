@@ -146,5 +146,24 @@ Ad esempio:
 ```
 "alias" : "mysrv.mydomain.it|app-name"
 ```
+#### Configurazione dei processi worker per le applicazioni
+Per configurare i valori di default per i worker delle applicazioni installate, è necessario
+modificare il file config.json aggiungendo i valori desiderati per le proprietà **maxAppUsers**,
+**minAppUsersPerWorker** e **maxAppWorkers**, come nel seguente esempio:
+```
+"maxAppUsers": 1000,
+"minAppUsersPerWorker": 50,
+"maxAppWorkers": 4,
+```
+Specificando il maxAppUsers è possibile definire il numero di processi worker che verranno creati dal server per gestire le sessioni di ogni
+applicazione.
+
+minAppUsersPerWorker indica qual è il numero di sessioni che ogni worker gestirà prima che venga avviato un nuovo processo che prenda in carico nuove sessioni client. 
+
+maxAppWorkers indica il numero massimo di sessioni gestite contemporaneamente da un’applicazione prima che questa rifiuti l'avvio di una nuova
+sessione.
+
+In questo caso il valore tiene conto della somma di tutte le sessioni dei worker della stessa app.
+
 ### Nota Bene
 L’accesso al Servizio di Supporto Tecnico non è consentito per richieste di supporto relative a problematiche riguardanti la pubblicazione su server manuale.

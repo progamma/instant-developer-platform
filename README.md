@@ -1,4 +1,4 @@
-### Instant Developer Cloud - framework setup
+# Instant Developer Cloud - framework setup
 
 ## ITA
 1. [Installazione di Node.js](#installazione-di-nodejs)
@@ -172,12 +172,18 @@ sessione.
 
 In questo caso il valore tiene conto della somma di tutte le sessioni dei worker della stessa app.
 
-###Limitazioni
-I server Self Managed sono soggetti alle seguenti limitazioni:
-- Non possono ospitare il servizio Cloud Connector.
-- Non possono ospitare il servizio Analytics e Feedback.
-- Non possono ospitare il servizio di sincronizzazione dei database locali delle applicazioni. È invece possibile utilizzare l’accesso ai dati del server tramite Document Orientation Remota.
-- Non supportano l'installazione delle applicazioni e l'aggiornamento dei database dalla Console di Instant Developer Cloud
-
 ### Nota Bene
 L’accesso al Servizio di Supporto Tecnico non è consentito per richieste di supporto relative a problematiche riguardanti la pubblicazione su server manuale.
+
+> [!IMPORTANT]
+> ### Limitazioni
+> I server Self Managed sono soggetti alle seguenti limitazioni:
+> - Non possono ospitare il servizio Cloud Connector.
+> - Non possono ospitare il servizio Analytics e Feedback.
+> - Non possono ospitare il servizio di sincronizzazione dei database locali delle applicazioni. È invece possibile utilizzare l’accesso ai dati del server tramite Document Orientation Remota.
+> - Non supportano l'installazione delle applicazioni e l'aggiornamento dei database dalla Console di Instant Developer Cloud
+
+
+> [!NOTE]
+> ### MyCloud
+> Per l'installazione di un server di tipo MyCloud è possibile consultare la guida riportata nel capito **I server MyCloud** del manuale [17-I server di produzione](https://storage.googleapis.com/inde-downloads/doc/17-I%20server%20di%20produzione.pdf)https://storage.googleapis.com/inde-downloads/doc/17-I%20server%20di%20produzione.pdf disponibile dalla Console di Instant Developer Cloud.

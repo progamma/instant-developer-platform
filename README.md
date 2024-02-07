@@ -17,12 +17,12 @@ sudo apt install nodejs npm -y
 Per installare pm2 è consigliabile aggiornare prima la versione di npm
 
 ```
-npm install npm@latest -g
+sudo npm install npm@latest -g
 ```
 
 e poi installare pm2
 ```
-npm install pm2 -g
+sudo npm install pm2 -g
 ```
 
 ### Installazione di Postgres 13
@@ -30,8 +30,8 @@ npm install pm2 -g
 ```
 wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | sudo apt-key add -
 sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -sc)-pgdg main" > /etc/apt/sources.list.d/PostgreSQL.list'
-apt-get -y update
-apt-get install postgresql-13
+sudo apt-get -y update
+sudo apt-get install postgresql-13
 ```
 È necessario configurare le credenziali per utente che accederà al database e che dovreanno essere riportati nel file di configurazione config.json(dbUser e dbPassword).
 
@@ -45,7 +45,7 @@ Dopodiché è necessario:
 1. rinominare *instant-developer-platform-master* in *idcloud*.
 1. rinominare e spostare *public-html* in *idcloud/idserver*.
 1. rimuovere *idcloud/nbproject*
-1. creare le cartelle *idcloud/config*, *idcloud/idserver/apps/apps*, *idcloud/idserver/apps/db*, *idcloud/idserver/apps/backups*, *idcloud/node_modules*, *idcloud/idserver/log*
+1. creare le cartelle *idcloud/config*, *idcloud/idserver/apps/apps*, *idcloud/idserver/apps/db*, *idcloud/idserver/apps/backups*, *idcloud/idserver/node_modules*, *idcloud/idserver/log*
 1. copiare *config-example.json* in *idcloud/config/config.json*
 1. editare *idcloud/config/config.json*
   1. *appDirectory* = */idcloud/idserver/apps*
@@ -60,8 +60,8 @@ Dopodiché è necessario:
  
 #### Postgres e permessi
 ```
-chown postgres:postgres /idcloud/idserver/apps/db
-chmod 700 /idcloud/idserver/apps/db
+sudo chown postgres:postgres /idcloud/idserver/apps/db
+sudo chmod 700 /idcloud/idserver/apps/db
 ```
 #### Aggiornare i node modules
 Alla prima installazione e per tutti i nuovi aggiornamenti è necessari aggiornare i pacchetti node modules per allinearli alla definizione contenuta in *package.json*.
@@ -69,7 +69,7 @@ Andare in *idcloud/idserver* e lanciare
 
 ```
 cd /idcloud/idserver
-npm install
+sudo npm install
 ```
 
 #### In caso di errori nell'aggiornamento
@@ -88,9 +88,9 @@ sudo chmod -R 755 /idcloud
 Per avviare server.js con PM2 e impostare il reboot automatico eseguire i comandi:
 ```
 cd /idcloud/idserver/server
-pm2 start server.js
-pm2 save
-pm2 startup ubuntu
+sudo pm2 start server.js
+sudo pm2 save
+sudo pm2 startup ubuntu
 ```
 #### Installazione manuale di una build
 È possibile scaricare una build da Instant Developer Cloud e installarla sulla propria piattaforma

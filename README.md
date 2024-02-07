@@ -88,7 +88,7 @@ sudo chmod -R 755 /idcloud
 Per avviare server.js con PM2 e impostare il reboot automatico eseguire i comandi:
 ```
 cd /idcloud/idserver/server
-sudo pm2 start server.js
+sudo pm2 start inde.json
 sudo pm2 save
 sudo pm2 startup ubuntu
 ```

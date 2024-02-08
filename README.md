@@ -10,7 +10,7 @@
 La versione di riferimento è Node.js 18.19. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 ```
 curl -sL https://deb.nodesource.com/setup_18.x | sudo bash
-sudo apt install nodejs npm -y
+sudo apt install nodejs -y
 ```
 
 ### Installazione di npm
@@ -55,7 +55,6 @@ Dopodiché è necessario:
 1. [Aggiornare i node modules](#aggiornare-i-node-modules)
 1. [Aggiungere l'utente e il gruppo indert](#aggiungere-utente-e-gruppo-indert)
 1. dare i permessi di scrittura a *postgres* su *idclous/apps/db* - vedi [#Postgres e permessi](Postgres e permessi)
-1. creare un database postgress di nome *root*
 1. [Avviare server.js con PM2](#avviare-serverjs-con-pm2)
  
 #### Postgres e permessi

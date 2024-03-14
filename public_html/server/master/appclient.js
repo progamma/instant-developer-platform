@@ -180,9 +180,10 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
   // Listen for "appmsg" (sent by client app.js)
   socket.on("appmsg", function (msg, callback) {
     // Update query string
-    let query = Node.url.parse(socket.request.headers.referer).query;
-    if (pthis.session.request)
+    if (msg.appurl && pthis.session.request) {
+      let query = Node.url.parse(msg.appurl).query;
       pthis.session.request.query = (query ? Node.querystring.parse(query) : undefined);
+    }
     //
     // Route this message to the child
     pthis.session.sendToChild({type: Node.AppClient.msgTypeMap.appmsg, sid: msg.sid, cid: pthis.id,

@@ -89,8 +89,16 @@ Node.IDEAppClient.prototype.init = function (req, res)
   this.appid = (req.params ? req.params.appid.replace(/-/g, "/") : undefined);
   this.mode = (req.query ? req.query.mode : undefined);
   //
+  // Get the dark theme indicator from the query string that the preview page has passed.
+  let dark = req.query?.previewDark === "true" && req.query?.forceuitheme === "true";
+  //
   // Redirect to the main page
   var qrys = Node.querystring.stringify({sid: this.session.id, acid: this.id, appid: this.appid});
+  //
+  // Add dark theme request if needed
+  if (dark)
+    qrys += "&previewDark=true";
+  //
   res.redirect("/app/" + this.config.getAppMainFile(this.mode) + "?" + qrys);
   //
   // Create a timer. If an openConnection does not arrive within 20 seconds,

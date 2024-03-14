@@ -25,13 +25,13 @@ Node.https = require("https");
 Node.compress = require("compression");
 Node.cookieParser = require("cookie-parser");
 Node.helmet = require("helmet");
-Node.expressPeerServer = require("peer").ExpressPeerServer;
 Node.fs = require("fs");
 Node.path = require("path");
 Node.os = require("os");
 Node.tls = require("tls");
 Node.child = require("child_process");
 Node.rimraf = require("rimraf");
+Node.url = require("url");
 Node.BodyParser = require("body-parser");
 Node.errorHandler = require("errorhandler");
 Node.constants = require("constants");
@@ -216,11 +216,9 @@ Node.Server.prototype.initServer = function ()
     server = Node.httpsServer;
   }
   //
-  // Set peerjs server
-//  Node.app.use("/peerjs", Node.expressPeerServer(server));    // Collide con socket.io:2.2.0
   Node.app.use(function (req, res, next) {
     if (this.config.responseHeaders) {
-      for (let headName in this.config.responseHeaders) 
+      for (let headName in this.config.responseHeaders)
         res.header(headName, this.config.responseHeaders[headName]);
     }
     else {
@@ -231,7 +229,7 @@ Node.Server.prototype.initServer = function ()
   }.bind(this));
   //
   // Set socket io on top of server
-  Node.io = require("socket.io")(server, {allowEIO3: true, maxHttpBufferSize: 1e8, cors: {origin: "*"}});
+  Node.io = require("socket.io")(server, {allowEIO3: true, maxHttpBufferSize: 1e8, cors: {origin: "*"}, perMessageDeflate: {threshold: 50 * 1024}});
 };
 
 
@@ -712,6 +710,10 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
 {
   var session, appcli;
   //
+  let qry = "";
+  if (msg.appurl)
+    qry = (Node.url.parse(msg.appurl, true).search || "");
+  //
   if (msg.acid) {   // IDE case
     session = this.IDESessions[msg.sid];
     if (!session)
@@ -730,7 +732,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     session = this.appSessions[msg.sid];
     if (!session) {
       this.logger.log("WARN", "Session not found", "Server.handleSessionASID", msg);
-      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname) + qry);
       return;
     }
     //
@@ -738,7 +740,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
     appcli = session.getAppClientById(msg.cid);
     if (!appcli) {
       this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", msg);
-      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname) + qry);
       return;
     }
     //
@@ -751,7 +753,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       // a SID and CID from the "old" app. If that's the case, redirect to the right app
       this.logger.log("WARN", "Session mismatch for app", "Server.handleSessionASID",
               {sid: msg.sid, app: msg.appname, oldapp: session.worker.app.name});
-      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+      socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname) + qry);
       return;
     }
     //
@@ -765,7 +767,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       // Check if it's the same session... on a new socket
       if (session.invalidSID(socket, appcli)) {
         this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
-        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname) + qry);
         return;
       }
       //
@@ -791,7 +793,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
         delete this.pingTimeout;
         //
         // Redirect to a new session
-        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname));
+        socket.emit(Node.Server.msgTypeMap.redirect, "/" + Node.Utils.HTMLencode(msg.appname) + qry);
         this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
         //
         // Nothing else to do...
@@ -801,7 +803,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       appcli.socket.on("pong", pongFunct);
       appcli.socket.emit("ping");
       //
-      // The PONG reply have to be here within 500 ms... otherwise the socket is dead 
+      // The PONG reply have to be here within 500 ms... otherwise the socket is dead
       // (normally it takes 20-30 ms)
       this.pingTimeout = setTimeout(() => {
         delete this.pingTimeout;
@@ -820,7 +822,7 @@ Node.Server.prototype.handleSessionASID = function (socket, msg)
       }, 500);
       //
       // Do nothing more.
-      // Wait for the PONG message to arrive (reject and create a new session) 
+      // Wait for the PONG message to arrive (reject and create a new session)
       // or for the timeout to terminate (accept the connection and replace the old socket)
       return;
     }
@@ -1098,6 +1100,19 @@ Node.Server.prototype.getOpenSession = function (project, filter)
         var sessIP = (sess.masterClientSod && sess.sockets[sess.masterClientSod] &&
                 sess.sockets[sess.masterClientSod].conn ? sess.sockets[sess.masterClientSod].conn.remoteAddress : "!");  // Master's IP address
         var filterIP = (filter.request.connection ? filter.request.connection.remoteAddress : "?");
+        //
+        // https://serverfault.com/questions/840198/ipv6-are-there-actual-differences-between-local-addresses-1-and-ffff127-0
+        if (sessIP.startsWith("::ffff:"))
+          sessIP = sessIP.substring(7);
+        if (filterIP.startsWith("::ffff:"))
+          filterIP = filterIP.substring(7);
+        //
+        // ::1 is the true "local host" or "loopback" address, equivalent to 127.0.0.1 in IPv4.
+        if (sessIP === "::1")
+          sessIP = "127.0.0.1";
+        if (filterIP === "::1")
+          filterIP = "127.0.0.1";
+        //
         if (sessIP !== filterIP) {
           sessMatches = false;
           //
@@ -1110,6 +1125,10 @@ Node.Server.prototype.getOpenSession = function (project, filter)
                 sessMatches = true;
             }
           }
+          //
+          if (!sessMatches)
+            this.logger.log("WARN", "Request IP differs from web-socket IP -> request refused", "Server.getOpenSession",
+                    {sessIP: sessIP, filterIP: filterIP, project: project.name, user: project.user.userName});
         }
         //
         // Request matched... next filter criteria

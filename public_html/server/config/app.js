@@ -426,7 +426,7 @@ Node.App.prototype.sendStatus = function (params, callback)
   }
   else {  // windows
     cmd = "cmd";
-    cmdParams = ["/c", "dir", "/s", "/-c", path.replace(/\//g, "\\")];      // Inside "cmd /c" command / are not allowed
+    cmdParams = ["/c", "powershell", "(Get-ChildItem -Path \"" + path.replace(/\//g, "\\") + "\" -Recurse | Measure-Object -Property Length -Sum).Sum"];      // Inside "cmd /c" command / are not allowed
   }
   this.server.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {
     if (err) {
@@ -439,9 +439,7 @@ Node.App.prototype.sendStatus = function (params, callback)
       size = stdout.split("\t")[0];
     else {
       stdout = stdout.split("\r\n");        // Convert into array
-      stdout = stdout[stdout.length - 3];   // Get total size line
-      stdout = stdout.split(/\s+/);         // Split spaces
-      size = stdout[3];
+      size = stdout[0];
     }
     switch (size.substr(-1)) {
       case "K":

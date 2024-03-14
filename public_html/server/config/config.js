@@ -9,6 +9,7 @@ var Node = Node || {};
 
 // Import Modules
 Node.fs = require("fs");
+Node.mime = require("mime");
 Node.ncp = require("../ncp_fixed");
 Node.rimraf = require("rimraf");
 Node.multiparty = require("multiparty");
@@ -1214,8 +1215,17 @@ Node.Config.prototype.processRun = function (req, res)
           // There are files... rename them and send to app
           Object.keys(files).forEach(function (name) {
             files[name].forEach(function (f) {
-              var ext = f.originalFilename.split(".");
-              ext = "." + ext[ext.length - 1];
+              var ext = "";
+              if (f.headers && f.headers["content-type"])
+                ext = Node.mime.getExtension(f.headers["content-type"]);
+              else {
+                ext = f.originalFilename.split(".");
+                if (ext.length > 1)
+                  ext = ext[ext.length - 1];
+              }
+              if (ext)
+                ext = "." + ext;
+              //
               var id = Node.Utils.generateUID36();
               var path, localPath;
               if (isIDE) {    // IDE

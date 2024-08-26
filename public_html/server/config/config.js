@@ -1413,7 +1413,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
     stdout = stdout.split("\n")[1];   // Remove headers
     stdout = stdout.split(/\s+/);     // Split spaces
     //
-    if (!/^win/.test(process.platform)) {    // linux
+    if (!/^win/.test(process.platform) && !/^darwin/.test(process.platform)) {    // linux (not windows and not darwin/mac)
       result.serverInfo.disk = {size: stdout[1], used: stdout[2], available: stdout[3], capacity: stdout[4]};
       result.serverInfo.time = {date: new Date()};
       //

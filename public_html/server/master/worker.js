@@ -156,28 +156,6 @@ Node.Worker.prototype.createChild = function ()
     params: Object.assign({}, this.config.params, this.app.params, {_lowDiskThreshold: this.config.lowDiskThreshold})
   });
   //
-  // HACK per back-compatibilità con app 19.0 o precedenti su server 19.5 o successivi (dove pg è aggiornato ed ha una breaking change sulla connect)
-  // TODO: RIMUOVERE PRIMA O POI...)
-  /*jshint multistr: true */
-  if (!require("pg").connect) {
-    var txt = "\
-App.pg = require('pg');\
-App.pg.connect = function (opt, cb) {\
-  if (!App._PgPools)\
-    App._PgPools = {};\
-  var config = typeof opt === 'string' ? {connectionString: opt} : opt;\
-  var poolName = JSON.stringify(config);\
-  var pool = App._PgPools[poolName];\
-  if (!pool) {\
-    pool = new App.pg.Pool(config);\
-    App._PgPools[poolName] = pool;\
-  }\
-  pool.connect(cb);\
-}";
-    var evobj = {id: Math.floor(Math.random() * 1000000), text: txt};
-    this.child.send({type: Node.Worker.msgTypeMap.eval, cnt: evobj});
-  }
-  //
   // Tell the app how to connect with the database
   var constring = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort;
   this.child.send({type: Node.Worker.msgTypeMap.connectionDB,

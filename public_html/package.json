@@ -1,6 +1,6 @@
 {
   "name": "InDeRT",
-  "version": "24.0",
+  "version": "24.0.2",
   "description": ".",
   "repository": ".",
   "private": "true",
@@ -41,7 +41,7 @@
     "odata-v4-service-metadata": "0.1.6",
     "papaparse": "5.4.1",
     "pg": "8.11.3",
-    "puppeteer": "22.0.0",
+    "puppeteer": "19.11.1",
     "qr-image": "3.2.0",
     "request": "2.88.2",
     "rimraf": "3.0.2",

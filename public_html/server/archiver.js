@@ -13,7 +13,6 @@ Node.Utils = require("./utils");
 // Import Modules
 Node.tar = require("tar");
 Node.archiver = require("archiver");
-Node.rimraf = require("rimraf");
 Node.fs = require("fs");
 Node.googleCloudStorage = require("@google-cloud/storage").Storage;
 Node.http = require("http");
@@ -138,7 +137,7 @@ Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
       //
       // In this particular case an empty file remains here. Delete it!
       writeStream.end();
-      Node.rimraf(pathFile, function () {
+      Node.fs.rm(pathFile, {force: true}, () => {
       });
     });
     writeStream.on("error", function (err) {
@@ -166,7 +165,7 @@ Node.Archiver.prototype.backup = function (pathServer, pathCloud, callback)
   var fileServer = pathServer + ".tar.gz";
   //
   // If the output file already exists, delete it
-  Node.rimraf(fileServer, function (err) {
+  Node.fs.rm(fileServer, {force: true}, function (err) {
     if (err) {
       pthis.logger.log("ERROR", "Error removing the old file " + fileServer + ": " + err, "Archiver.backup");
       return callback("Error deleting the old file " + fileServer + ": " + err);
@@ -189,7 +188,7 @@ Node.Archiver.prototype.backup = function (pathServer, pathCloud, callback)
         }
         //
         // Remove the compressed file
-        Node.rimraf(fileServer, function (err) {
+        Node.fs.rm(fileServer, {force: true}, function (err) {
           if (err) {
             pthis.logger.log("ERROR", "Error removing the file " + fileServer + ": " + err, "Archiver.backup");
             return callback("Error removing the file " + fileServer + ": " + err);
@@ -227,7 +226,7 @@ Node.Archiver.prototype.backupZip = function (pathServer, pathCloud, callback)
       }
       //
       // Remove the compressed file
-      Node.rimraf(fileServer, function (err) {
+      Node.fs.rm(fileServer, {force: true}, function (err) {
         if (err) {
           pthis.logger.log("ERROR", "Error removing the file " + fileServer + ": " + err, "Archiver.backupZip");
           return callback("Error removing the file " + fileServer + ": " + err);
@@ -268,7 +267,7 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
     pthis.logger.log("ERROR", err, "Archiver.restore");
     //
     // Delete the tar.gz
-    Node.rimraf(fileServer, function (err1) {
+    Node.fs.rm(fileServer, {force: true}, function (err1) {
       if (err1)
         pthis.logger.log("WARN", "Error while deleting the file " + fileServer + ": " + err1, "Archiver.restore");
       //
@@ -278,7 +277,7 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
           // If the ".$$$" exists
           if (!err) {
             // First, try to remove the old directory
-            Node.rimraf(pathServer, function (err1) {
+            Node.fs.rm(pathServer, {recursive: true, force: true}, function (err1) {
               if (err1)
                 pthis.logger.log("WARN", "Error while deleting the directory " + pathServer + ": " + err1, "Archiver.restore");
               //
@@ -330,13 +329,13 @@ Node.Archiver.prototype.restore = function (pathServer, pathCloud, callback)
         return errorFnc("Error during the " + fileServer + " extraction: " + err);
       //
       // Delete the .tar.gz file
-      Node.rimraf(fileServer, function (err) {
+      Node.fs.rm(fileServer, {force: true}, function (err) {
         if (err)
           return errorFnc("Error delering the file " + fileServer + ": " + err);
         //
         // If the path on the server existed already, delete old path
         if (pathExists)
-          Node.rimraf(pathServer + ".$$$", function (err) {
+          Node.fs.rm(pathServer + ".$$$", {recursive: true, force: true}, function (err) {
             if (err)
               return errorFnc("Error deleting the old folder " + pathServer + ".$$$: " + err);
             //

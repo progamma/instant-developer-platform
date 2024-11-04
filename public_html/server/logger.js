@@ -9,7 +9,6 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 Node.child = require("child_process");
 Node.path = require("path");
 Node.Utils = require("./utils");
@@ -151,7 +150,7 @@ Node.Logger.prototype.deleteOldLogs = function ()
       // Delete old logs (keep last 15 days logs)
       var fdt = new Date(fn.substring(0, 10));
       if ((new Date() - fdt) > 15 * 24 * 3600 * 1000) {
-        Node.rimraf(logPath + "/" + fn, function (err) {
+        Node.fs.rm(logPath + "/" + fn, {force: true}, function (err) {
           if (err)
             console.log("[Logger::deleteOldLogs] Error deleting the file " + logPath + "/" + fn + ": " + err);
         });   // jshint ignore:line
@@ -170,6 +169,8 @@ Node.Logger.prototype.deleteOldLogs = function ()
  */
 Node.Logger.prototype.log = function (level, message, sender, data)
 {
+  // Force message as string
+  message += "";
   // [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues.
   // Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
   //

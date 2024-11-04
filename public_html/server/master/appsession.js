@@ -10,7 +10,7 @@ var Node = Node || {};
 // Import modules
 Node.zlib = require("zlib");
 Node.cookie = require("cookie");
-Node.rimraf = require("rimraf");
+Node.fs = require("fs");
 
 // Import Classes
 Node.AppClient = require("./appclient");
@@ -241,7 +241,7 @@ Node.AppSession.prototype.deleteAppClient = function (appClient, neverAck)
   if (neverAck && this.request.files) {
     this.request.files.forEach(function (f) {
       var fp = this.config.appDirectory + "/apps/" + this.app.name + "/files/" + f.path;
-      Node.rimraf(fp, function (err) {
+      Node.fs.rm(fp, {force: true}, function (err) {
         if (err)
           this.log("WARN", "Can't delete file " + fp + ": " + err, "AppSession.deleteAppClient");
       }.bind(this));

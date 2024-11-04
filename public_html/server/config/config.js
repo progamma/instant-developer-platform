@@ -11,7 +11,6 @@ var Node = Node || {};
 Node.fs = require("fs");
 Node.mime = require("mime");
 Node.ncp = require("../ncp_fixed");
-Node.rimraf = require("rimraf");
 Node.multiparty = require("multiparty");
 Node.path = require("path");
 Node.child = require("child_process");
@@ -310,7 +309,7 @@ Node.Config.prototype.saveConfig = function ()
           }
           //
           // Everything went fine... Remove the old .BAK if present
-          Node.rimraf(configFile + ".bak", function (err) {
+          Node.fs.rm(configFile + ".bak", {force: true}, function (err) {
             if (err) {
               delete pthis.savingConf;  // End save
               return pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "Config.saveConfig");
@@ -743,7 +742,7 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
     }
     //
     // Remove the old BACK if present
-    Node.rimraf(packageJSONfile + ".bak", function (err) {
+    Node.fs.rm(packageJSONfile + ".bak", {force: true}, function (err) {
       if (err)
         return errorFnc("Error removing the old package.json file " + packageJSONfile + ".bak: " + err);
       //
@@ -1024,7 +1023,45 @@ Node.Config.prototype.processRun = function (req, res)
     else {
       if (isWebApi) {
         // Try to load metadata.json file
-        var metadataPath = this.appDirectory + "/apps/" + appName + "/server/webapi/metadata.json";
+        let webApiPath = `${this.appDirectory}/apps/${appName}/server/webapi`;
+        //
+        // If api-docs is required (by GET) responde with it
+        let openApiPath = `${webApiPath}/openapi.json`;
+        if (req.params.cls === "api-docs" && req.method === "GET") {
+          if (!Node.fs.existsSync(openApiPath))
+            return req.status(404).send("File not found");
+          //
+          // Serve the swagger documentation
+          let swaggerPath = `${this.appDirectory}/apps/${appName}/client/swagger/index.html`;
+          let readStream = Node.fs.createReadStream(swaggerPath);
+          res.setHeader("Content-Type", "text/html; charset=UTF-8");
+          //
+          // Stream the file as response
+          readStream.pipe(res);
+          //
+          // Stream error handling
+          readStream.on("error", () => res.status(500).send("Internal Server Error"));
+          return;
+        }
+        //
+        // If openpai.json is required (by GET) responde with it
+        if (req.params.cls === "openapi.json" && req.method === "GET") {
+          if (!Node.fs.existsSync(openApiPath))
+            return req.status(404).send("File not found");
+          //
+          // Read the content of "server/webapi/openapi.json"
+          let spec = require(openApiPath);
+          //
+          // Replace $serverUrl with the real server url
+          let serverUrl = `${req.protocol}://${req.get("host")}/${appName}`;
+          spec.info.description = spec.info.description.replace(/\$serverUrl/g, serverUrl);
+          spec.servers[0].url = serverUrl;
+          //
+          res.setHeader("Content-Type", "application/json");
+          res.send(spec);
+        }
+        //
+        var metadataPath = `${webApiPath}/metadata.json`;
         if (!Node.fs.existsSync(metadataPath))
           return req.next();
         //
@@ -1181,7 +1218,7 @@ Node.Config.prototype.processRun = function (req, res)
           // Delete files
           Object.keys(files).forEach(function (name) {
             files[name].forEach(function (f) {
-              Node.rimraf(f.path, function (err) {
+              Node.fs.rm(f.path + ".bak", {force: true}, function (err) {
                 if (err)
                   pthis.logger.log("WARN", "Can't delete file " + f.path + ": " + err, "Config.processRun", {sid: sid});
               });
@@ -1432,7 +1469,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
           //
           callback({msg: JSON.stringify(result)});
         });
-      });
+      }.bind(this));
     }
     else {  // windows
       result.serverInfo.disk = {size: stdout[1] / 1024, available: stdout[0] / 1024};
@@ -1837,7 +1874,7 @@ Node.Config.prototype.handleLog = function (params, callback)
         }
         //
         // Remove .1 if exists
-        Node.rimraf(path + filename + ".1", function (err) {
+        Node.fs.rm(path + filename + ".1", {force: true}, function (err) {
           if (err) {
             pthis.logger.log("WARN", "Error removing the " + filename + ".1: " + err, "Config.handleLog");
             return callback("Error removing the " + filename + ".1: " + err);
@@ -1905,7 +1942,7 @@ Node.Config.prototype.handleLog = function (params, callback)
         // If bigger than MaxLen -> Rotate!
         if (stats.size > MaxLen) {
           // Remove .1 if exists
-          Node.rimraf(path + filename + ".1", function (err) {
+          Node.fs.rm(path + filename + ".1", {force: true}, function (err) {
             if (err) {
               pthis.logger.log("WARN", "Error removing the " + filename + ".1: " + err, "Config.handleLog");
               return callback("Error removing the " + filename + ".1: " + err);

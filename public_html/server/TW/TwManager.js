@@ -10,7 +10,6 @@ var InDe = InDe || {};
 
 // Import Modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 Node.ncp = require("../ncp_fixed");
 //
 // Import Classes
@@ -194,7 +193,7 @@ Node.TwManager.prototype.saveConfig = function (callback)
   };
   //
   // Remove the old BACK if present
-  Node.rimraf(configFile + ".bak", function (err) {
+  Node.fs.rm(configFile + ".bak", {force: true}, function (err) {
     if (err) {
       delete pthis.savingConf;  // End save
       pthis.logger.log("ERROR", "Error removing the old CONFIG file " + configFile + ".bak: " + err, "TwManager.saveConfig");
@@ -850,7 +849,7 @@ Node.TwManager.prototype.saveTrans = function (callback)
         //
         // If there are no more files, delete the entire staging area
         if (files.length === 0) {
-          Node.rimraf(pathStaging, function (err) {
+          Node.fs.rm(pathStaging, {recursive: true, force: true}, function (err) {
             if (err)
               pthis.logger.log("ERROR", "Error removing the staging area " + pathStaging + ": " + err, "TwManager.saveTrans");
             callback(err);
@@ -870,7 +869,7 @@ Node.TwManager.prototype.saveTrans = function (callback)
             }
             //
             // Now remove the useless session file
-            Node.rimraf(pathTrans, function (err) {
+            Node.fs.rm(pathTrans, {force: true}, function (err) {
               if (err)
                 pthis.logger.log("ERROR", "Error removing the transaction file " + pathTrans + ": " + err, "TwManager.saveTrans");
               callback(err);
@@ -1495,7 +1494,7 @@ Node.TwManager.prototype.commit = function (message, callback)
               return callback(InDe.rh.t("tw_commit_err"));
             //
             // Remove staging area
-            Node.rimraf(pthis.path + "/trans", function (err) {
+            Node.fs.rm(pthis.path + "/trans", {recursive: true, force: true}, function (err) {
               if (err) {
                 pthis.logger.log("ERROR", "Error removing the staging area " + pthis.path + "/trans: " + err, "TwManager.commit");
                 return callback(InDe.rh.t("tw_commit_err"));
@@ -1988,7 +1987,7 @@ Node.TwManager.prototype.reset = function (callback)
       }
       //
       // Remove the saved modifications folder
-      Node.rimraf(pthis.path + "/trans", function (err) {
+      Node.fs.rm(pthis.path + "/trans", {recursive: true, force: true}, function (err) {
         if (err) {
           pthis.logger.log("ERROR", "Error removing the " + pthis.path + "/trans directory: " + err, "TwManager.reset");
           return callback(InDe.rh.t("tw_reset_err"));

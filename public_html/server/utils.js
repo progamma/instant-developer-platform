@@ -11,7 +11,6 @@ var Node = Node || {};
 Node.fs = require("fs");
 Node.fsExtra = require("fs.extra");
 Node.path = require("path");
-Node.rimraf = require("rimraf");
 Node.tar = require("tar");
 Node.multiparty = require("multiparty");
 Node.mime = require("mime");
@@ -244,7 +243,7 @@ Node.Utils.handleFileSystem = function (options, callback)
               //
               sendFile(tarFile, function (err) {
                 // Remove temporary TAR file
-                Node.rimraf(tarFile, function () {
+                Node.fs.rm(tarFile, {force: true}, function () {
                   if (err)
                     return callback("Can't send file: " + err);
                   //
@@ -279,7 +278,8 @@ Node.Utils.handleFileSystem = function (options, callback)
                 // Delete the "dummy" file I've used to create the directory
                 var farr = Object.keys(files);
                 if (farr.length && files[farr[0]] && files[farr[0]][0])
-                  Node.rimraf(files[farr[0]][0].path, function () {});
+                  Node.fs.rm(files[farr[0]][0].path, {force: true}, () => {
+                  });
                 //
                 if (err)
                   return callback("Error while creating the new directory: " + err);
@@ -323,7 +323,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                           return callback("Error during the " + newfile + " extraction: " + err);
                         //
                         // Delete the .tar.gz file
-                        Node.rimraf(newfile, function (err) {
+                        Node.fs.rm(newfile, {force: true}, function (err) {
                           if (err)
                             return callback("Error deleting the file " + newfile + ": " + err);
                           //
@@ -387,7 +387,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                           return;
                         //
                         // Delete the .zip file
-                        Node.rimraf(newfile, function (err) {
+                        Node.fs.rm(newfile, {force: true}, function (err) {
                           if (err)
                             return callback("Error deleting the file " + newfile + ": " + err);
                           //
@@ -416,7 +416,7 @@ Node.Utils.handleFileSystem = function (options, callback)
           if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.substr(-7) === "/files/")
             return callback("Can't delete FILES directory");
           //
-          Node.rimraf(options.path, function (err) {
+          Node.fs.rm(options.path, {recursive: true, force: true}, function (err) {
             if (err)
               return callback("Error while deleting the file: " + err);
             //
@@ -650,7 +650,7 @@ Node.Utils.saveObject = function (filename, obj, callback)
 {
   // If there is no object, remove JSON file and return to callee
   if (!obj)
-    return Node.rimraf(filename, callback);
+    return Node.fs.rm(filename, {force: true}, callback);
   //
   // There is an object -> I need to write the file
   var wsFile = Node.fs.createWriteStream(filename);

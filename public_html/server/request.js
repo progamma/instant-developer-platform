@@ -50,9 +50,9 @@ Node.Request.prototype.postRequest = function (options, form, callback)
   // Set method to POST
   options.method = "POST";
   //
-  // Timeout (if not specified -> 60 sec)
+  // Timeout (if not specified -> 300 sec)
   if (options.timeout === undefined)
-    options.timeout = 60000;
+    options.timeout = 300000;
   //
   var done = (statusCode, data, err) => {
     // I can't call the callback more than once!
@@ -129,9 +129,9 @@ Node.Request.prototype.getRequest = function (options, callback)
   // Set method to GET
   options.method = "GET";
   //
-  // Timeout (if not specified -> 60 sec)
+  // Timeout (if not specified -> 300 sec)
   if (options.timeout === undefined)
-    options.timeout = 60000;
+    options.timeout = 300000;
   //
   var done = (statusCode, data, err) => {
     // I can't call the callback more than once!

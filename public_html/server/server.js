@@ -6,7 +6,6 @@
 /* global require, __dirname, process, Buffer */
 
 var Node = Node || {};
-
 // Import classes
 Node.Config = require("./config/config");
 Node.IDESession = require("./idesession");
@@ -30,7 +29,6 @@ Node.path = require("path");
 Node.os = require("os");
 Node.tls = require("tls");
 Node.child = require("child_process");
-Node.rimraf = require("rimraf");
 Node.url = require("url");
 Node.BodyParser = require("body-parser");
 Node.errorHandler = require("errorhandler");
@@ -330,6 +328,9 @@ Node.Server.prototype.start = function ()
     res.status(404).end();
   });
   //
+  // RD3View (IDF)
+  this.registerIDFRoutes();
+  //
   // Inizialize static file management for express with maxAge=5min (not for local servers)
   var expOpts = (this.config.local ? undefined : {index: false, redirect: false, maxAge: 300000});
   var idePath = Node.path.resolve(__dirname + "/../ide");
@@ -605,7 +606,7 @@ Node.Server.prototype.execFileAsRoot = function (cmd, params, options, callback)
           //
           // Hack: remove ETC folder (left over by previous commands)
           // (https://github.com/npm/npm/issues/11486)
-          Node.rimraf(nodeModulesPath + "etc", function (err) {   // jshint ignore:line
+          Node.fs.rm(nodeModulesPath + "etc", {recursive: true, force: true}, () => {
           });
           //
           // Log package prune
@@ -1087,6 +1088,11 @@ Node.Server.prototype.getOpenSession = function (project, filter)
     if (sess.project !== project)
       continue;
     //
+    // If there is no filter, the search is over... this session is good enough
+    // Project is the same and that is what callee was looking for
+    if (!filter)
+      return sess;
+    //
     var sessMatches = true; // Be positive
     //
     var filterKeys = Object.keys(filter);
@@ -1121,6 +1127,8 @@ Node.Server.prototype.getOpenSession = function (project, filter)
             var device = sess.project.user.devices[k];
             if (device.socket) {
               var devIP = (device.socket.conn ? device.socket.conn.remoteAddress : "!");
+              if (devIP.startsWith("::ffff:"))
+                devIP = devIP.substring(7);
               if (devIP === filterIP)
                 sessMatches = true;
             }
@@ -1792,6 +1800,98 @@ Node.Server.prototype.loadCustomCert = function (cert, callback)
   //
   // I have all needed files!
   callback();
+};
+
+
+/**
+ * Send the serviceWorker.js to client (IDE & APP)
+ * @param {Request} req
+ * @param {Response} res
+ */
+Node.Server.prototype.sendDesktop = function (req, res)
+{
+  try {
+    // Get user object
+    let user = this.config.getUser(req.query.username);
+    if (!user) {
+      res.status(404).send("User not found: " + req.query.username);
+      return;
+    }
+    //
+    // Get project from user
+    let prjId = req.query.prjid;
+    //
+    let prj = user.getProject(prjId);
+    //
+    // Se il progetto non è stato trovato e c'è solo un progetto aperto,
+    // usa quello
+    if (!prj) {
+      res.status(404).send("Project not found: " + prjId);
+      return;
+    }
+    //
+    // Let's see if there is any IDE session for this user or project
+    let ideses;
+    let list = Object.values(this.IDESessions);
+    for (let s of list) {
+      if (s.project.user === user && (!prj || s.project === prj)) {
+        ideses = s;
+        break;
+      }
+    }
+    //
+    if (ideses) {
+      ideses.sendApiCommand({
+        command: "idf-desktop",
+        objid: req.query.objid
+      }, function (data) {
+        let code = data + "";
+        res.header("Content-Type", "text/html");
+        res.header("Content-Length", Buffer.from(code).length);
+        res.header("Cache-Control", "no-cache");
+        res.header("Pragma", "no-cache");
+        res.header("Expires", "-1");
+        //
+        res.status(200).send(code);
+      });
+    }
+    else {
+      res.status(404).send("Project not open: " + prjId);
+    }
+  }
+  catch (ex) {
+    this.logger.log("ERROR", `Error while sending sendDesktop: ${ex.message}`, "Server.sendDesktop");
+    res.status(500).end();
+  }
+};
+
+
+/**
+ * Registra le rotte per IDF
+ */
+Node.Server.prototype.registerIDFRoutes = function ()
+{
+  Node.app.get("/idf/:template/desktop.htm", Node.Server.prototype.sendDesktop.bind(this));
+  //
+  try {
+    let templatePath = Node.path.resolve(__dirname, '../ide/app/idf/Template');
+    let themePath = templatePath + "/Theme";
+    const files = Node.fs.readdirSync(themePath);
+    files.forEach(file => {
+      const fullPath = Node.path.join(themePath, file);
+      if (Node.fs.statSync(fullPath).isDirectory()) {
+        //console.log(`Nome: ${file}, Percorso: ${fullPath}`);
+        Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/RD3`));
+        Node.app.use(`/idf/${file}`, Node.express.static(fullPath));
+        Node.app.use(`/idf/${file}`, Node.express.static(`${templatePath}/Common`));
+      }
+    });
+  }
+  catch (ex) {
+    this.logger.log("ERROR", `Error while reading IDF template directory: ${ex.message}`, "Server.registerIDFRoutes");
+  }
+  //
+  Node.app.use('/idf/editor', Node.express.static(Node.path.resolve(__dirname, '../ide/app/idf/editor')));
 };
 
 

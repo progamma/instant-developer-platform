@@ -9,7 +9,6 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 Node.mime = require("mime");
 Node.ncp = require("../ncp_fixed");
 Node.multiparty = require("multiparty");
@@ -259,7 +258,7 @@ Node.Project.prototype.deleteProjectFolder = function (callback)
   var path = this.config.directory + "/" + this.user.userName + "/" + this.name;
   //
   var delProjectFolder = function () {
-    Node.rimraf(path, function (err) {
+    Node.fs.rm(path, {recursive: true, force: true}, function (err) {
       if (err) {
         pthis.log("ERROR", "Error deleting the project folder " + path + ": " + err, "Project.deleteProjectFolder");
         return callback("Error deleting the project folder " + path + ": " + err);
@@ -874,11 +873,12 @@ Node.Project.prototype.backup = function (params, callback)
   // Define useful functions
   var errorFnc = function (msg) {
     pthis.log("ERROR", msg, "Project.backup");
-    callback(msg);
     //
     // Operation failed -> clean up
-    Node.rimraf(pathTemp, function () {
+    Node.fs.rm(pathTemp, {recursive: true, force: true}, () => {
     });
+    //
+    callback(msg);
   };
   var successFnc = function () {
     pthis.log("INFO", "Backup of the project succeeded", "Project.backup");
@@ -923,7 +923,7 @@ Node.Project.prototype.backup = function (params, callback)
     }
     //
     // Remove the temp folder if present (due to a failed previous backup)
-    Node.rimraf(pathTemp, function (err) {
+    Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
       if (err)
         return errorFnc("Error removing the previous temp folder (" + pathTemp + "): " + err);
       //
@@ -943,7 +943,7 @@ Node.Project.prototype.backup = function (params, callback)
               return errorFnc("Error while backing up project " + pthis.name + ": " + err);
             //
             // Delete the temp folder
-            Node.rimraf(pathTemp, function (err) {
+            Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
               if (err)
                 return errorFnc("Error removing the temp folder (" + pathTemp + "): " + err);
               //
@@ -999,7 +999,7 @@ Node.Project.prototype.restore = function (params, callback)
     callback(msg);
     //
     // Operation failed -> clean up
-    Node.rimraf(pathTemp, function () {
+    Node.fs.rm(pathTemp, {recursive: true, force: true}, () => {
     });
   };
   var successFnc = function () {
@@ -1023,15 +1023,15 @@ Node.Project.prototype.restore = function (params, callback)
         return successFnc();
       //
       // It was a CLONE -> I need to clean TW
-      Node.rimraf(path + "/branches", function (err) {
+      Node.fs.rm(path + "/branches", {recursive: true, force: true}, function (err) {
         if (err)
           return errorFnc("Error deleting the BRANCHES folder: " + err);
         //
-        Node.rimraf(path + "/trans", function (err) {
+        Node.fs.rm(path + "/trans", {recursive: true, force: true}, function (err) {
           if (err)
             return errorFnc("Error deleting the TRANS folder: " + err);
           //
-          Node.rimraf(path + "/TwConfig.json", function (err) {
+          Node.fs.rm(path + "/TwConfig.json", {force: true}, function (err) {
             if (err)
               return errorFnc("Error deleting the TwConfig.json file: " + err);
             //
@@ -1064,7 +1064,7 @@ Node.Project.prototype.restore = function (params, callback)
             return errorFnc("Error copying the folder: " + err);
           //
           // Delete the temp folder
-          Node.rimraf(pathTemp, function (err) {
+          Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
             if (err)
               return errorFnc("Error removing the temp folder (" + pathTemp + "): " + err);
             //
@@ -1202,7 +1202,7 @@ Node.Project.prototype.resetTW = function (params, callback)
     //
     // Delete first object in the list
     var obj = path + "/" + objectsToRemove[0];
-    Node.rimraf(obj, function (err) {
+    Node.fs.rm(obj, {recursive: true, force: true}, function (err) {
       if (err) {
         pthis.log("WARN", "Error while deleting " + obj + ": " + err, "Project.resetTW");
         return callback("Error while deleting " + obj + ": " + err);
@@ -1343,7 +1343,7 @@ Node.Project.prototype.removeBuild = function (params, callback)
   }
   //
   var fname = prjBuildPath + "project_" + buildVersion + ".json";
-  Node.rimraf(fname, function (err) {
+  Node.fs.rm(fname, {force: true}, function (err) {
     if (err) {
       this.log("ERROR", "Error deleting the build " + fname + ": " + err, "Project.removeBuild");
       return callback("Error deleting the build " + fname + ": " + err);

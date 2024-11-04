@@ -11,7 +11,6 @@ var InDe = InDe || {};
 // Import modules
 Node.fs = require("fs");
 Node.path = require("path");
-Node.rimraf = require("rimraf");
 Node.cookie = require("cookie");
 
 // Import classes
@@ -58,6 +57,9 @@ Node.IDESession = function (prj, options, callback)
   // "TWrestore", "teamworksCmd")
   if (this.options.type === "ide" || this.options.type === "tutorial")
     this.startAutoKillTimer(60000);
+  //
+  // callback list for send and wait
+  this.cbList = {};  
 };
 
 
@@ -103,7 +105,10 @@ Node.IDESession.msgTypeMap = {
   deleteTutorialDBs: "dtdbs",
   //
   remoteQuery: "rq",
-  remoteQueryResult: "rqres"
+  remoteQueryResult: "rqres",
+  //
+  apiCommand:"apic",
+  apiCommandResult:"apir"
 };
 
 
@@ -521,6 +526,10 @@ Node.IDESession.prototype.processMessage = function (msg)
       this.handleCopyPrjFile(msg.cnt);
       break;
 
+    case Node.IDESession.msgTypeMap.apiCommandResult:
+      this.handleApiCommandResult(msg);
+      break;
+
     default:
       this.handleOtherMessages(msg);
       break;
@@ -549,6 +558,34 @@ Node.IDESession.prototype.sendMessageToClientApp = function (msg)
     }
     if (send)
       acli.sendAppMessage(msg);
+  }
+};
+
+
+
+/**
+ * Sends a message to the IDE (browser) and wait for reply
+ * @param {object} cnt
+ * @param {callback} cb
+ */
+Node.IDESession.prototype.sendApiCommand = function (command, cb)
+{
+  let cbid = Node.Utils.generateUID36();
+  this.cbList[cbid]=cb;
+  this.sendToChild({type: Node.IDESession.msgTypeMap.apiCommand, cbid, command});
+};
+
+
+/**
+ * Sends a message to the IDE (browser) and wait for reply
+ * @param {object} cnt
+ * @param {callback} cb
+ */
+Node.IDESession.prototype.handleApiCommandResult = function (message)
+{
+  let cb = this.cbList[message.cbid];
+  if (cb) {
+    cb(message.result);
   }
 };
 

@@ -10,7 +10,6 @@ var InDe = InDe || {};
 
 // Import Modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 //
 // Import Classes
 Node.Commit = require("./commit");
@@ -200,7 +199,7 @@ Node.Branch.prototype.deleteBranchFolder = function (callback)
   var twManager = this.parent;
   var path = twManager.path + "/branches/" + this.name;
   //
-  Node.rimraf(path, function (err) {
+  Node.fs.rm(path, {recursive: true, force: true}, function (err) {
     if (err)
       twManager.logger.log("ERROR", "Error deleting the branch folder " + path + ": " + err, "Branch.deleteBranchFolder");
     callback(err);
@@ -1005,7 +1004,7 @@ Node.Branch.prototype.backup = function (pathCloud, callback)
     callback(err);
     //
     // Cleanup
-    Node.rimraf(pathTgtBranch, function (err) {
+    Node.fs.rm(pathTgtBranch, {recursive: true, force: true}, function (err) {
       if (err)
         twManager.logger.log("ERROR", "Error clearning the folder " + pathTgtBranch + ": " + err, "Branch.backupBranch");
     });
@@ -1052,8 +1051,8 @@ Node.Branch.prototype.backup = function (pathCloud, callback)
           if (err)
             return errorFnc("WARN", "Error backing up folder " + pathTgtBranch + " to cloud " + pathCloud + ": " + err);
           //
-          // Delete the temporary brannch
-          Node.rimraf(pathTgtBranch, function (err) {
+          // Delete the temporary branch
+          Node.fs.rm(pathTgtBranch, {recursive: true, force: true}, function (err) {
             if (err)
               return errorFnc("ERROR", "Error removing the folder " + pathTgtBranch + ": " + err);
             //
@@ -1070,7 +1069,7 @@ Node.Branch.prototype.backup = function (pathCloud, callback)
   //
   // First, if the target path exists, remove it... I want to start in "clean" mode
   // (it could happen if a previous push failed due to an unexpected condition)
-  Node.rimraf(pathTgtBranch, function (err) {
+  Node.fs.rm(pathTgtBranch, {recursive: true, force: true}, function (err) {
     if (err)
       return errorFnc("WARN", "Error pre-clearning the folder " + pathTgtBranch + ": " + err);
     //
@@ -1185,7 +1184,7 @@ Node.Branch.prototype.revert = function (options, callback)
       twManager.logger.log("WARN", "Error while saving the new commit: " + err, "Branch.revert", {pathNewCommit: pathNewCommit});
       //
       // Delete the useless file
-      Node.rimraf(pathNewCommit, function (err) {   // jshint ignore:line
+      Node.fs.rm(pathNewCommit, {force: true}, () => {
       });
       //
       // Report error to callee
@@ -1360,7 +1359,7 @@ Node.Branch.prototype.removeConflict = function (callback)
   var twManager = this.parent;
   //
   var path = twManager.path + "/branches/" + this.name + "/conflicts";
-  Node.rimraf(path, function (err) {
+  Node.fs.rm(path, {recursive: true, force: true}, function (err) {
     if (err) {
       twManager.logger.log("ERROR", "Error deleting the conflict folder " + path + ": " + err, "Branch.removeConflict");
       return callback(err);

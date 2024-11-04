@@ -11,7 +11,6 @@ var Node = Node || {};
 Node.pg = require("pg");
 Node.fs = require("fs");
 Node.child = require("child_process");
-Node.rimraf = require("rimraf");
 
 // Import classes
 Node.Archiver = require("../archiver");

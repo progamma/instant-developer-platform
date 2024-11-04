@@ -9,7 +9,6 @@ var Node = Node || {};
 
 // Import Modules
 Node.multiparty = require("multiparty");
-Node.rimraf = require("rimraf");
 Node.ncp = require("../ncp_fixed");
 Node.fs = require("fs");
 Node.child = require("child_process");
@@ -391,7 +390,7 @@ Node.User.prototype.createUserFolder = function (callback)
 Node.User.prototype.getProject = function (name)
 {
   for (var i = 0; i < this.projects.length; i++) {
-    if (this.projects[i].name === name)
+    if (this.projects[i].name === name || this.projects[i].id === name)
       return this.projects[i];
   }
 };
@@ -594,7 +593,7 @@ Node.User.prototype.deleteUserFolder = function (callback)
   var path = this.config.directory + "/" + this.userName;
   //
   var delUserDir = function () {
-    Node.rimraf(path, function (err) {
+    Node.fs.rm(path, {recursive: true, force: true}, function (err) {
       if (err) {
         pthis.log("ERROR", "Error deleting the user folder " + path + " :" + err, "User.deleteUserFolder");
         return callback("Error deleting the user folder " + path + " :" + err);
@@ -649,7 +648,7 @@ Node.User.prototype.backup = function (params, callback)
     pthis.log("ERROR", msg, "User.backup");
     callback(msg);
     //
-    Node.rimraf(pthis.config.directory + "/tmp", function (err) {
+    Node.fs.rm(pthis.config.directory + "/tmp", {recursive: true, force: true}, function (err) {
       if (err)
         pthis.log("ERROR", "Error deleting the temporary folder " + pthis.config.directory + "/tmp:" + err, "User.backup");
     });
@@ -686,7 +685,7 @@ Node.User.prototype.backup = function (params, callback)
               return errorFnc("Error backing up the files: " + err);
             //
             // Delete the tmp folder
-            Node.rimraf(pthis.config.directory + "/tmp", function (err) {
+            Node.fs.rm(pthis.config.directory + "/tmp", {recursive: true, force: true}, function (err) {
               if (err) {
                 pthis.log("ERROR", "Error deleting the TEMP folder " + pthis.config.directory + "/tmp (2):" + err, "User.backup");
                 return callback("Error deleting the temporary folder " + pthis.config.directory + "/tmp:" + err);
@@ -796,7 +795,7 @@ Node.User.prototype.restore = function (params, callback)
         pthis.config.saveConfig();
         //
         // Delete the JSON file
-        Node.rimraf(pathJSON, function (err) {
+        Node.fs.rm(pathJSON, {force: true}, function (err) {
           if (err) {
             pthis.log("ERROR", "Error deleting the file " + pathJSON + ": " + err, "User.restore");
             return callback("Error deleting the file " + pathJSON + ": " + err);
@@ -1137,7 +1136,7 @@ Node.User.prototype.profileUser = function (params, callback)
     //
     // Handle image
     if (fields.file) {    // "file" string parameter -> delete previous image
-      Node.rimraf(pthis.config.directory + "/" + pthis.userName + "/" + pthis.IID, function (err) {
+      Node.fs.rm(pthis.config.directory + "/" + pthis.userName + "/" + pthis.IID, {force: true}, function (err) {
         if (err)
           pthis.log("ERROR", "Unable to remove previous image: " + err, "User.profileUser");
       });
@@ -1166,7 +1165,7 @@ Node.User.prototype.profileUser = function (params, callback)
           //
           // If there was an old image, remove the old one
           if (oldIID)
-            Node.rimraf(pthis.config.directory + "/" + pthis.userName + "/" + oldIID, function (err) {
+            Node.fs.rm(pthis.config.directory + "/" + pthis.userName + "/" + oldIID, {force: true}, function (err) {
               if (err)
                 pthis.log("ERROR", "Unable to remove previous image: " + err, "User.profileUser");
             });
@@ -1372,16 +1371,15 @@ Node.User.prototype.getDeviceByName = function (deviceName)
 Node.User.prototype.addCloudConnector = function (socket, data)
 {
   // Find if already exists
-  let connector = this.cloudConnectors.find(function (cc) {
-    return cc.socket === socket;
-  });
+  let connector = this.cloudConnectors.find(cc => cc.socket === socket);
   //
   let event = {name: data.name};
   if (!connector) {
     // Create a new cloudConnector instance
-    connector = {};
-    connector.socket = socket;
-    connector.callbacks = [];
+    connector = {
+      socket,
+      callbacks: []
+    };
     //
     // Add the cloudConnector to the owner's list
     this.cloudConnectors.push(connector);
@@ -1408,20 +1406,22 @@ Node.User.prototype.addCloudConnector = function (socket, data)
  */
 Node.User.prototype.removeCloudConnector = function (socket)
 {
-  for (var i = 0; i < this.cloudConnectors.length; i++) {
+  for (let i = 0; i < this.cloudConnectors.length; i++) {
     if (this.cloudConnectors[i].socket === socket) {
-      var cname = this.cloudConnectors[i].name;
+      let cname = this.cloudConnectors[i].name;
       this.cloudConnectors.splice(i, 1);
       //
       this.updateAvailableCloudConnectorsList({name: cname, connected: false});
       //
       // Search for all the sessions involving the user distpatch message to them
-      var sessionList = this.server.getSessionListByUser(this.userName);
-      var msg = {type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: {type: "disconnect", data: {name: cname}}};
+      let sessionList = this.server.getSessionListByUser(this.userName);
+      let msg = {type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: {type: "disconnect", data: {name: cname}}};
       //
-      for (i = 0; i < sessionList.length; i++)
-        sessionList[i].sendToChild(msg);
+      for (let j = 0; j < sessionList.length; j++)
+        sessionList[j].sendToChild(msg);
       //
+      if (this.userName === "manager")
+        Object.values(this.server.appSessions).forEach(s => s.sendToChild(msg));
       break;
     }
   }
@@ -1463,12 +1463,12 @@ Node.User.prototype.getUiCloudConnectorsList = function ()
  */
 Node.User.prototype.getCloudConnector = function (msg)
 {
-  for (var i = 0; i < this.cloudConnectors.length; i++) {
-    var cc = this.cloudConnectors[i];
+  for (let i = 0; i < this.cloudConnectors.length; i++) {
+    let cc = this.cloudConnectors[i];
     if (cc.name === msg.conn) {
-      var list = [];
-      var key = msg.key;
-      var name;
+      let list = [];
+      let key = msg.key;
+      let name;
       if (msg.data.dm) {
         list = cc.dmlist;
         name = msg.data.dm;
@@ -1484,8 +1484,8 @@ Node.User.prototype.getCloudConnector = function (msg)
       else if (msg.data.app)
         return cc;
       //
-      for (var j = 0; j < list.length; j++) {
-        var obj = list[j];
+      for (let j = 0; j < list.length; j++) {
+        let obj = list[j];
         if (obj.name === name && obj.key === key)
           return cc;
       }
@@ -1503,8 +1503,13 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
 {
   switch (msg.type) {
     case "connectorListRequest":
-      sender.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg,
-        cnt: {type: "connectorList", data: this.getUiCloudConnectorsList()}});
+      sender.sendToChild({
+        type: Node.User.msgTypeMap.cloudConnectorMsg,
+        cnt: {
+          type: "connectorList",
+          data: this.getUiCloudConnectorsList()
+        }
+      });
       break;
 
     case "remoteCmd":
@@ -1517,7 +1522,8 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           sid: msg.data.sid,
           cbid: msg.data.cbid,
           app: true,
-          data: {result: this.cloudConnectors.map(function (cc) {
+          data: {
+            result: this.cloudConnectors.map(cc => {
               return {
                 name: cc.name,
                 version: cc.version,
@@ -1542,7 +1548,10 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
             appid: msg.data.appid,
             cbid: msg.data.cbid,
             sid: msg.data.sid,
-            data: {error: "Remote connector not found"}};
+            data: {
+              error: `Cloud connector '${msg.conn}' not found`
+            }
+          };
           if (msg.data.fs)
             m.cnt.fs = true;
           else if (msg.data.plugin)
@@ -1576,10 +1585,10 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       }
       //
       // Check if an exadecimal string need to be converted to ArrayBuffer
-      if (msg.data && msg.data.args) {
+      if (msg?.data.args) {
         for (let i = 0; i < msg.data.args.length; i++) {
           let arg = msg.data.args[i];
-          if (arg && typeof arg === "object" && arg._t === "buffer" && arg.data)
+          if (arg && typeof arg === "object" && arg._t === "buffer" && "data" in arg)
             msg.data.args[i] = Node.Utils.base64ToBuffer(arg.data);
         }
       }

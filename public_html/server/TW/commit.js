@@ -10,7 +10,6 @@ var InDe = InDe || {};
 
 // Import Modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 //
 // Import Classes
 Node.Utils = require("../utils");

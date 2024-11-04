@@ -9,7 +9,6 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.rimraf = require("rimraf");
 Node.ncp = require("../ncp_fixed");
 
 // Import classes
@@ -218,7 +217,9 @@ Node.App.prototype.createNewSession = function (options)
   }
   //
   // If I've found a worker but it has already too many users and I can create new workers
-  var numwrk = this.workers.filter(function(w) { return (!w.hibernated); }).length;
+  var numwrk = this.workers.filter(function (w) {
+    return (!w.hibernated);
+  }).length;
   if (worker && worker.getLoad() >= minAppUsersPerWorker && numwrk < maxAppWorkers)
     worker = undefined;   // Create a new worker
   //
@@ -656,14 +657,14 @@ Node.App.prototype.uninstall = function (params, callback)
     }
     //
     // First remove app directory
-    Node.rimraf(pthis.config.appDirectory + "/apps/" + pthis.name, function (err) {
+    Node.fs.rm(pthis.config.appDirectory + "/apps/" + pthis.name, {recursive: true, force: true}, function (err) {
       if (err) {
         pthis.log("WARN", "Can't delete app folder: " + err, "App.uninstall");
         return callback("Can't delete app folder: " + err);
       }
       //
       // Remove app backups (if any)
-      Node.rimraf(pthis.config.appDirectory + "/backups/" + pthis.name, function (err) {
+      Node.fs.rm(pthis.config.appDirectory + "/backups/" + pthis.name, {recursive: true, force: true}, function (err) {
         if (err) {
           pthis.log("WARN", "Can't delete backup folder: " + err, "App.uninstall");
           return callback("Can't delete backup folder: " + err);

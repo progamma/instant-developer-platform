@@ -1412,10 +1412,19 @@ Node.Server.prototype.backupDisk = function (scheduled)
     // - if it's in the future and greater than the backup period, we remove the exceding hours.
     var snapshotTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, mins, 0, 0);
     var msTillSnapshotTime = snapshotTime - now;
-    while (msTillSnapshotTime < 0)
-      msTillSnapshotTime += this.config.numHoursSnapshot * 3600 *1000;
-    if (msTillSnapshotTime > this.config.numHoursSnapshot * 3600 *1000)
-      msTillSnapshotTime = msTillSnapshotTime % this.config.numHoursSnapshot * 3600 *1000;
+    while (msTillSnapshotTime <= 0)
+      msTillSnapshotTime += this.config.numHoursSnapshot * 60 * 60 * 1000;
+    if (msTillSnapshotTime > this.config.numHoursSnapshot * 60 * 60 * 1000)
+      msTillSnapshotTime = msTillSnapshotTime % (this.config.numHoursSnapshot * 60 * 60 * 1000);
+    // 
+    // I schedule the next snapshot to be configuration compliant, but I don't want to run it immediately on (re)boot,
+    // for that freezing the disk while the server is starting up is not a good idea.
+    // There are quite a few disk operations at startup (e.g., many chown on files) and it's safer to not block them.
+    // In this case I add another this.config.numHoursSnapshot * hour to the schedule time, skipping the very first schedule, which is too near in time.
+    while (msTillSnapshotTime < 5 * 60 * 1000) {
+      this.logger.log("INFO", `Skipping snapshot ${msTillSnapshotTime} ms from now: it's too near.`, "Server.backupDisk");
+      msTillSnapshotTime += this.config.numHoursSnapshot * 60 * 60 * 1000;
+    }
     //
     // Now I've all info that allows me to schedule backups
     this.backupDiskTimeoutID = setTimeout(function () {

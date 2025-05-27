@@ -193,6 +193,8 @@ Node.Request.prototype.getRequest = function (options, callback)
 Node.Request.prototype.sendTokenToConsole = function ()
 {
   var pthis = this;
+  if (!this.config.name)
+    return;
   //
   // Generate an AUTK token
   this.config.autk = Node.Utils.generateUID36();

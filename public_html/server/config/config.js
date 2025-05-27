@@ -6,7 +6,6 @@
 /* global require, module, process, __dirname */
 
 var Node = Node || {};
-
 // Import Modules
 Node.fs = require("fs");
 Node.mime = require("mime");
@@ -33,6 +32,59 @@ Node.Config = function (par)
   this.parent = par;
   this.users = [];
   this.name = null;
+  this.licdata = {
+    guid: "00000000-0000-0000-0000-000000000000",
+    name: "test",
+    releasetype: 1,
+    code: "EXPRESS",
+    products: 0x0102, // C# e report
+    maxtables: 20,
+    maxversion: "",
+    startdate: "",
+    complist: "",
+    enddate: "",
+    lastcheck: 0
+  };
+  this.idfoptions = {
+    AntBat: "",
+    AntOpt: "",
+    JavaHome: "",
+    TomUrl: "localhost",
+    TomPort: 8080,
+    Tomcat: "",
+    TomUserName: "admin",
+    TomPassword: "",
+    DotNetVer: 40,
+    TomcatVer: 10,
+    InDeServerURL: "http://www.progamma.com/INDEWS/INDEWS.asmx",
+    InDeServerURLAlt: "http://www2.progamma.com/INDEWS/INDEWS.asmx",
+    ShowAllIcons: true,
+    InlineParams: true,
+    UseAlwaysVCE: true,
+    ContEditing: false,
+    ColRes: "#0846c4",
+    ColNorm: "#000000",
+    ColConst: "#C00060",
+    ColComm: "#007000",
+    ColError: "#FF0000",
+    ColWarning: "#008040",
+    ColGrid: "#F8F8F8",
+    ColSelection: "#FFFFAA",
+    ColCut: "#E0E0E0",
+    ColBlock: "#A0A0A0",
+    ColBack: "#FFFFFF",
+    ColQuery: "#F0F0F0",
+    ColHilight: "#FFFFAA",
+    ColCtx: "#EAF1FB",
+    ColWaterMark: "#808080",
+    AutoComments: false,
+    ShowObjDescr: true,
+    ReuseView: false,
+    NumColumns: 80,
+    AutoColumns: true,
+    FontSize: "12",
+    FontName: "Source Code Pro"
+  };
 };
 
 
@@ -76,7 +128,8 @@ Node.Config.prototype.save = function ()
     numHoursSnapshot: this.numHoursSnapshot, numMaxSnapshot: this.numMaxSnapshot, timeSnapshot: this.timeSnapshot,
     appDirectory: this.appDirectory, defaultApp: this.defaultApp, services: this.services,
     maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
-    lowDiskThreshold: this.lowDiskThreshold, responseHeaders: this.responseHeaders, params: this.params, users: this.users
+    lowDiskThreshold: this.lowDiskThreshold, responseHeaders: this.responseHeaders, params: this.params, users: this.users,
+    licdata: this.licdata, idfoptions: this.idfoptions
   };
   //
   // Remove certificate's file content
@@ -204,6 +257,10 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.params = v.params;
   if (v.local)
     this.local = true;
+  if (v.licdata)
+    this.licdata = v.licdata;
+  if (v.idfoptions)
+    this.idfoptions = v.idfoptions;
 };
 
 
@@ -221,7 +278,7 @@ Node.Config.prototype.saveProperties = function ()
   // Add usefull properties
   r.url = this.getUrl();
   r.local = this.local;
-  r.version = this.server.version;
+  r.version = this.server.version || this.getIndeVersion();
   r.remoteDBurls = this.getRemoteDBUrls();
   //
   // Default values
@@ -412,8 +469,9 @@ Node.Config.prototype.check = function ()
     user.userName = "manager";
     //
     // Add the new user to the list of users and save the current configuration
+    // DO not save configuration because now logger is not set yet, and we can re-add manager
+    // again if the config won't be saved
     this.users.push(user);
-    this.saveConfig();
   }
   //
   // If there is no IDE directory, check is complete
@@ -590,30 +648,7 @@ Node.Config.prototype.getUser = function (name)
  */
 Node.Config.prototype.createUser = function (userName, callback)
 {
-  var pthis = this;
-  //
-  // Check if the user exists already
-  if (this.getUser(userName)) {
-    this.logger.log("WARN", "User already exists", "Config.createUser", {user: userName});
-    return callback("User already exists");
-  }
-  //
-  // Create and initialize a new user
-  var user = new Node.User(this);
-  user.init(userName, function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Add the user obj to the list of users and save the current configuration
-    pthis.users.push(user);
-    pthis.saveConfig();
-    //
-    // Log the user creation
-    pthis.logger.log("INFO", "User created", "Config.createUser", {user: userName});
-    //
-    // Done
-    callback();
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -624,44 +659,7 @@ Node.Config.prototype.createUser = function (userName, callback)
  */
 Node.Config.prototype.deleteUser = function (userName, callback)
 {
-  var pthis = this;
-  //
-  var user = this.getUser(userName);
-  if (!user) {
-    this.logger.log("WARN", "User not found", "Config.deleteUser", {user: userName});
-    return callback({code: 404, msg: "User not found"});
-  }
-  //
-  // Can't delete MANAGER user
-  if (user.userName === "manager") {
-    this.logger.log("WARN", "Can't delete MANAGER user", "Config.deleteUser", {user: userName});
-    return callback("Can't delete MANAGER user");
-  }
-  //
-  // Delete the user DBs
-  user.deleteAllDatabases(function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Delete user folder
-    user.deleteUserFolder(function (err) {
-      if (err)
-        return callback(err);
-      //
-      // Delete the user from the users array
-      var index = pthis.users.indexOf(user);
-      pthis.users.splice(index, 1);
-      //
-      // Save the new configuration
-      pthis.saveConfig();
-      //
-      // Log the user deletion
-      pthis.logger.log("INFO", "User removed", "Config.deleteUser", {user: userName});
-      //
-      // Done
-      callback();
-    });
-  });
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 
@@ -1253,13 +1251,18 @@ Node.Config.prototype.processRun = function (req, res)
           Object.keys(files).forEach(function (name) {
             files[name].forEach(function (f) {
               var ext = "";
-              if (f.headers && f.headers["content-type"])
+              //
+              // If there's a content type, try to get extension using it
+              if (f.headers?.["content-type"])
                 ext = Node.mime.getExtension(f.headers["content-type"]);
-              else {
+              //
+              // If no extension, try to get it from file original name
+              if (!ext) {
                 ext = f.originalFilename.split(".");
                 if (ext.length > 1)
                   ext = ext[ext.length - 1];
               }
+              //
               if (ext)
                 ext = "." + ext;
               //
@@ -2586,6 +2589,30 @@ Node.Config.prototype.execCommand = function (params, callback)
   //
   // I'm here if AUTK is not enabled or if the given one matches
   switch (command) {
+    case "geturl":
+      this.getUrlData(params, callback);
+      break;
+    case "getavalic":
+      this.getAvaLic(params, callback);
+      break;
+    case "getlic":
+      this.getLic(params, callback);
+      break;
+    case "setlic":
+      this.setLic(params, callback);
+      break;
+    case "getopt":
+      this.getOpt(params, callback);
+      break;
+    case "setopt":
+      this.setOpt(params, callback);
+      break;
+    case "getappdata":
+      this.getAppData(params, callback);
+      break;
+    case "setappdata":
+      this.setAppData(params, callback);
+      break;
     case "status":
       this.sendStatus(params, callback);
       break;
@@ -2637,6 +2664,225 @@ Node.Config.prototype.execCommand = function (params, callback)
       }
       break;
   }
+};
+
+
+/*
+ * Get license data
+ */
+Node.Config.prototype.getLic = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+
+/*
+ * Get license data
+ */
+Node.Config.prototype.getAvaLic = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+
+/*
+ * Set license data
+ */
+Node.Config.prototype.setLic = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Get url bypassing CORS
+ */
+Node.Config.prototype.getUrlData = function (params, callback) {
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Get options data
+ */
+Node.Config.prototype.getOpt = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Set options data
+ */
+Node.Config.prototype.setOpt = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Get application data
+ */
+Node.Config.prototype.getAppData = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Set application data
+ */
+Node.Config.prototype.setAppData = function (params, callback)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Invia i dati al server di licenza
+ */
+Node.Config.prototype.sendToLicServer = async function (operation, data, format = "json")
+{
+  console.error("NOT SUPPORTED FOR SELF");
+}
+};
+
+
+/*
+ * Calcola il GUID di sistema
+ */
+Node.Config.prototype.generateSystemGUID = function () {
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Calcola il mac address della scheda di rete principale
+ */
+Node.Config.prototype.getPrimaryMacAddress = function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Calcola data ora correnti
+ */
+Node.Config.prototype.getCurrentDateTime = function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Calcola info sul sistema operativo
+ */
+Node.Config.prototype.getOSInfo = function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Ritorna la versione di IDFJS
+ */
+Node.Config.prototype.getIndeVersion = function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Ritorna l'utente di IDFJS
+ */
+Node.Config.prototype.getIdfUser = function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Controlla se il server di licenza è accedibile
+ */
+Node.Config.prototype.licSrvCheckConnection = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Crea o aggiorna i dati di un utente
+ */
+Node.Config.prototype.licSrvUpdateUser = async function (user)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Crea/aggiorna l'installazione
+ */
+Node.Config.prototype.licSrvUpdateInde = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Recupera l'elenco delle licenze disponibili
+ */
+Node.Config.prototype.licSrvGetLicList = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+
+/*
+ * Associa una licenza a questa installazione
+ */
+Node.Config.prototype.licSrvGetLicense = async function (lic)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Rilascia la licenza di questa installazione
+ */
+Node.Config.prototype.licSrvReleaseLicense = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Rilascia la licenza di questa installazione
+ */
+Node.Config.prototype.licSrvUninstall = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/*
+ * Controlla la licenza per IDF.JS
+ */
+Node.Config.prototype.checkLicense = async function ()
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/**
+ * @param {request} req
+ * @param {response} res
+ * */
+Node.Config.prototype.sendFirstPage = async function (req, res)
+{
+  console.error("NOT SUPPORTED FOR SELF");
 };
 
 

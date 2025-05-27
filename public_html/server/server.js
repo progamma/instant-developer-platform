@@ -1406,11 +1406,16 @@ Node.Server.prototype.backupDisk = function (scheduled)
     var hours = Math.floor((this.config.timeSnapshot || 0) / 100);
     var mins = (this.config.timeSnapshot || 0) % 100;
     //
-    // Compute how many ms there are from NOW to the expected backup time
+    // Compute how many ms there are from NOW to the expected backup time.
+    // Starting from the first snapshot time (usually 2AM)
+    // - if it's in the past we add hours depending on the numHoursSnapshot config, untile we reach a future date.
+    // - if it's in the future and greater than the backup period, we remove the exceding hours.
     var snapshotTime = new Date(now.getFullYear(), now.getMonth(), now.getDate(), hours, mins, 0, 0);
     var msTillSnapshotTime = snapshotTime - now;
-    if (msTillSnapshotTime < 0)   // snapshot time is in the past... (less than 24h from now)
-      msTillSnapshotTime += 86400000;
+    while (msTillSnapshotTime < 0)
+      msTillSnapshotTime += this.config.numHoursSnapshot * 3600 *1000;
+    if (msTillSnapshotTime > this.config.numHoursSnapshot * 3600 *1000)
+      msTillSnapshotTime = msTillSnapshotTime % this.config.numHoursSnapshot * 3600 *1000;
     //
     // Now I've all info that allows me to schedule backups
     this.backupDiskTimeoutID = setTimeout(function () {
@@ -1472,9 +1477,41 @@ Node.Server.prototype.backupDisk = function (scheduled)
   }
   //
   var unfreezeDisk = function () {
+    // I unfreeze the disk only once.
+    if (!this.backupInfo.snapshotName) {
+      this.logger.log("WARN", "Can't unfreeze the disk, disk not freezed", "Server.backupDisk");
+      return;
+    }
+    delete this.backupInfo.snapshotName;
+    //
     this.config.handleSnapshot({req: {}, tokens: ["", "end"]}, function (err) {
       if (err)
         this.logger.log("WARN", "Can't unfreeze the disk: " + err, "Server.backupDisk");
+    }.bind(this));
+  }.bind(this);
+  //
+  // Use always the same backup name, based on the datetime of the backup.
+  // this.backupInfo.snapshotName and checkBeckupinterval are calculated in doBackup(), checkBackup() is executed afterwards.
+  var checkBackupInterval;
+  //
+  var checkBackup = function() {
+    if (!this.backupInfo.snapshotName)
+      return;
+    //
+    clearInterval(checkBackupInterval);
+    //
+    let gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
+    gce.getSnapshots({"filter" : `name eq ${this.backupInfo.snapshotName}`}, function (err, checkedSnapshots) {
+      // Stop checking the backup when I found that it's uploading, ready or failed (statuses after che completion of the backup itself).
+      if (checkedSnapshots.length > 0) {
+        let checkedSnapshot = checkedSnapshots[0];
+        if (["UPLOADING", "READY", "FAILED"].includes(checkedSnapshot.metadata?.status)) {
+          return unfreezeDisk();
+        }
+      }
+      //
+      // Backup's not ready, repeat.
+      checkBackupInterval = setInterval(checkBackup, 1000);
     }.bind(this));
   }.bind(this);
   //
@@ -1490,15 +1527,21 @@ Node.Server.prototype.backupDisk = function (scheduled)
       var sdate = new Date().toISOString().replace(/-/g, "").replace(/:/g, "").replace("T", "").replace(".", "").replace("Z", "");
       var desc = "Snapshot created at " + new Date() + " for server " + this.config.name;
       //
-      var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).
-              snapshot(this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3));    // Remove ms from time
+      this.backupInfo.snapshotName = this.backupInfo.diskName + "-" + sdate.substring(0, sdate.length - 3); // Remove ms from time
+      var snapshot = gce.zone(this.backupInfo.cloudZone).disk(this.backupInfo.diskName).snapshot(this.backupInfo.snapshotName);
       snapshot.create({"description": desc}, function (err, snapshot, operation, apiResponse) {   // jshint ignore:line
         if (err) {
           this.logger.log("WARN", "Can't create the snapshot (1): " + err, "Server.backupDisk");
           return unfreezeDisk();
         }
         //
-        // Wait for completition
+        // Check for an unfreezable backup status, the completion may need up to 60s (and more), so we want to unfreeze the disk
+        // when the data are safe and we don't wait for the completion of whole operation, which includes the upload and the double check
+        // of the snapshot.
+        checkBackupInterval = setInterval(checkBackup, 1000);
+        //
+        // Wait for the operation's completion. This may neeed up to 60s (and more).
+        // When it'is completed we handle the exceeding backups.
         operation.on("error", function (err) {
           this.logger.log("WARN", "Can't create the snapshot (2): " + err, "Server.backupDisk");
           unfreezeDisk();
@@ -1841,6 +1884,7 @@ Node.Server.prototype.sendDesktop = function (req, res)
     }
     //
     if (ideses) {
+      this.lastRequestingSession = ideses.id;
       ideses.sendApiCommand({
         command: "idf-desktop",
         objid: req.query.objid
@@ -1865,16 +1909,81 @@ Node.Server.prototype.sendDesktop = function (req, res)
   }
 };
 
+/**
+ * Send the serviceWorker.js to client (IDE & APP)
+ * @param {Request} req
+ * @param {Response} res
+ */
+Node.Server.prototype.sendCustomFile = function (req, res)
+{
+  let idx = req.url.lastIndexOf("/");
+  let file = req.url.substring(idx + 1);
+  //
+  let ok = false;
+  if (this.lastRequestingSession) {
+    let ideses;
+    let list = Object.values(this.IDESessions);
+    for (let s of list) {
+      if (s.id === this.lastRequestingSession) {
+        ideses = s;
+        break;
+      }
+    }
+    if (ideses) {
+      ok = true;
+      ideses.sendApiCommand({
+        command: "idf-customf",
+        file: file
+      }, function (data) {
+        // console.log("sendCustomFile",data);
+        let code = data + "";
+        res.header("Content-Type", "text/css");
+        res.header("Content-Length", Buffer.from(code).length);
+        res.header("Cache-Control", "no-cache");
+        res.header("Pragma", "no-cache");
+        res.header("Expires", "-1");
+        //
+        res.status(200).send(code);
+      });
+    }
+  }
+  if (!ok) {
+    this.logger.log("ERROR", `No IDE session is requesting for custom files`, "Server.sendCustomFile");
+    res.status(500).send("No IDE session is requesting for custom files");
+  }
+};
+
 
 /**
- * Registra le rotte per IDF
+ * Send the first page to IDF.JS
+ * @param {Request} req
+ * @param {Response} res
+ */
+Node.Server.prototype.sendFirstPage = function (req, res)
+{
+  this.config.sendFirstPage(req, res);
+};
+
+
+/**
+ * Register IDF routes
  */
 Node.Server.prototype.registerIDFRoutes = function ()
 {
   Node.app.get("/idf/:template/desktop.htm", Node.Server.prototype.sendDesktop.bind(this));
+  Node.app.get("/idf/:template/desktopFluid.htm", Node.Server.prototype.sendDesktop.bind(this));
   //
+  let clientPath = Node.path.resolve(__dirname, "../ide/app/client");
+  Node.app.use(`/idf/fonts`, Node.express.static(`${clientPath}/objects/ionic/fonts`));
+  //
+  let customfiles = ["custom.css", "customf.css"];
+  for (let f of customfiles) {
+    Node.app.get("/idf/:template/" + f, Node.Server.prototype.sendCustomFile.bind(this));
+  }
+  //
+  // I want to access the RD3 client folders without referencing template within the URL (same thing as runtime)
   try {
-    let templatePath = Node.path.resolve(__dirname, '../ide/app/idf/Template');
+    let templatePath = Node.path.resolve(__dirname, "../ide/app/idf/Template");
     let themePath = templatePath + "/Theme";
     const files = Node.fs.readdirSync(themePath);
     files.forEach(file => {
@@ -1882,6 +1991,7 @@ Node.Server.prototype.registerIDFRoutes = function ()
       if (Node.fs.statSync(fullPath).isDirectory()) {
         //console.log(`Nome: ${file}, Percorso: ${fullPath}`);
         Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/RD3`));
+        Node.app.use(`/idf/${file}/Fluid`, Node.express.static(`${clientPath}`));
         Node.app.use(`/idf/${file}`, Node.express.static(fullPath));
         Node.app.use(`/idf/${file}`, Node.express.static(`${templatePath}/Common`));
       }
@@ -1891,7 +2001,16 @@ Node.Server.prototype.registerIDFRoutes = function ()
     this.logger.log("ERROR", `Error while reading IDF template directory: ${ex.message}`, "Server.registerIDFRoutes");
   }
   //
+  Node.app.get("/idfjs", Node.Server.prototype.sendFirstPage.bind(this));
+  Node.app.get("/idf/wizards/welcome/welcome.htm", Node.Server.prototype.sendFirstPage.bind(this));
   Node.app.use('/idf/editor', Node.express.static(Node.path.resolve(__dirname, '../ide/app/idf/editor')));
+  Node.app.use('/idf/wizards', Node.express.static(Node.path.resolve(__dirname, '../ide/app/idf/Wizards')));
+  //
+  // Access template files in a static way. Browser IDE needs this to retrieve data from template files
+  Node.app.use('/idf/template', Node.express.static(Node.path.resolve(__dirname, '../ide/app/idf/Template')));
+  //
+  // When browser ask for viewedit.js, serve ../ide/app/client/viewedit.js
+  Node.app.use("/idf/editor/viewedit.js", Node.express.static(clientPath + "/viewedit.js"));
 };
 
 

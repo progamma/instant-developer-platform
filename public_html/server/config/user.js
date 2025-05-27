@@ -38,6 +38,10 @@ Node.User = function (par)
   this.apps = [];
   this.devices = [];
   this.cloudConnectors = [];
+  this.idfdata = {
+    guid:"00000000-0000-0000-0000-000000000000",
+    password:"",group:"",email:"",language:"",phone:""
+  };
 };
 
 
@@ -90,7 +94,7 @@ Node.User.prototype.log = function (level, message, sender, data)
 Node.User.prototype.save = function ()
 {
   var r = {cl: "Node.User", userName: this.userName, dbPassword: this.dbPassword, projects: this.projects, databases: this.databases, apps: this.apps,
-    name: this.name, surname: this.surname, OSUser: this.OSUser, IID: this.IID, uid: this.uid, gid: this.gid};
+    name: this.name, surname: this.surname, OSUser: this.OSUser, IID: this.IID, uid: this.uid, gid: this.gid, idfdata:this.idfdata};
   return r;
 };
 
@@ -112,6 +116,8 @@ Node.User.prototype.load = function (v)
   this.uid = v.uid;
   this.gid = v.gid;
   this.IID = v.IID;
+  if (v.idfdata)
+    this.idfdata = v.idfdata;
   //
   // TODO: eliminare prima o poi... i vecchi utenti avevano questa password hard-coded
   if (!this.dbPassword)
@@ -1072,6 +1078,61 @@ Node.User.prototype.sendProjectsList = function (params, callback)
 
 
 /*
+ * Send the projects list in JSON format
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.User.prototype.sendProjectsListJson = function (params, callback)
+{
+  var projects = [];
+  for (var i = 0; i < this.projects.length; i++)
+    projects.push({name:this.projects[i].name,lastSave:this.projects[i].lastSave});
+  //
+  callback({msg: JSON.stringify(projects)});
+};
+
+
+/*
+ * Import a new IDF Project (local)
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.User.prototype.importPrj = function (params, callback)
+{
+  var pthis = this;
+  //
+  let filePath = params.req.query.path;
+  // extract the file name from the path
+  let fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
+  // call cleanName function
+  let prjName = Node.Utils.clearName(fileName.substring(0,fileName.lastIndexOf('.')));
+  // Define target directory (user's directory)
+  const targetDir = this.config.directory + "/" + this.userName;
+  //
+  Node.Utils.unzip(filePath,targetDir).then((ris) => {
+    console.error("ZIPPATO",ris);
+    if (ris) {
+      const oldPath = targetDir + "/" + fileName.substring(0,fileName.length-3)+"idp";
+      const newPath = targetDir + "/" + prjName;
+      console.error("ZIPPATO",oldPath,newPath);
+      Node.fs.promises.rename(oldPath, newPath).then(() => {
+        console.error("Rinominato");
+        pthis.createProject(prjName, (ris) => {;
+          let p = pthis.getProject(prjName);
+          p.lastSave = new Date();
+          pthis.config.saveConfig();
+          callback(ris);
+        });
+      }); 
+    }
+    else {
+      callback({msg: "Impossibile unzippare il file "+filePath});
+    }
+  });
+};
+
+
+/*
  * Send the list of sessions for all user's apps
  * @param {object} params
  * @param {function} callback (err or {err, msg, code})
@@ -1372,6 +1433,26 @@ Node.User.prototype.addCloudConnector = function (socket, data)
 {
   // Find if already exists
   let connector = this.cloudConnectors.find(cc => cc.socket === socket);
+  let prevConnector = this.cloudConnectors.find(cc => cc.name === data.name);
+  if (!connector && prevConnector) {
+    if (!prevConnector.id || !data.id || prevConnector.id !== data.id) {
+      this.log("WARN", "There is already a cloud connector connected with the same name but with different id. The new connection will be rejected.", "User.addCloudConnector", {connector: data.name, user: this.name, oldID: prevConnector.id, newID: data.id});
+      socket.disconnect();
+    }
+    else {
+      this.log("WARN", "There is already a cloud connector connected with the same name and same id. The new connection will replace the previous one.", "User.addCloudConnector", {connector: data.name, user: this.name, id: data.id});
+      //
+      // A reconnection occurred from the same cloud connector: I keep the new socket
+      connector = prevConnector;
+      //
+      // I disconnect the old socket marking it as old
+      connector.socket.old = true;
+      connector.socket.disconnect();
+      //
+      connector.socket = socket;
+    }
+    return;
+  }
   //
   let event = {name: data.name};
   if (!connector) {
@@ -1388,13 +1469,9 @@ Node.User.prototype.addCloudConnector = function (socket, data)
   else
     event.changed = true;
   //
-  connector.name = data.name;
-  connector.version = data.version;
-  connector.nodeVersion = data.nodeVersion;
-  connector.hostname = data.hostname;
-  connector.dmlist = data.dmlist;
-  connector.fslist = data.fslist;
-  connector.pluginslist = data.pluginslist;
+  socket.on("disconnect", () => this.removeCloudConnector(socket));
+  //
+  Object.assign(connector, data);
   //
   this.updateAvailableCloudConnectorsList(event);
 };
@@ -1406,10 +1483,16 @@ Node.User.prototype.addCloudConnector = function (socket, data)
  */
 Node.User.prototype.removeCloudConnector = function (socket)
 {
+  // If the socket has been replaced by a new one of the same connector I do nothing
+  if (socket.old)
+    return;
+  //
   for (let i = 0; i < this.cloudConnectors.length; i++) {
     if (this.cloudConnectors[i].socket === socket) {
       let cname = this.cloudConnectors[i].name;
       this.cloudConnectors.splice(i, 1);
+      //
+      clearInterval(socket.watchDog);
       //
       this.updateAvailableCloudConnectorsList({name: cname, connected: false});
       //
@@ -1811,6 +1894,42 @@ Node.User.prototype.processCommand = function (params, callback)
 };
 
 
+/*
+ * Get IDF data
+ */
+Node.User.prototype.getData = function (params, callback)
+{
+  let data = Object.assign({
+    name:this.name,
+    surname:this.surname
+  },this.idfdata);
+  callback({msg: JSON.stringify(data)});
+};
+
+
+/*
+ * Set IDF data and save user
+ */
+Node.User.prototype.setData = function (params, callback)
+{
+  try {
+    let data = JSON.parse(params.req.query.data);
+    this.name = data.name;
+    this.surname = data.surname;
+    delete data.name;
+    delete data.surname;
+    this.idfdata = data;
+    this.config.licSrvUpdateUser(this).then(ris => {
+      this.config.saveConfig();
+      callback({msg: ris});      
+    });
+  }
+  catch(ex) {
+    callback({msg: "ERROR "+ex});
+  }  
+};
+
+
 /**
  * Execute command for the user
  * @param {object} params
@@ -1853,6 +1972,12 @@ Node.User.prototype.execCommand = function (params, callback)
         case "projects":
           this.sendProjectsList(params, callback);
           break;
+        case "projects2":
+          this.sendProjectsListJson(params, callback);
+          break;
+        case "importPrj":
+          this.importPrj(params, callback);
+          break;
         case "appsessions":
           this.sendAppSessions(params, callback);
           break;
@@ -1864,6 +1989,12 @@ Node.User.prototype.execCommand = function (params, callback)
           break;
         case "restore":
           this.restore(params, callback);
+          break;
+        case "getdata":
+          this.getData(params, callback);
+          break;
+        case "setdata":
+          this.setData(params, callback);
           break;
         default:
           this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});

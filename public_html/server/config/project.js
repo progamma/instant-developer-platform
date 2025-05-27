@@ -3,7 +3,7 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
+/* global require, module, process */
 
 var Node = Node || {};
 
@@ -439,116 +439,127 @@ Node.Project.prototype.viewProject = function (params, callback)
 /**
  * Download a file from one of project's folders
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Project.prototype.downloadFile = function (params, callback)
+Node.Project.prototype.downloadFile = async function (params)
 {
-  var pthis = this;
-  //
   // The URL is in the following form:
   //   http://servername/username/projectname/folder/filename
-  var folder = params.tokens.slice(0, params.tokens.length - 1).join("/").replace(/\+/g, " ");   // resources, tutorials, files (with AUTK)
-  var filename = params.tokens[params.tokens.length - 1].replace(/\+/g, " ");
-  var path = this.config.directory + "/" + this.user.userName + "/" + this.name + "/" + folder + "/" + filename;
+  let folder = params.tokens.slice(0, params.tokens.length - 1).join("/").replace(/\+/g, " ");   // resources, tutorials, files (with AUTK)
+  let filename = decodeURIComponent(params.tokens[params.tokens.length - 1].replace(/\+/g, " "));
+  let path = `${this.config.directory}/${this.user.userName}/${this.name}/${folder}/${filename}`;
   //
-  // Send the file only if there is an editing session
-  // (don't check resources/libusage.json... that file is asked whenever the callee needs it)
-  if (folder !== "resources" || filename !== "libusage.json") {
-    var session = this.server.getOpenSession(this, {request: params.req});
-    if (!session) {
-      this.log("WARN", "No session is asking for this file", "Project.downloadFile", {path: path});
-      return callback("No session is asking for this file");
+  let code, warning;
+  try {
+    // Send the file only if there is an editing session
+    // (don't check resources/libusage.json... that file is asked whenever the callee needs it)
+    if (folder !== "resources" || filename !== "libusage.json") {
+      let session = this.server.getOpenSession(this, {request: params.req});
+      if (!session) {
+        warning = true;
+        throw "No session is asking for this file";
+      }
     }
-  }
-  //
-  // filename must not contain ..
-  if (filename.indexOf("..") !== -1) {
-    this.log("WARN", "Double dot operator (..) not allowed", "Project.downloadFile");
-    return callback("Double dot operator (..) not allowed");
-  }
-  //
-  // Accept only a single ".." (Console uses it... :-|)
-  if (folder.split("..").length > 2) {
-    this.log("WARN", "Double dot operator (..) not allowed", "Project.downloadFile");
-    return callback("Double dot operator (..) not allowed");
-  }
-  //
-  // If it's a resource inside a branch (PR)
-  //   resources/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources
-  // translates to
-  //   [DIRECTORY]/[USERNAME]/[PRJNAME]/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources/[FILENAME]
-  var sfolder = folder.split("/");
-  if (sfolder.length === 4 && sfolder[0] === "resources" && sfolder[1] === "branches" && sfolder[3] === "resources")  // resources/branhces/[BRANCH_NAME]/resources
-    path = pthis.config.directory + "/" + pthis.user.userName + "/" + pthis.name + "/" + folder.substring("resources/".length) + "/" + filename;
-  //
-  // Full path must be valid and not a directory
-  Node.fs.stat(path, function (err, pathStats) {
-    if (err) {
-      pthis.log("WARN", "Can't get path info: " + err, "Project.downloadFile");
-      return callback({err: "Can't get file info (file is missing?)", code: 404});
+    //
+    // filename must not contain ..
+    if (filename.includes("..")) {
+      warning = true;
+      throw "Double dot operator (..) not allowed";
     }
+    //
+    // Accept only a single ".." (Console uses it... :-|)
+    if (folder.split("..").length > 2) {
+      warning = true;
+      throw "Double dot operator (..) not allowed";
+    }
+    //
+    // If it's a resource inside a branch (PR)
+    //   resources/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources
+    // translates to
+    //   [DIRECTORY]/[USERNAME]/[PRJNAME]/branches/OTHERUSER_FORKEDPROJECT_FORKEDBRANCH/resources/[FILENAME]
+    let sfolder = folder.split("/");
+    if (sfolder.length === 4 && sfolder[0] === "resources" && sfolder[1] === "branches" && sfolder[3] === "resources")  // resources/branhces/[BRANCH_NAME]/resources
+      path = `${this.config.directory}/${this.user.userName}/${this.name}/${folder.substring("resources/".length)}/${filename}`;
+    //
+    // Full path must be valid and not a directory
+    let pathStats;
+    try {
+      pathStats = await Node.fs.promises.stat(path);
+    }
+    catch (err) {
+      code = 404;
+      warning = true;
+      throw "Can't get file info (file is missing?)";
+    }
+    //
     if (pathStats.isDirectory()) {
-      pthis.log("WARN", "Invalid path (file is a directory)", "Project.downloadFile");
-      return callback("Invalid path (file is a directory)");
+      warning = true;
+      throw "Invalid path (file is a directory)";
     }
     //
     // Compute the mimetype
-    var mimetype = Node.mime.getType(filename);
+    let mimetype = Node.mime.getType(filename);
     //
     // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
-    var stream;
-    if (mimetype && (mimetype.indexOf("audio") !== -1 || mimetype.indexOf("video") !== -1) && params.req.headers.range) {
-      var positions = params.req.headers.range.replace(/bytes=/, "").split("-");
+    if (mimetype && (mimetype.includes("audio") || mimetype.includes("video")) && params.req.headers.range) {
+      let positions = params.req.headers.range.replace(/bytes=/, "").split("-");
       //
-      Node.fs.stat(path, function (err, stats) {
-        if (err) {
-          pthis.log("ERROR", "Error while reading file " + path + "'s stats: " + err, "Project.downloadFile");
-          return callback({err: "Error while reading file " + path + "'s stats: " + err, code: 404});
-        }
-        //
-        var total = stats.size;
-        var start = parseInt(positions[0], 10);
-        var end = positions[1] ? parseInt(positions[1], 10) : total - 1;
-        //
-        // Send the requested file slice
-        stream = Node.fs.createReadStream(path, {start: start, end: end});
-        stream.on("open", function () {
-          params.res.writeHead(206, {
-            "Content-Range": "bytes " + start + "-" + end + "/" + total,
-            "Accept-Ranges": "bytes",
-            "Content-Length": (end - start) + 1,
-            "Content-Type": mimetype
-          });
-          //
-          stream.pipe(params.res);
-        });
-        stream.on("end", function () {
-          callback({skipReply: true});
-        });
-        stream.on("error", function (err) {
-          pthis.log("ERROR", "Error while streaming file " + path + ": " + err, "Project.downloadFile");
-          callback({err: "Error while streaming file " + path + ": " + err, code: 404});
-        });
+      let stats;
+      try {
+        stats = await Node.fs.promises.stat(path);
+      }
+      catch (err) {
+        code = 404;
+        throw `Error while reading file ${path}'s stats: ${err}`;
+      }
+      //
+      let total = stats.size;
+      let start = parseInt(positions[0], 10);
+      let end = positions[1] ? parseInt(positions[1], 10) : total - 1;
+      //
+      // Send the requested file slice
+      params.res.writeHead(206, {
+        "Content-Range": "bytes " + start + "-" + end + "/" + total,
+        "Accept-Ranges": "bytes",
+        "Content-Length": (end - start) + 1,
+        "Content-Type": mimetype
       });
       //
-      return;
+      try {
+        let stream = Node.fs.createReadStream(path, {start, end});
+        await new Promise((resolve, reject) => {
+          stream.on("open", () => stream.pipe(params.res));
+          stream.on("end", resolve);
+          stream.on("error", reject);
+        });
+        return {skipReply: true};
+      }
+      catch (err) {
+        code = 404;
+        throw `Error while streaming file ${path}: ${err}`;
+      }
     }
     //
     // Send the full file
-    stream = Node.fs.createReadStream(path);
-    stream.on("open", function () {
-      params.res.writeHead(200, {"Content-Type": mimetype});
-      //
-      stream.pipe(params.res);
-    });
-    stream.on("end", function () {
-      callback({skipReply: true});
-    });
-    stream.on("error", function (err) {
-      pthis.log("WARN", "Error sending the file " + path + ": " + err, "Project.downloadFile");
-      callback({err: "Error sending the file " + path + ": " + err, code: 404});
-    });
-  });
+    params.res.writeHead(200, {"Content-Type": mimetype});
+    try {
+      let stream = Node.fs.createReadStream(path);
+      await new Promise((resolve, reject) => {
+        stream.on("open", () => stream.pipe(params.res));
+        stream.on("end", resolve);
+        stream.on("error", reject);
+      });
+      return {skipReply: true};
+    }
+    catch (err) {
+      code = 404;
+      warning = true;
+      throw `Error while sending the file ${path}: ${err}`;
+    }
+  }
+  catch (e) {
+    this.log(warning ? "WARN" : "ERROR", e, "Project.downloadFile");
+    throw {err: e, code};
+  }
 };
 
 
@@ -1518,10 +1529,10 @@ Node.Project.prototype.execCommand = function (params, callback)
       break;
     case "resources":
     case "tutorials":
-      this.downloadFile(params, callback);
+      this.downloadFile(params).then(callback, callback);
       break;
     case "files":
-      this.downloadFile(params, callback);
+      this.downloadFile(params).then(callback, callback);
       break;
     case "upload":
       this.uploadResource(params, callback);

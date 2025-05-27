@@ -3,13 +3,12 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global module, process */
+/* global module, process, __filename */
 
 var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.fsExtra = require("fs.extra");
 Node.path = require("path");
 Node.tar = require("tar");
 Node.multiparty = require("multiparty");
@@ -341,28 +340,28 @@ Node.Utils.handleFileSystem = function (options, callback)
                         return callback("Error reading the " + newfile + ": " + err);
                       //
                       zipfile.readEntry();
-                      zipfile.on("entry", function (entry) {
+                      zipfile.on("entry", async entry => {
                         if (/\/$/.test(entry.fileName)) {
                           // Directory file names end with '/'.
-                          Node.fsExtra.mkdirs(options.path + "/" + entry.fileName, function (err) {
-                            if (err)
-                              return callback("Error while extracting the " + entry.fileName + " directory: " + err);
-                            //
+                          try {
+                            await fs.promises.mkdir(`${options.path}/${entry.fileName}`, {recursive: true});
                             zipfile.readEntry();
-                          });
+                          }
+                          catch (e) {
+                            callback(`Error while extracting the ${entry.fileName} directory: ${e.message || e}`);
+                          }
                         }
                         else {
                           // It's a file
-                          zipfile.openReadStream(entry, function (err, readStream) {
+                          zipfile.openReadStream(entry, async (err, readStream) => {
                             if (err)
                               return callback("Error while extracting the " + entry.fileName + " file (READ): " + err);
                             //
                             // Ensure parent directory exists
-                            Node.fsExtra.mkdirs(Node.path.dirname(entry.fileName), function (err) {
-                              if (err)
-                                return callback("Error while ensuring parent directory " + Node.path.dirname(entry.fileName) + " existence: " + err);
+                            try {
+                              await fs.promises.mkdir(Node.path.dirname(entry.fileName), {recursive: true});
                               //
-                              var output = Node.fs.createWriteStream(options.path + "/" + entry.fileName);
+                              let output = Node.fs.createWriteStream(options.path + "/" + entry.fileName);
                               output.on("open", function () {
                                 readStream.pipe(output);
                               });
@@ -372,7 +371,10 @@ Node.Utils.handleFileSystem = function (options, callback)
                               output.on("close", function () {
                                 zipfile.readEntry();
                               });
-                            });
+                            }
+                            catch (e) {
+                              callback(`Error while ensuring parent directory ${Node.path.dirname(entry.fileName)} existence: ${e.message || e}`);
+                            }
                           });
                         }
                       });
@@ -689,6 +691,92 @@ Node.Utils.loadObject = function (filename, callback)
       callback(null, err);
     });
   });
+};
+
+
+Node.Utils.unzip = async function (sourceZipPath, destinationDirPath) {
+  const fs = Node.fs;
+  const path = Node.path;
+  const yauzl = require("yauzl");
+
+  try {
+    // Assicurati che la directory di destinazione esista
+    await fs.promises.mkdir(destinationDirPath, {recursive: true});
+
+    // Apri il file ZIP
+    const openZip = (filePath, options) => {
+      return new Promise((resolve, reject) => {
+        yauzl.open(filePath, options, (err, zipFile) => {
+          if (err)
+            return reject(err);
+          resolve(zipFile);
+        });
+      });
+    };
+
+    const zipFile = await openZip(sourceZipPath, {lazyEntries: true});
+
+    const processEntry = async (entry) => {
+      const entryPath = path.join(destinationDirPath, entry.fileName);
+
+      // Normalizza il percorso per evitare percorsi relativi malevoli
+      const normalizedPath = path.normalize(entryPath);
+
+      if (!normalizedPath.startsWith(destinationDirPath)) {
+        throw new Error(`Tentativo di estrazione al di fuori della directory: ${normalizedPath}`);
+      }
+
+      if (/\/$/.test(entry.fileName)) {
+        // Entry è una directory
+        await fs.promises.mkdir(normalizedPath, {recursive: true});
+      }
+      else {
+        // Entry è un file
+        await fs.promises.mkdir(path.dirname(normalizedPath), {recursive: true}); // Crea la directory genitore
+        return new Promise((resolve, reject) => {
+          zipFile.openReadStream(entry, (err, readStream) => {
+            if (err)
+              return reject(err);
+
+            const writeStream = fs.createWriteStream(normalizedPath);
+            readStream.pipe(writeStream);
+
+            readStream.on("end", () => resolve());
+            readStream.on("error", (err) => reject(err));
+            writeStream.on("error", (err) => reject(err));
+          });
+        });
+      }
+    };
+
+    // Itera attraverso le entry
+    const readEntries = () => {
+      return new Promise((resolve, reject) => {
+        zipFile.readEntry();
+        zipFile.on("entry", async (entry) => {
+          try {
+            await processEntry(entry);
+            zipFile.readEntry(); // Leggi la prossima entry
+          }
+          catch (err) {
+            reject(err);
+          }
+        });
+        zipFile.on("end", resolve); // Completamento
+        zipFile.on("error", reject); // Errori
+      });
+    };
+
+    await readEntries();
+    zipFile.close();
+
+    return true;
+  }
+  catch (e) {
+    console.error("Errore durante l'unzip:", e);
+    this.lastError = e.message;
+    return false;
+  }
 };
 
 

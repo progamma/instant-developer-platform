@@ -2746,7 +2746,6 @@ Node.Config.prototype.setAppData = function (params, callback)
 Node.Config.prototype.sendToLicServer = async function (operation, data, format = "json")
 {
   console.error("NOT SUPPORTED FOR SELF");
-}
 };
 
 

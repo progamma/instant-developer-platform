@@ -7,11 +7,23 @@
 1. [Download del pacchetto da github e configurazione](#download-del-pacchetto-da-github-e-configurazione)
 
 ### Installazione di Node.js
-La versione di riferimento è Node.js 18.19. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
+La versione di riferimento è [node.js](https://nodejs.org) v22.21. Per installare la versione si può far riferimento alla documentazione di Node.js, oppure seguire i seguenti passi se si tratta di ambiente Linux Ubuntu.
 ```
-curl -sL https://deb.nodesource.com/setup_18.x | sudo bash
-sudo apt install nodejs -y
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash
+sudo apt-get install -y nodejs
 ```
+
+**Nota**:
+Per versioni precedenti di Instant Developer Cloud si consiglia di utilizzare la tabella sottostante
+| Versione framework | Versione Node consigliata |
+|-------------------|---------------------------|
+| 25.x              | 22                        |
+| 24.x              | 18                        |
+| 22.x – 23.x       | 16                        |
+| 21.x              | 12                        |
+| 19.x – 20.x       | 10                        |
+| < 19              | 6                         |
+
 
 ### Installazione di npm
 Per installare pm2 è consigliabile aggiornare prima la versione di npm

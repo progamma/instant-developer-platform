@@ -3,8 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module, process */
-
 var Node = Node || {};
 
 // Import Modules
@@ -13,6 +11,7 @@ Node.ncp = require("../ncp_fixed");
 Node.fs = require("fs");
 Node.child = require("child_process");
 Node.crypto = require("crypto");
+Node.path = require("path");
 
 // Import classes
 Node.Project = require("./project");
@@ -39,8 +38,12 @@ Node.User = function (par)
   this.devices = [];
   this.cloudConnectors = [];
   this.idfdata = {
-    guid:"00000000-0000-0000-0000-000000000000",
-    password:"",group:"",email:"",language:"",phone:""
+    guid: "00000000-0000-0000-0000-000000000000",
+    password: "",
+    group: "",
+    email: "",
+    language: "",
+    phone: ""
   };
 };
 
@@ -93,9 +96,21 @@ Node.User.prototype.log = function (level, message, sender, data)
  */
 Node.User.prototype.save = function ()
 {
-  var r = {cl: "Node.User", userName: this.userName, dbPassword: this.dbPassword, projects: this.projects, databases: this.databases, apps: this.apps,
-    name: this.name, surname: this.surname, OSUser: this.OSUser, IID: this.IID, uid: this.uid, gid: this.gid, idfdata:this.idfdata};
-  return r;
+  return {
+    cl: "Node.User",
+    userName: this.userName,
+    dbPassword: this.dbPassword,
+    projects: this.projects,
+    databases: this.databases,
+    apps: this.apps,
+    name: this.name,
+    surname: this.surname,
+    OSUser: this.OSUser,
+    IID: this.IID,
+    uid: this.uid,
+    gid: this.gid,
+    idfdata: this.idfdata
+  };
 };
 
 
@@ -643,91 +658,82 @@ Node.User.prototype.deleteUserFolder = function (callback)
  */
 Node.User.prototype.backup = function (params, callback)
 {
-  var pthis = this;
-  var path = this.config.directory + "/" + this.userName;
-  var pathCloud = "users/" + this.config.serverType + "/" + this.userName + "/backups/" + this.userName + ".tar.gz";
+  let path = Node.path.join(this.config.directory, this.userName);
+  let tempPath = Node.path.join(this.config.directory, "tmp");
+  let pathCloud = `users/${this.config.serverType}/${this.userName}/backups/${this.userName}.tar.gz`;
   //
-  this.log("DEBUG", "User backup", "User.backup", {pathCloud: pathCloud});
+  this.log("DEBUG", "User backup", "User.backup", {pathCloud});
   //
   // Error function: report error and clean up temp directory
-  var errorFnc = function (msg) {
-    pthis.log("ERROR", msg, "User.backup");
+  let errorFnc = msg => {
+    this.log("ERROR", msg, "User.backup");
     callback(msg);
     //
-    Node.fs.rm(pthis.config.directory + "/tmp", {recursive: true, force: true}, function (err) {
+    Node.fs.rm(Node.path.join(this.config.directory, "tmp"), {recursive: true, force: true}, err => {
       if (err)
-        pthis.log("ERROR", "Error deleting the temporary folder " + pthis.config.directory + "/tmp:" + err, "User.backup");
+        this.log("ERROR", `Error deleting the temporary folder ${this.config.directory}/tmp: ${err}`, "User.backup");
     });
   };
   //
   // Create a temporary (work) directory
-  Node.fs.mkdir(this.config.directory + "/tmp", function (err) {
+  Node.fs.mkdir(tempPath, err => {
     if (err && err.code !== "EEXIST")
-      return errorFnc("Error creating the folder " + pthis.config.directory + "/tmp: " + err);
+      return errorFnc(`Error creating the folder ${this.config.directory}/tmp: ${err}`);
     //
-    var backupDir = function () {
+    let backupDir = () => {
       // Copy all the user folder except the db directory into the tmp folder
-      var skipdb = function (item) {
-        return (item !== path + "/db");
-      };
-      Node.ncp(path, pthis.config.directory + "/tmp/" + pthis.userName, {filter: skipdb}, function (err) {
+      let skipdb = item => item !== `${path}/db`;
+      Node.ncp(path, Node.path.join(tempPath, this.userName), {filter: skipdb}, err => {
         if (err)
-          return errorFnc("Error copying the user folder " + path + ": " + err);
+          return errorFnc(`Error copying the user folder ${path}: ${err}`);
         //
         // Write user's info into an index.json file
-        var ws = Node.fs.createWriteStream(pthis.config.directory + "/tmp/" + pthis.userName + "/index.json", {encoding: "utf8"});
-        ws.write(pthis.saveUser());
+        let ws = Node.fs.createWriteStream(Node.path.join(tempPath, this.userName, "index.json"), {encoding: "utf8"});
+        ws.write(this.saveUser());
         ws.end();
         //
-        ws.on("error", function (err) {
-          errorFnc("Error writing the file " + pthis.config.directory + "/tmp/index.json: " + err);
-        });
+        ws.on("error", err => errorFnc(`Error writing the file ${Node.path.join(tempPath, this.userName, "index.json")}: ${err}`));
         //
-        ws.on("finish", function () {
+        ws.on("finish", () => {
           // Backup the tmp folder int the cloud
-          var archiver = new Node.Archiver(pthis.server);
-          archiver.backup(pthis.config.directory + "/tmp/" + pthis.userName, pathCloud, function (err) {
-            if (err)
-              return errorFnc("Error backing up the files: " + err);
-            //
+          let archiver = new Node.Archiver(this.server);
+          archiver.backup(Node.path.join(tempPath, this.userName), pathCloud).then(() => {
             // Delete the tmp folder
-            Node.fs.rm(pthis.config.directory + "/tmp", {recursive: true, force: true}, function (err) {
+            Node.fs.rm(tempPath, {recursive: true, force: true}, err => {
               if (err) {
-                pthis.log("ERROR", "Error deleting the TEMP folder " + pthis.config.directory + "/tmp (2):" + err, "User.backup");
-                return callback("Error deleting the temporary folder " + pthis.config.directory + "/tmp:" + err);
+                this.log("ERROR", `Error deleting the TEMP folder ${this.config.directory}/tmp (2): ${err}`, "User.backup");
+                return callback(`Error deleting the temporary folder ${this.config.directory}/tmp: ${err}`);
               }
               //
               // Last, backup all user's databases
-              pthis.backupDatabases(function (err) {
+              this.backupDatabases(err => {
                 if (err)
-                  return callback("Error backing up databases: " + err);
+                  return callback(`Error backing up databases: ${err}`);
                 //
                 // Log the user backup
-                pthis.log("INFO", "User backed up", "User.backup");
+                this.log("INFO", "User backed up", "User.backup");
                 //
                 // Done!
                 callback();
               });
             });
-          });
+          }, err => errorFnc(`Error backing up the files: ${err}`));
         });
       });
     };
     //
     // Fix permissions if needed before backing up the user
-    if (!pthis.config.local) {
-      pthis.server.execFileAsRoot("ChownChmod", [pthis.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
+    if (!this.config.local) {
+      this.server.execFileAsRoot("ChownChmod", [this.OSUser, path], (err, stdout, stderr) => {
         if (err) {
-          pthis.log("ERROR", "Error changing user folder permissions: " + (stderr || err), "User.backup",
-                  {OSUser: pthis.OSUser, path: path});
-          return callback("Error changing user folder permissions: " + (stderr || err));
+          this.log("ERROR", `Error changing user folder permissions: ${stderr || err}`, "User.backup", {OSUser: this.OSUser, path});
+          return callback(`Error changing user folder permissions: ${stderr || err}`);
         }
         //
-        pthis.server.execFileAsRoot("ChownDBFolder", [path + "/db"], function (err, stdout, stderr) {   // jshint ignore:line
+        this.server.execFileAsRoot("ChownDBFolder", [`${path}/db`], (err, stdout, stderr) => {
           if (err) {
-            pthis.log("ERROR", "Error changing database folder permissions: " + (stderr || err), "User.backup",
-                    {path: path + "/db"});
-            return callback("Error changing database folder permissions: " + (stderr || err));
+            this.log("ERROR", `Error changing database folder permissions: ${stderr || err}`, "User.backup", {path: `${path}/db`});
+            return callback(`Error changing database folder permissions: ${stderr || err}`);
           }
           //
           backupDir();
@@ -776,44 +782,40 @@ Node.User.prototype.backupDatabases = function (callback)
  */
 Node.User.prototype.restore = function (params, callback)
 {
-  var pthis = this;
-  var path = this.config.directory + "/" + this.userName;
-  var pathCloud = "users/" + this.config.serverType + "/" + this.userName + "/backups/" + this.userName + ".tar.gz";
+  let path = Node.path.join(this.config.directory, this.userName);
+  let pathCloud = `users/${this.config.serverType}/${this.userName}/backups/${this.userName}.tar.gz`;
   //
-  this.log("DEBUG", "User restore", "User.restore", {pathCloud: pathCloud});
+  this.log("DEBUG", "User restore", "User.restore", {pathCloud});
   //
   // Restore backup from the cloud
-  var archiver = new Node.Archiver(this.server);
-  archiver.restore(path, pathCloud, function (err) {
-    if (err)
-      return callback(err);
-    //
-    var restoreDir = function () {
-      var pathJSON = pthis.config.directory + "/" + pthis.userName + "/index.json";
-      Node.fs.readFile(pathJSON, {encoding: "utf8"}, function (err, file) {
+  let archiver = new Node.Archiver(this.server);
+  archiver.restore(path, pathCloud).then(() => {
+    let restoreDir = () => {
+      let pathJSON = Node.path.join(this.config.directory, this.userName, "index.json");
+      Node.fs.readFile(pathJSON, {encoding: "utf8"}, (err, file) => {
         if (err) {
-          pthis.log("ERROR", "Error reading the file " + pathJSON + ": " + err, "User.restore");
-          return callback("Error reading the file " + pathJSON + ": " + err);
+          this.log("ERROR", `Error reading the file ${pathJSON}: ${err}`, "User.restore");
+          return callback(`Error reading the file ${pathJSON}: ${err}`);
         }
         //
         // Load the user from the JSON file and save the current configuration
-        pthis.loadUser(file);
-        pthis.config.saveConfig();
+        this.loadUser(file);
+        this.config.saveConfig();
         //
         // Delete the JSON file
-        Node.fs.rm(pathJSON, {force: true}, function (err) {
+        Node.fs.rm(pathJSON, {force: true}, err => {
           if (err) {
-            pthis.log("ERROR", "Error deleting the file " + pathJSON + ": " + err, "User.restore");
-            return callback("Error deleting the file " + pathJSON + ": " + err);
+            this.log("ERROR", `Error deleting the file ${pathJSON}: ${err}`, "User.restore");
+            return callback(`Error deleting the file ${pathJSON}: ${err}`);
           }
           //
           // Restore all user's DBs
-          pthis.restoreDatabases(function (err) {
+          this.restoreDatabases(err => {
             if (err)
-              return callback("Error restoring databases: " + err);
+              return callback(`Error restoring databases: ${err}`);
             //
             // Log the user restore
-            pthis.log("INFO", "Restore of user succeeded", "User.restore");
+            this.log("INFO", "Restore of user succeeded", "User.restore");
             //
             // Done
             callback();
@@ -823,26 +825,24 @@ Node.User.prototype.restore = function (params, callback)
     };
     //
     // Create DB directory
-    Node.fs.mkdir(path + "/db", function (err) {
+    Node.fs.mkdir(Node.path.join(path, "db"), err => {
       if (err && err.code !== "EEXIST") {
-        pthis.log("ERROR", "Error creating the user folder " + path + "/db" + ": " + err, "User.restore");
-        return callback("Error creating the db folder " + path + "/db" + ": " + err);
+        this.log("ERROR", `Error creating the user folder ${path}/db: ${err}`, "User.restore");
+        return callback(`Error creating the user folder ${path}/db: ${err}`);
       }
       //
       // Fix permissions if needed then restore user directory
-      if (!pthis.config.local) {
-        pthis.server.execFileAsRoot("ChownChmod", [pthis.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
+      if (!this.config.local) {
+        this.server.execFileAsRoot("ChownChmod", [this.OSUser, path], (err, stdout, stderr) => {
           if (err) {
-            pthis.log("ERROR", "Error changing the user folder permissions: " + (stderr || err), "User.restore",
-                    {OSUser: pthis.OSUser, path: path});
-            return callback("Error changing the user folder permissions: " + (stderr || err));
+            this.log("ERROR", `Error changing the user folder permissions: ${stderr || err}`, "User.restore", {OSUser: this.OSUser, path});
+            return callback(`Error changing the user folder permissions: ${stderr || err}`);
           }
           //
-          pthis.server.execFileAsRoot("ChownDBFolder", [path + "/db"], function (err, stdout, stderr) {   // jshint ignore:line
+          this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")], (err, stdout, stderr) => {
             if (err) {
-              pthis.log("ERROR", "Error changing the database folder permissions: " + (stderr || err), "User.restore",
-                      {path: path + "/db"});
-              return callback("Error changing the database folder permissions: " + (stderr || err));
+              this.log("ERROR", `Error changing the database folder permissions: ${stderr || err}`, "User.restore", {path: Node.path.join(path, "db")});
+              return callback(`Error changing the database folder permissions: ${stderr || err}`);
             }
             //
             restoreDir();
@@ -852,7 +852,7 @@ Node.User.prototype.restore = function (params, callback)
       else
         restoreDir();
     });
-  });
+  }, err => callback(err));
 };
 
 
@@ -996,7 +996,7 @@ Node.User.prototype.sendStatus = function (params, callback)
     }
     //
     var size = stdout.split("\t")[0];
-    switch (size.substr(-1)) {
+    switch (size.slice(-1)) {
       case "K":
         size = Math.ceil(parseFloat(size) * 1024);
         break;
@@ -1085,8 +1085,15 @@ Node.User.prototype.sendProjectsList = function (params, callback)
 Node.User.prototype.sendProjectsListJson = function (params, callback)
 {
   var projects = [];
-  for (var i = 0; i < this.projects.length; i++)
-    projects.push({name:this.projects[i].name,lastSave:this.projects[i].lastSave});
+  for (let prj of this.projects) {
+    let prjData = {name: prj.name, lastSave: prj.lastSave, path: this.config.directory + "/" + this.userName};
+    //
+    let goodName = this.config.directory + "/" + this.userName + "/" + prj.name + "/project.json.good";
+    if (Node.fs.existsSync(goodName)) 
+      prjData.restoreDT = Node.fs.statSync(goodName).mtime.toISOString();
+    //
+    projects.push(prjData);
+  }
   //
   callback({msg: JSON.stringify(projects)});
 };
@@ -1099,36 +1106,66 @@ Node.User.prototype.sendProjectsListJson = function (params, callback)
  */
 Node.User.prototype.importPrj = function (params, callback)
 {
+  const path = require("path");
   var pthis = this;
   //
-  let filePath = params.req.query.path;
-  // extract the file name from the path
-  let fileName = filePath.substring(filePath.lastIndexOf('/') + 1);
-  // call cleanName function
-  let prjName = Node.Utils.clearName(fileName.substring(0,fileName.lastIndexOf('.')));
-  // Define target directory (user's directory)
-  const targetDir = this.config.directory + "/" + this.userName;
-  //
-  Node.Utils.unzip(filePath,targetDir).then((ris) => {
-    console.error("ZIPPATO",ris);
-    if (ris) {
-      const oldPath = targetDir + "/" + fileName.substring(0,fileName.length-3)+"idp";
-      const newPath = targetDir + "/" + prjName;
-      console.error("ZIPPATO",oldPath,newPath);
-      Node.fs.promises.rename(oldPath, newPath).then(() => {
-        console.error("Rinominato");
-        pthis.createProject(prjName, (ris) => {;
-          let p = pthis.getProject(prjName);
-          p.lastSave = new Date();
-          pthis.config.saveConfig();
-          callback(ris);
-        });
-      }); 
-    }
-    else {
-      callback({msg: "Impossibile unzippare il file "+filePath});
-    }
-  });
+  try {
+    let filePath = params.req.query.path;
+    // extract the file name from the path
+    let fileName = path.basename(filePath, path.extname(filePath));
+    // call cleanName function
+    let prjName = params.req.query.prjname || fileName;
+    // Define target directory (user's directory)
+    const targetDir = path.join(this.config.directory, this.userName);
+    //
+    const archiver = new Node.Archiver(this.server);
+    archiver.unzip(filePath, targetDir).then((ris) => {
+      if (ris) {
+        let oldPath = path.join(targetDir, fileName + ".prj");
+        if (!Node.fs.existsSync(oldPath))
+          oldPath = path.join(targetDir, fileName + ".idm");
+        if (!Node.fs.existsSync(oldPath))
+          oldPath = path.join(targetDir, fileName + ".idp");
+        const newPath = path.join(targetDir, prjName);
+        setTimeout(() => {
+          Node.fs.promises.rename(oldPath, newPath).then(() => {
+            pthis.createProject(prjName, (ris) => {
+              let p = pthis.getProject(prjName);
+              p.lastSave = new Date();
+              pthis.config.saveConfig();
+              callback(ris);
+            });
+          });
+        }, 1000);
+      }
+      else
+        callback({msg: `Can't unzip file ${filePath}`});
+    });
+  }
+  catch (e) {
+    callback({msg: `Error while unzipping file ${filePath}: ${e}`});
+  }
+};
+
+
+
+/*
+ * Esport a project in zip format.
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.User.prototype.exportPrj = function (params, callback)
+{
+  const fullPath = params.req.query.path;
+  const archiver = new Node.Archiver(this.server);
+  archiver.zip(fullPath, {suffix: ".prj"})
+  .then((result) => {
+    console.log("User.exportPrj", result);
+    callback({msg: result});
+  })
+  .catch((e) => {
+    callback({error: `Error while exporting project ${fullPath}; ${e}`});
+  })
 };
 
 
@@ -1695,7 +1732,7 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           // Check if an ArrayBuffer need to be converted to exadecimal string
           if (msg.data.result instanceof Buffer)
             msg.data.result = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result)};
-          if (msg.data.result && msg.data.result.body && msg.data.result.body instanceof Buffer)
+          if (msg.data.result?.body instanceof Buffer)
             msg.data.result.body = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result.body)};
           //
           recipient.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: msg});
@@ -1899,10 +1936,19 @@ Node.User.prototype.processCommand = function (params, callback)
  */
 Node.User.prototype.getData = function (params, callback)
 {
+  let version = this.parent.getIndeVersion(); // ad es 25.5.9620
+  version += " r1"; // versione EXE
+  version += "|0"; // numero di revisione installato (sempre 0)
+  version += "|https://www.progamma.com/doc"; // note di rilascio
+  version += "|1"; // versione attuale
+  version += "|0"; // numero di revisioni disponibili (sempre 0)
+  //
   let data = Object.assign({
-    name:this.name,
-    surname:this.surname
-  },this.idfdata);
+    name: this.name,
+    surname: this.surname,
+    version: version
+  }, this.idfdata);
+  delete data.password;
   callback({msg: JSON.stringify(data)});
 };
 
@@ -1918,15 +1964,20 @@ Node.User.prototype.setData = function (params, callback)
     this.surname = data.surname;
     delete data.name;
     delete data.surname;
+    //
+    // Get the new password or the decrypted password (we need it to call this.config.licSrvUpdateUser )
+    data.password = data.password || this.decryptUserPassword(this.idfdata.password);  
     this.idfdata = data;
     this.config.licSrvUpdateUser(this).then(ris => {
+      // Restore the encrypted password after the call
+      this.idfdata.password = this.encryptUserPassword(this.idfdata.password);
       this.config.saveConfig();
-      callback({msg: ris});      
+      callback({msg: ris});
     });
   }
-  catch(ex) {
-    callback({msg: "ERROR "+ex});
-  }  
+  catch (ex) {
+    callback({msg: `ERROR ${ex}`});
+  }
 };
 
 
@@ -1978,6 +2029,9 @@ Node.User.prototype.execCommand = function (params, callback)
         case "importPrj":
           this.importPrj(params, callback);
           break;
+        case "exportPrj":
+          this.exportPrj(params, callback);
+          break;
         case "appsessions":
           this.sendAppSessions(params, callback);
           break;
@@ -1996,6 +2050,12 @@ Node.User.prototype.execCommand = function (params, callback)
         case "setdata":
           this.setData(params, callback);
           break;
+        case "twListPrjs":
+          this.listTeamWorksProjects(params, callback);
+          break;
+        case "twForkPrj":
+          this.forkProjectFromTeamWorks(params, callback);
+          break;
         default:
           this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
           callback("Invalid Command");
@@ -2004,6 +2064,163 @@ Node.User.prototype.execCommand = function (params, callback)
   }
 };
 
+// Funzioni di cifratura reversibile per la password utente
+const PASSWORD_KEY = Buffer.from('8NnZG70yHNRCfJzGqK7i0zyHCN7zMV1o', 'utf8'); // 32 bytes (256 bit)
+const PASSWORD_IV = Buffer.from('TMSsPvq1a3bFQRH6', 'utf8'); // 16 bytes (128 bit)
+
+Node.User.prototype.encryptUserPassword = function(password) {
+  let cipher = Node.crypto.createCipheriv('aes-256-cbc', PASSWORD_KEY, PASSWORD_IV);
+  let encrypted = cipher.update(password, 'utf8', 'base64');
+  encrypted += cipher.final('base64');
+  return encrypted;
+};
+
+Node.User.prototype.decryptUserPassword = function(encrypted) {
+  let decipher = Node.crypto.createDecipheriv('aes-256-cbc', PASSWORD_KEY, PASSWORD_IV);
+  let decrypted = decipher.update(encrypted, 'base64', 'utf8');
+  decrypted += decipher.final('utf8');
+  return decrypted;
+};
+
+
+/**
+ * List TeamWorks projects available for this organization
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.User.prototype.listTeamWorksProjects = function (params, callback)
+{
+  // Check if TeamWorks module is active
+  if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW)) {
+    this.log("WARN", "TeamWorks module is not active", "User.listTeamWorksProjects");
+    return callback("TeamWorks module is not active");
+  }
+  //
+  // Check if user has organization info
+  if (!this.idfdata?.groupGuid || !this.idfdata?.group){
+    this.log("WARN", "User has no organization info", "User.listTeamWorksProjects");
+    return callback("User has no organization info");
+  }
+  //
+  try {
+    // Import TwGCloudDriver
+    let TwGCloudDriver = require("../TW/TwGCloudDriver");
+    //
+    // Create a minimal driver instance for listing projects
+    let driver = new TwGCloudDriver({
+      child: {
+        config: this.config,
+        project: {
+          user: this
+        }
+      }
+    });
+    //
+    // List projects (listProjects is async)
+    driver.listProjects().then(
+      projects => callback({msg: JSON.stringify(projects || [])}),
+      err => {
+        this.log("ERROR", "Error listing TeamWorks projects: " + err.message, "User.listTeamWorksProjects");
+        callback("Error listing TeamWorks projects: " + err.message);
+      }
+    );
+  }
+  catch (ex) {
+    this.log("ERROR", "Error creating TeamWorks driver: " + ex.message, "User.listTeamWorksProjects");
+    callback("ERROR", "Error creating TeamWorks driver: " + ex.message);
+  }
+};
+
+
+/**
+ * Fork project from TeamWorks
+ * @param {object} params
+ * @param {function} callback (err or {err, msg, code})
+ */
+Node.User.prototype.forkProjectFromTeamWorks = function (params, callback)
+{
+  // Check if TeamWorks module is active
+  if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW)) {
+    this.log("WARN", "TeamWorks module is not active", "User.forkProjectFromTeamWorks");
+    return callback("TeamWorks module is not active");
+  }
+  //
+  let projectId = params.req.query.projectId;
+  let projectName = params.req.query.projectName;
+  //
+  if (!projectId || !projectName){
+    this.log("WARN", "Missing projectId or projectName", "User.forkProjectFromTeamWorks");
+    return callback("Project to fork not found");
+  }
+  //
+  // Check if user has organization info
+  if (!this.idfdata?.groupGuid || !this.idfdata?.group) {
+    this.log("WARN", "User has no organization info", "User.forkProjectFromTeamWorks");
+    return callback("User has no organization");
+  }
+  //
+  // Generate fork name: projectName-fork, projectName-fork1, projectName-fork2, etc.
+  let baseName = projectName + "-fork";
+  let finalProjectName = baseName;
+  let counter = 0;
+
+  // Check for existing forks and find available name
+  while (this.getProject(finalProjectName)) {
+    counter++;
+    finalProjectName = baseName + counter;
+  }
+  //
+  // Local path for the project (use the final fork name)
+  let localPath = this.config.directory + "/" + this.userName + "/" + finalProjectName;
+  //
+  try {
+    // Import TwGCloudDriver
+    let TwGCloudDriver = require("../TW/TwGCloudDriver");
+    //
+    // Create a minimal driver instance for downloading projects
+    let driver = new TwGCloudDriver({
+      child: {
+        config: this.config,
+        project: {
+          user: this
+        }
+      }
+    });
+    //
+    // Download project from TeamWorks (downloadProject is async)
+    driver.downloadProject(projectName, localPath)
+      .then(
+        () =>
+        {
+          // Create the project with the fork name
+          this.createProject(finalProjectName, err =>
+          {
+            if (err) {
+              this.log("ERROR", "Error creating fork: " + err, "User.forkProjectFromTeamWorks");
+              return callback("Error creating fork");
+            }
+            //
+            // Get the created project
+            let newProject = this.getProject(finalProjectName);
+            //
+            // Set the project ID and TeamWorks properties
+            newProject.updateInfo({twFork: true, lastSave: new Date()});
+            //
+            this.log("INFO", "Project forked from TeamWorks successfully", "User.forkProjectFromTeamWorks",
+            {projectId: projectId, projectName: projectName, forkName: finalProjectName});
+            callback({msg: "OK"});
+          });
+        },
+        err => {
+          this.log("ERROR", "Error downloading project from TeamWorks: " + err, "User.forkProjectFromTeamWorks");
+          callback("Error downloading project");
+        });
+  }
+  catch (ex) {
+    this.log("ERROR", "Error creating TeamWorks driver: " + ex.message, "User.forkProjectFromTeamWorks");
+    callback("Error accessing TeamWorks");
+  }
+};
 
 // Export module
 module.exports = Node.User;

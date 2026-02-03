@@ -3,7 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, __dirname, process, Buffer */
 
 var Node = Node || {};
 // Import classes
@@ -17,7 +16,7 @@ Node.Utils = require("./utils");
 
 // Import modules
 Node.express = require("express");
-Node.useragent = require('express-useragent');
+Node.useragent = require("express-useragent");
 Node.app = Node.express();
 Node.http = require("http");
 Node.https = require("https");
@@ -31,9 +30,11 @@ Node.tls = require("tls");
 Node.child = require("child_process");
 Node.url = require("url");
 Node.BodyParser = require("body-parser");
+Node.BodyParserXML = require("body-parser-xml")(Node.BodyParser);
 Node.errorHandler = require("errorhandler");
 Node.constants = require("constants");
 Node.googleCloudCompute = require("@google-cloud/compute");
+Node.mime = require("mime-types");
 
 
 /**
@@ -75,6 +76,7 @@ Node.Server.msgTypeMap = {
  */
 Node.createServer = function ()
 {
+  Node.Utils.fixMimeTypes();
   Node.theServer = new Node.Server();
   Node.theServer.initServer();
   Node.theServer.start();
@@ -304,11 +306,14 @@ Node.Server.prototype.start = function ()
   // Parse various different custom JSON types as JSON
   Node.app.use(Node.BodyParser.json({type: "application/json", limit: "5mb"}));
   //
-  // Parse various different custom JSON types as JSON
+  // Parse the body as XML in case of appropriate content-type
+  Node.app.use(Node.BodyParser.xml({type: ["application/xml", "text/xml"], limit : "5mb"}));
+  //
+  // Parse all text bodies
   Node.app.use(Node.BodyParser.text({type: "text/*", limit: "5mb"}));
   //
-  // Parse various different custom JSON types as JSON
-  Node.app.use(Node.BodyParser.raw({limit: "5mb"})); // it will only parse application/octet-stream, could do application/*
+  // Parse raw binary bodies (default: application/octet-stream; can be widened to application/*)
+  Node.app.use(Node.BodyParser.raw({limit: "5mb"}));
   //
   // App service worker
   this.createServiceWorker();
@@ -405,17 +410,17 @@ Node.Server.prototype.start = function ()
   Node.app.all("/:user/db/:dbname/:command", function (req, res) {
     pthis.config.processCommand(req, res);
   });
-//  Node.app.get("/:user/:appname/:command", function (req, res) {
+  //  Node.app.get("/:user/:appname/:command", function (req, res) {
   Node.app.all("/:user/:project/:command", function (req, res) {
     pthis.config.processCommand(req, res);
   });
-  Node.app.all("/:user/:project/:command/*", function (req, res) {
+  Node.app.all("/:user/:project/:command/*any", function (req, res) {
     pthis.config.processCommand(req, res);
   });
   Node.app.all("/:app/:cls", function (req, res) {
     pthis.config.processRun(req, res);
   });
-  Node.app.all("/:app/:cls/*", function (req, res) {
+  Node.app.all("/:app/:cls/*any", function (req, res) {
     pthis.config.processRun(req, res);
   });
   //
@@ -441,10 +446,10 @@ Node.Server.prototype.start = function ()
     //
     // Create a new Router and use it in the App
     var httpRouter = Node.express.Router();
-    httpApp.use("*", httpRouter);
+    httpApp.use("*any", httpRouter);
     //
     // For any get request, redirect to same HTTPS request
-    httpRouter.get("*", function (req, res) {
+    httpRouter.get("*any", function (req, res) {
       return res.redirect(pthis.config.getUrl(req) + req.originalUrl);
     });
     //
@@ -479,7 +484,7 @@ Node.Server.prototype.createChilder = function ()
   var pthis = this;
   //
   // Fork the childer process
-  this.childer = Node.child.fork("childer.js", Node.Utils.forkArgs());
+  this.childer = Node.child.fork(__dirname + "/childer.js", Node.Utils.forkArgs());
   //
   // Childer listener
   this.childer.on("message", function (msg) {
@@ -1503,20 +1508,19 @@ Node.Server.prototype.backupDisk = function (scheduled)
   // this.backupInfo.snapshotName and checkBeckupinterval are calculated in doBackup(), checkBackup() is executed afterwards.
   var checkBackupInterval;
   //
-  var checkBackup = function() {
+  var checkBackup = function () {
     if (!this.backupInfo.snapshotName)
       return;
     //
     clearInterval(checkBackupInterval);
     //
     let gce = new Node.googleCloudCompute(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
-    gce.getSnapshots({"filter" : `name eq ${this.backupInfo.snapshotName}`}, function (err, checkedSnapshots) {
+    gce.getSnapshots({"filter": `name eq ${this.backupInfo.snapshotName}`}, function (err, checkedSnapshots) {
       // Stop checking the backup when I found that it's uploading, ready or failed (statuses after che completion of the backup itself).
       if (checkedSnapshots.length > 0) {
         let checkedSnapshot = checkedSnapshots[0];
-        if (["UPLOADING", "READY", "FAILED"].includes(checkedSnapshot.metadata?.status)) {
+        if (["UPLOADING", "READY", "FAILED"].includes(checkedSnapshot.metadata?.status))
           return unfreezeDisk();
-        }
       }
       //
       // Backup's not ready, repeat.
@@ -1923,10 +1927,9 @@ Node.Server.prototype.sendDesktop = function (req, res)
  * @param {Request} req
  * @param {Response} res
  */
-Node.Server.prototype.sendCustomFile = function (req, res)
+Node.Server.prototype.handleCustomFile = function (req, res, next)
 {
-  let idx = req.url.lastIndexOf("/");
-  let file = req.url.substring(idx + 1);
+  let file = req.url.split("/").slice(3).join("/");
   //
   let ok = false;
   if (this.lastRequestingSession) {
@@ -1941,23 +1944,23 @@ Node.Server.prototype.sendCustomFile = function (req, res)
     if (ideses) {
       ok = true;
       ideses.sendApiCommand({
-        command: "idf-customf",
-        file: file
-      }, function (data) {
-        // console.log("sendCustomFile",data);
-        let code = data + "";
-        res.header("Content-Type", "text/css");
-        res.header("Content-Length", Buffer.from(code).length);
+        command: "idf-customfile",
+        file
+      }, (data, err) => {
+        if (err)
+          return next();
+        //
+        res.header("Content-Type", Node.mime.lookup(file));
         res.header("Cache-Control", "no-cache");
         res.header("Pragma", "no-cache");
         res.header("Expires", "-1");
         //
-        res.status(200).send(code);
+        res.status(200).send(data);
       });
     }
   }
   if (!ok) {
-    this.logger.log("ERROR", `No IDE session is requesting for custom files`, "Server.sendCustomFile");
+    this.logger.log("ERROR", `No IDE session is requesting for custom files`, "Server.handleCustomFile");
     res.status(500).send("No IDE session is requesting for custom files");
   }
 };
@@ -1979,36 +1982,12 @@ Node.Server.prototype.sendFirstPage = function (req, res)
  */
 Node.Server.prototype.registerIDFRoutes = function ()
 {
-  Node.app.get("/idf/:template/desktop.htm", Node.Server.prototype.sendDesktop.bind(this));
-  Node.app.get("/idf/:template/desktopFluid.htm", Node.Server.prototype.sendDesktop.bind(this));
+  Node.app.get("/idf/:theme/desktop.htm", Node.Server.prototype.sendDesktop.bind(this));
+  Node.app.get("/idf/:theme/desktopFluid.htm", Node.Server.prototype.sendDesktop.bind(this));
   //
   let clientPath = Node.path.resolve(__dirname, "../ide/app/client");
   Node.app.use(`/idf/fonts`, Node.express.static(`${clientPath}/objects/ionic/fonts`));
-  //
-  let customfiles = ["custom.css", "customf.css"];
-  for (let f of customfiles) {
-    Node.app.get("/idf/:template/" + f, Node.Server.prototype.sendCustomFile.bind(this));
-  }
-  //
-  // I want to access the RD3 client folders without referencing template within the URL (same thing as runtime)
-  try {
-    let templatePath = Node.path.resolve(__dirname, "../ide/app/idf/Template");
-    let themePath = templatePath + "/Theme";
-    const files = Node.fs.readdirSync(themePath);
-    files.forEach(file => {
-      const fullPath = Node.path.join(themePath, file);
-      if (Node.fs.statSync(fullPath).isDirectory()) {
-        //console.log(`Nome: ${file}, Percorso: ${fullPath}`);
-        Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/RD3`));
-        Node.app.use(`/idf/${file}/Fluid`, Node.express.static(`${clientPath}`));
-        Node.app.use(`/idf/${file}`, Node.express.static(fullPath));
-        Node.app.use(`/idf/${file}`, Node.express.static(`${templatePath}/Common`));
-      }
-    });
-  }
-  catch (ex) {
-    this.logger.log("ERROR", `Error while reading IDF template directory: ${ex.message}`, "Server.registerIDFRoutes");
-  }
+  Node.app.use(`/idf/:theme/fonts`, Node.express.static(`${clientPath}/objects/fluid/themes/fonts`));
   //
   Node.app.get("/idfjs", Node.Server.prototype.sendFirstPage.bind(this));
   Node.app.get("/idf/wizards/welcome/welcome.htm", Node.Server.prototype.sendFirstPage.bind(this));
@@ -2020,6 +1999,33 @@ Node.Server.prototype.registerIDFRoutes = function ()
   //
   // When browser ask for viewedit.js, serve ../ide/app/client/viewedit.js
   Node.app.use("/idf/editor/viewedit.js", Node.express.static(clientPath + "/viewedit.js"));
+  //
+  // I want to access the RD3 client folders without referencing template within the URL (same thing as runtime)
+  try {
+    Node.app.get("/idf/:theme/*any", Node.Server.prototype.handleCustomFile.bind(this));
+    //
+    let templatePath = Node.path.resolve(__dirname, "../ide/app/idf/Template");
+    let themePath = templatePath + "/Theme";
+    const files = Node.fs.readdirSync(themePath);
+    files.forEach(file => {
+      const fullPath = Node.path.join(themePath, file);
+      if (Node.fs.statSync(fullPath).isDirectory()) {
+        //console.log(`Nome: ${file}, Percorso: ${fullPath}`);
+        if (file === "bootstrap" || file === "bootstrapzen")
+          Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/Theme/bootstrap/RD3`));
+        else if (file === "ionic")
+          Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/Theme/ionic/RD3`));
+        else
+          Node.app.use(`/idf/${file}/RD3`, Node.express.static(`${templatePath}/RD3`));
+        Node.app.use(`/idf/${file}/Fluid`, Node.express.static(`${clientPath}`));
+        Node.app.use(`/idf/${file}`, Node.express.static(fullPath));
+        Node.app.use(`/idf/${file}`, Node.express.static(`${templatePath}/Common`));
+      }
+    });
+  }
+  catch (ex) {
+    this.logger.log("ERROR", `Error while reading IDF template directory: ${ex.message}`, "Server.registerIDFRoutes");
+  }
 };
 
 

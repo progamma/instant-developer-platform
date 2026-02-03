@@ -153,7 +153,8 @@ Node.Worker.prototype.createChild = function ()
   this.child.send({type: Node.Worker.msgTypeMap.initApp, sender: "master",
     name: this.app.name, url: this.config.getUrl(), path: this.config.appDirectory + "/apps/" + this.app.name,
     publicUrl: this.config.getUrl() + "/" + this.app.name, online: true, workerIdx: this.app.workers.indexOf(this),
-    params: Object.assign({}, this.config.params, this.app.params, {_lowDiskThreshold: this.config.lowDiskThreshold})
+    params: Object.assign({}, this.config.params, this.app.params, {_lowDiskThreshold: this.config.lowDiskThreshold}),
+    services: this.config.services
   });
   //
   // Tell the app how to connect with the database

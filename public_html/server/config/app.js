@@ -3,13 +3,12 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module, process, Buffer */
-
 var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
 Node.ncp = require("../ncp_fixed");
+Node.path = require("path");
 
 // Import classes
 Node.Worker = require("../master/worker");
@@ -442,7 +441,7 @@ Node.App.prototype.sendStatus = function (params, callback)
       stdout = stdout.split("\r\n");        // Convert into array
       size = stdout[0];
     }
-    switch (size.substr(-1)) {
+    switch (size.slice(-1)) {
       case "K":
         size = Math.ceil(parseFloat(size) * 1024);
         break;

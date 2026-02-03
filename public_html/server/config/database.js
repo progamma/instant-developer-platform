@@ -3,14 +3,13 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
-
 var Node = Node || {};
 
 // Import modules
 Node.pg = require("pg");
 Node.fs = require("fs");
 Node.child = require("child_process");
+Node.path = require("path");
 
 // Import classes
 Node.Archiver = require("../archiver");
@@ -354,10 +353,18 @@ Node.Database.prototype.createDb = function (callback)
         return callback("Error while creating database: " + err);
       }
       //
-      client.end();
-      //
-      // Done
-      callback();
+      // Create vector extension (for app.ai)
+      client.query("CREATE EXTENSION IF NOT EXISTS vector;", function (err) {
+        if (err) {
+          pthis.log("ERROR", "Error while creating vector extension on database: " + err, "Database.createDb", {query: query});  
+          return callback("Error while creating vector extension on database: " + err);
+        }
+        //
+        client.end();
+        //
+        // Done
+        callback();
+      });
     });
   });
 };

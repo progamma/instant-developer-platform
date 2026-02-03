@@ -3,12 +3,10 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module, process, __dirname */
-
 var Node = Node || {};
 // Import Modules
 Node.fs = require("fs");
-Node.mime = require("mime");
+Node.mime = require("mime-types");
 Node.ncp = require("../ncp_fixed");
 Node.multiparty = require("multiparty");
 Node.path = require("path");
@@ -83,7 +81,11 @@ Node.Config = function (par)
     NumColumns: 80,
     AutoColumns: true,
     FontSize: "12",
-    FontName: "Source Code Pro"
+    FontName: "Courier New",
+    IdsTheme: "-1",
+    IdsVividIcons: "0",
+    IdsTreeSize: "normal",
+    DocLang: "ITA"
   };
 };
 
@@ -261,6 +263,8 @@ Node.Config.prototype.load = function (v)   /*jshint maxcomplexity:100 */
     this.licdata = v.licdata;
   if (v.idfoptions)
     this.idfoptions = v.idfoptions;
+  //
+  this.aiConfig = "";
 };
 
 
@@ -344,7 +348,7 @@ Node.Config.prototype.saveConfig = function ()
   });
   //
   // Write a new config file
-  Node.fs.open(configFile + ".new", "w", 0600, function (err, fd) {     // Owner RW only
+  Node.fs.open(configFile + ".new", "w", 0o0600, function (err, fd) {     // Owner RW only
     if (err) {
       delete pthis.savingConf;  // End save
       return pthis.logger.log("ERROR", "Error saving the CONFIG file (OPEN) " + configFile + ".new: " + err, "Config.saveConfig");
@@ -750,7 +754,7 @@ Node.Config.prototype.updatePackageJson = function (toRemove, toAdd, callback)
           return errorFnc("Error renaming the package.json file " + packageJSONfile + " to " + packageJSONfile + ".bak: " + err);
         //
         // Save package.json file
-        Node.fs.writeFile(packageJSONfile, JSON.stringify(packageJson, null, 2), {mode: 0644}, function (err) {     // RW-R-R
+        Node.fs.writeFile(packageJSONfile, JSON.stringify(packageJson, null, 2), {mode: 0o0644}, function (err) {     // RW-R-R
           if (err)
             return errorFnc("Error while saving the package.json file: " + err);
           //
@@ -806,6 +810,8 @@ Node.Config.prototype.processRun = function (req, res)
   var isRest = (req.query && req.query.mode === "rest");
   //
   this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.connection.remoteAddress});
+  //
+  Node.Utils.unlockRequestQuery(req);
   //
   // If caller is a bot -> go REST
   if (!isRest && !!req.useragent.isBot && !isWebApi) {
@@ -1027,7 +1033,7 @@ Node.Config.prototype.processRun = function (req, res)
         let openApiPath = `${webApiPath}/openapi.json`;
         if (req.params.cls === "api-docs" && req.method === "GET") {
           if (!Node.fs.existsSync(openApiPath))
-            return req.status(404).send("File not found");
+            return res.status(404).send("File not found");
           //
           // Serve the swagger documentation
           let swaggerPath = `${this.appDirectory}/apps/${appName}/client/swagger/index.html`;
@@ -1045,7 +1051,7 @@ Node.Config.prototype.processRun = function (req, res)
         // If openpai.json is required (by GET) responde with it
         if (req.params.cls === "openapi.json" && req.method === "GET") {
           if (!Node.fs.existsSync(openApiPath))
-            return req.status(404).send("File not found");
+            return res.status(404).send("File not found");
           //
           // Read the content of "server/webapi/openapi.json"
           let spec = require(openApiPath);
@@ -1254,7 +1260,7 @@ Node.Config.prototype.processRun = function (req, res)
               //
               // If there's a content type, try to get extension using it
               if (f.headers?.["content-type"])
-                ext = Node.mime.getExtension(f.headers["content-type"]);
+                ext = Node.mime.extension(f.headers["content-type"]);
               //
               // If no extension, try to get it from file original name
               if (!ext) {
@@ -1477,7 +1483,7 @@ Node.Config.prototype.sendStatus = function (params, callback)
     else {  // windows
       result.serverInfo.disk = {size: stdout[1] / 1024, available: stdout[0] / 1024};
       result.serverInfo.disk.used = result.serverInfo.disk.size - result.serverInfo.disk.available;
-      result.serverInfo.disk.capacity = Math.ceil(result.serverInfo.disk.available * 100 / result.serverInfo.disk.size) + "%";
+      result.serverInfo.disk.capacity = Math.ceil(result.serverInfo.disk.used / result.serverInfo.disk.size * 100) + "%";
       //
       callback({msg: JSON.stringify(result)});
     }
@@ -1958,7 +1964,8 @@ Node.Config.prototype.handleLog = function (params, callback)
                 return callback("Error reading the file " + filename + ": " + err);
               }
               //
-              Node.fs.writeFile(path + filename + ".1", data.substr(-MaxLen), function (err) {
+              Node.fs.writeFile(path + filename + ".1", data.slice(-MaxLen), function (err)
+              {
                 if (err) {
                   pthis.logger.log("WARN", "Error copying the " + filename + " to .1: " + err, "Config.handleLog");
                   return callback("Error copying the " + filename + " to .1: " + err);
@@ -2466,6 +2473,7 @@ Node.Config.prototype.processCommand = function (req, res)
   params.res = res;
   //
   // Merge Query-string parameters with BODY (i.e. x-www-form-urlencoded POST parameters)
+  Node.Utils.unlockRequestQuery(req);
   params.req.query = Object.assign(req.query, req.body);
   //
   // Log the operation
@@ -2699,7 +2707,8 @@ Node.Config.prototype.setLic = function (params, callback)
 /*
  * Get url bypassing CORS
  */
-Node.Config.prototype.getUrlData = function (params, callback) {
+Node.Config.prototype.getUrlData = function (params, callback)
+{
   console.error("NOT SUPPORTED FOR SELF");
 };
 
@@ -2751,15 +2760,16 @@ Node.Config.prototype.sendToLicServer = async function (operation, data, format 
 
 
 /*
- * Calcola il GUID di sistema
+ * Calculate the system GUID
  */
-Node.Config.prototype.generateSystemGUID = function () {
+Node.Config.prototype.generateSystemGUID = function ()
+{
   console.error("NOT SUPPORTED FOR SELF");
 };
 
 
 /*
- * Calcola il mac address della scheda di rete principale
+ * Calculate the mac address of the main network card
  */
 Node.Config.prototype.getPrimaryMacAddress = function ()
 {
@@ -2768,7 +2778,7 @@ Node.Config.prototype.getPrimaryMacAddress = function ()
 
 
 /*
- * Calcola data ora correnti
+ * Calculate current date time
  */
 Node.Config.prototype.getCurrentDateTime = function ()
 {
@@ -2777,7 +2787,7 @@ Node.Config.prototype.getCurrentDateTime = function ()
 
 
 /*
- * Calcola info sul sistema operativo
+ * Calculate operating system info
  */
 Node.Config.prototype.getOSInfo = function ()
 {
@@ -2786,7 +2796,7 @@ Node.Config.prototype.getOSInfo = function ()
 
 
 /*
- * Ritorna la versione di IDFJS
+ * IDFJS version
  */
 Node.Config.prototype.getIndeVersion = function ()
 {
@@ -2795,7 +2805,7 @@ Node.Config.prototype.getIndeVersion = function ()
 
 
 /*
- * Ritorna l'utente di IDFJS
+ * IDFJS user returns
  */
 Node.Config.prototype.getIdfUser = function ()
 {
@@ -2804,7 +2814,7 @@ Node.Config.prototype.getIdfUser = function ()
 
 
 /*
- * Controlla se il server di licenza è accedibile
+ * Check if the license server is accessible
  */
 Node.Config.prototype.licSrvCheckConnection = async function ()
 {
@@ -2813,7 +2823,7 @@ Node.Config.prototype.licSrvCheckConnection = async function ()
 
 
 /*
- * Crea o aggiorna i dati di un utente
+ * Create or update a user's data
  */
 Node.Config.prototype.licSrvUpdateUser = async function (user)
 {
@@ -2822,7 +2832,7 @@ Node.Config.prototype.licSrvUpdateUser = async function (user)
 
 
 /*
- * Crea/aggiorna l'installazione
+ * Create/update installation
  */
 Node.Config.prototype.licSrvUpdateInde = async function ()
 {
@@ -2831,7 +2841,7 @@ Node.Config.prototype.licSrvUpdateInde = async function ()
 
 
 /*
- * Recupera l'elenco delle licenze disponibili
+ * Retrieve the list of available licenses
  */
 Node.Config.prototype.licSrvGetLicList = async function ()
 {
@@ -2841,7 +2851,7 @@ Node.Config.prototype.licSrvGetLicList = async function ()
 
 
 /*
- * Associa una licenza a questa installazione
+ * Associate a license with this installation
  */
 Node.Config.prototype.licSrvGetLicense = async function (lic)
 {
@@ -2850,7 +2860,7 @@ Node.Config.prototype.licSrvGetLicense = async function (lic)
 
 
 /*
- * Rilascia la licenza di questa installazione
+ * Release the license for this installation
  */
 Node.Config.prototype.licSrvReleaseLicense = async function ()
 {
@@ -2859,7 +2869,7 @@ Node.Config.prototype.licSrvReleaseLicense = async function ()
 
 
 /*
- * Rilascia la licenza di questa installazione
+ * Release the license for this installation
  */
 Node.Config.prototype.licSrvUninstall = async function ()
 {
@@ -2868,7 +2878,7 @@ Node.Config.prototype.licSrvUninstall = async function ()
 
 
 /*
- * Controlla la licenza per IDF.JS
+ * Check the license for IDF.JS
  */
 Node.Config.prototype.checkLicense = async function ()
 {
@@ -2881,6 +2891,17 @@ Node.Config.prototype.checkLicense = async function ()
  * @param {response} res
  * */
 Node.Config.prototype.sendFirstPage = async function (req, res)
+{
+  console.error("NOT SUPPORTED FOR SELF");
+};
+
+
+/**
+ * Check if a specific product/module is active in the license
+ * @param {number} productFlag - Product flag (e.g., 0x0200 for TeamWorks)
+ * @returns {boolean} - True if the product is active
+ */
+Node.Config.prototype.isProductActive = function (productFlag)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };

@@ -116,7 +116,7 @@ Node.Childer.prototype.handleMessage = function (msg)
             txt += "rm " + __dirname + "/../log/console.*.log\n";
             txt += sudo + "pm2 start " + __dirname + "/inde.json\n";
             txt += "rm /root/_reboot";
-            Node.fs.writeFileSync("/root/_reboot", txt, {mode: 0777});
+            Node.fs.writeFileSync("/root/_reboot", txt, {mode: 0o0777});
             //
             Node.child.spawn((process.platform === "freebsd" ? "csh" : "bash"), ["-c", "/root/_reboot"]).unref();
           }

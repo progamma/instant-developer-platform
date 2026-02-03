@@ -393,37 +393,36 @@ Node.Request.prototype.getParentCommits = function (userName, projectName, param
 /**
  * Get the list of the component
  * @param {string} userName
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.getComponents = function (userName, callback)
+Node.Request.prototype.getComponents = async function (userName)
 {
-  var pthis = this;
-  //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
+  let consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
+  let options = {
     protocol: consoleUrlParts.protocol,
     hostname: consoleUrlParts.hostname,
     port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=compList&user=" + userName + "&company=" + this.config.serverType + "&autk=" + this.config.autk,
+    path: `${consoleUrlParts.pathname}?mode=rest&cmd=compList&user=${userName}&company=${this.config.serverType}&autk=${this.config.autk}`,
     method: "GET"
   };
-  this.getRequest(options, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getComponents", {err: err, code: code, data: data, options: options});
-      callback(null, err || "Invalid response");
-    }
-    else {
-      // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
-      // Better check if the answer is a JSON string... I don't want to crash everything
-      try {
-        var cmpList = JSON.parse(data).cmpList;
-        callback(cmpList);
+  //
+  return new Promise((resolve, reject) => {
+    this.getRequest(options, (code, data, err) => {
+      if (err || code !== 200) {
+        this.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getComponents", {err, code, data, options});
+        reject(err || "Invalid response");
       }
-      catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.getComponents", {data: data, code: code, options: options, err: ex.message});
-        callback(null, "Invalid response");
+      else {
+        // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
+        // Better check if the answer is a JSON string... I don't want to crash everything
+        try {
+          resolve(JSON.parse(data).cmpList);
+        }
+        catch (ex) {
+          this.logger.log("ERROR", "GET reply error", "Request.getComponents", {data, code, options, err: ex.message});
+          reject("Invalid response");
+        }
       }
-    }
+    });
   });
 };
 

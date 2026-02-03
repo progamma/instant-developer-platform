@@ -3,16 +3,16 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module, process */
 
 var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.mime = require("mime");
+Node.mime = require("mime-types");
 Node.ncp = require("../ncp_fixed");
 Node.multiparty = require("multiparty");
 Node.child = require("child_process");
+Node.path = require("path");
 
 // Import Classes
 Node.Archiver = require("../archiver");
@@ -84,7 +84,9 @@ Node.Project.prototype.log = function (level, message, sender, data)
 Node.Project.prototype.save = function ()
 {
   var r = {cl: "Node.Project", id: this.id, name: this.name, version: this.version, public: this.public,
-    lastSave: this.lastSave, lastSaveID: this.lastSaveID, ivAES: this.ivAES, ivAESdtt: this.ivAESdtt};
+    twMaster: this.twMaster, twFork: this.twFork, lastSave: this.lastSave, lastSaveID: this.lastSaveID,
+    ivAES: this.ivAES, ivAESdtt: this.ivAESdtt
+  };
   return r;
 };
 
@@ -99,6 +101,8 @@ Node.Project.prototype.load = function (v)
   this.name = v.name;
   this.version = v.version;
   this.public = v.public;
+  this.twMaster = v.twMaster;
+  this.twFork = v.twFork;
   this.lastSave = v.lastSave;
   this.lastSaveID = v.lastSaveID;
   this.ivAES = v.ivAES;
@@ -368,6 +372,20 @@ Node.Project.prototype.editProject = function (params, callback)
       }
     }
     //
+    let bck = (qry?.bck === "true");
+    let jsonpath = this.config.directory + "/" + this.user.userName + "/" + this.name + "/project.json";
+    if (bck && !Node.fs.existsSync(jsonpath + ".good")) {
+      bck = false;
+      this.log("DEBUG", "Restore stopped (.good file does not exist)", "Project.editProject");
+    }
+    if (bck) {
+      // Delete the old project.json file
+      Node.fs.rmSync(jsonpath, {force : true});
+      //
+      // Rename the old .good file in a valid project name
+      Node.fs.renameSync(jsonpath + ".good", jsonpath);
+    }
+    //
     // If not found, create a new session for this project
     if (!session) {
       this.log("DEBUG", "Create a new IDE session", "Project.editProject");
@@ -378,7 +396,7 @@ Node.Project.prototype.editProject = function (params, callback)
     session.protectSID(params.req, params.res);
     //
     // Redirect to the MAIN page with the sid as querystring
-    params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id);
+    params.res.redirect(this.config.getMainFile() + "?sessionid=" + session.id + (bck ? "&bck=true": ""));
     //
     // Done
     callback({skipReply: true});
@@ -485,7 +503,7 @@ Node.Project.prototype.downloadFile = async function (params)
     try {
       pathStats = await Node.fs.promises.stat(path);
     }
-    catch (err) {
+    catch {
       code = 404;
       warning = true;
       throw "Can't get file info (file is missing?)";
@@ -497,7 +515,7 @@ Node.Project.prototype.downloadFile = async function (params)
     }
     //
     // Compute the mimetype
-    let mimetype = Node.mime.getType(filename);
+    let mimetype = Node.mime.lookup(filename);
     //
     // If the file is an AUDIO or a VIDEO resource and a RANGE was provided
     if (mimetype && (mimetype.includes("audio") || mimetype.includes("video")) && params.req.headers.range) {
@@ -864,26 +882,25 @@ Node.Project.prototype.resetKeys = function (params, callback)
  */
 Node.Project.prototype.backup = function (params, callback)
 {
-  var pthis = this;
-  var archiver = new Node.Archiver(this.server, (params.req && params.req.query.nigthly));
-  var path = this.config.directory + "/" + this.user.userName + "/" + this.name;
-  var pathTemp = this.config.directory + "/" + this.user.userName + "/tmp_" + this.name;
+  let archiver = new Node.Archiver(this.server, params.req?.query.nigthly);
+  let path = Node.path.join(this.config.directory, this.user.userName, this.name);
+  let pathTemp = Node.path.join(this.config.directory, this.user.userName, `tmp_${this.name}`);
   //
-  var pathCloud;
-  if (params.req && params.req.query.path) {
+  let pathCloud;
+  if (params.req?.query.path) {
     // Given path could be a full file path (with .tar.gz extension) or a folder
     pathCloud = params.req.query.path;
-    if (pathCloud.substr(-7) !== ".tar.gz")
-      pathCloud += "/" + this.name + ".tar.gz";   // Was a folder
+    if (!pathCloud.endsWith(".tar.gz"))
+      pathCloud += `/${this.name}.tar.gz`;   // Was a folder
   }
   else
-    pathCloud = "users/" + this.config.serverType + "/" + this.user.userName + "/backups/projects/" + this.name + "/" + this.name + ".tar.gz";
+    pathCloud = `users/${this.config.serverType}/${this.user.userName}/backups/projects/${this.name}/${this.name}.tar.gz`;
   //
-  this.log("DEBUG", "Project backup", "Project.backup", {pathCloud: pathCloud, params: (params.req ? params.req.query : undefined)});
+  this.log("DEBUG", "Project backup", "Project.backup", {pathCloud, params: (params.req ? params.req.query : undefined)});
   //
   // Define useful functions
-  var errorFnc = function (msg) {
-    pthis.log("ERROR", msg, "Project.backup");
+  let errorFnc = msg => {
+    this.log("ERROR", msg, "Project.backup");
     //
     // Operation failed -> clean up
     Node.fs.rm(pathTemp, {recursive: true, force: true}, () => {
@@ -891,40 +908,35 @@ Node.Project.prototype.backup = function (params, callback)
     //
     callback(msg);
   };
-  var successFnc = function () {
-    pthis.log("INFO", "Backup of the project succeeded", "Project.backup");
+  let successFnc = () => {
+    this.log("INFO", "Backup of the project succeeded", "Project.backup");
     callback();
   };
   //
-  var doBackup = function () {
+  let doBackup = () => {
     // If no path nor exclude were given
     if (!params.req || (!params.req.query.path && !params.req.query.exclude)) {
       // Simply backup the entire directory
-      archiver.backup(path, pathCloud, function (err) {
-        if (err)
-          return errorFnc("Error while backing up project " + pthis.name + ": " + err);
-        //
-        successFnc();
-      });
+      archiver.backup(path, pathCloud).then(() => successFnc(), err => errorFnc(`Error while backing up project ${this.name}: ${err}`));
       //
       // Done
       return;
     }
     //
     // If an exclude list was provided, define filter function
-    var filterFnc;
+    let filterFnc;
     if (params.req.query.exclude) {
-      var exclList = params.req.query.exclude.split(";");
-      filterFnc = function (fileName) {
+      let exclList = params.req.query.exclude.split(";");
+      filterFnc = fileName => {
         fileName = fileName.replace(/\\/g, "/");   // Windows
         //
-        var copyFile = true;
-        for (var i = 0; i < exclList.length && copyFile; i++) {
-          var excl = path + "/" + exclList[i];
+        let copyFile = true;
+        for (let i = 0; i < exclList.length && copyFile; i++) {
+          let excl = `${path}/${exclList[i]}`;
           //
           // If the exclude path is a directory exclude the directory itself
-          var fn = fileName;
-          if (excl.substr(-1) === "/")
+          let fn = fileName;
+          if (excl.endsWith("/"))
             fn += "/";
           if (fn.substring(0, excl.length) === excl)
             copyFile = false;
@@ -934,33 +946,30 @@ Node.Project.prototype.backup = function (params, callback)
     }
     //
     // Remove the temp folder if present (due to a failed previous backup)
-    Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
+    Node.fs.rm(pathTemp, {recursive: true, force: true}, err => {
       if (err)
-        return errorFnc("Error removing the previous temp folder (" + pathTemp + "): " + err);
+        return errorFnc(`Error removing the previous temp folder (${pathTemp}): ${err}`);
       //
       // Create a temp folder
-      Node.fs.mkdir(pathTemp, function (err) {
+      Node.fs.mkdir(pathTemp, err => {
         if (err)
-          return errorFnc("Error creating the " + pathTemp + " folder:" + err);
+          return errorFnc(`Error creating the ${pathTemp} folder: ${err}`);
         //
         // Copy the project folder with filter function
-        Node.ncp(path, pathTemp + "/" + pthis.name, {filter: filterFnc}, function (err) {
+        Node.ncp(path, Node.path.join(pathTemp, this.name), {filter: filterFnc}, err => {
           if (err)
-            return errorFnc("Error copying the folder: " + err);
+            return errorFnc(`Error copying the folder: ${err}`);
           //
           // Do backup
-          archiver.backup(pathTemp + "/" + pthis.name, pathCloud, function (err) {
-            if (err)
-              return errorFnc("Error while backing up project " + pthis.name + ": " + err);
-            //
+          archiver.backup(Node.path.join(pathTemp, this.name), pathCloud).then(() => {
             // Delete the temp folder
-            Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
+            Node.fs.rm(pathTemp, {recursive: true, force: true}, err => {
               if (err)
-                return errorFnc("Error removing the temp folder (" + pathTemp + "): " + err);
+                return errorFnc(`Error removing the temp folder (${pathTemp}): ${err}`);
               //
               successFnc();
             });
-          });
+          }, err => errorFnc(`Error while backing up project ${this.name}: ${err}`));
         });
       });
     });
@@ -968,9 +977,9 @@ Node.Project.prototype.backup = function (params, callback)
   //
   // If we are in the server adjust files permissions to 770 and files ownership to owner (user) BEFORE backing up
   if (!this.config.local) {
-    this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
+    this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path], (err, stdout, stderr) => {   // jshint ignore:line
       if (err)
-        return errorFnc("Error changing the project folder permissions: " + (stderr || err));
+        return errorFnc(`Error changing the project folder permissions: ${stderr || err}`);
       //
       doBackup();
     });
@@ -987,64 +996,63 @@ Node.Project.prototype.backup = function (params, callback)
  */
 Node.Project.prototype.restore = function (params, callback)
 {
-  var pthis = this;
-  var archiver = new Node.Archiver(this.server, (params.req && params.req.query.nigthly));
-  var path = this.config.directory + "/" + this.user.userName + "/" + this.name;
-  var pathTemp = this.config.directory + "/" + this.user.userName + "/tmp_" + this.name;
+  let archiver = new Node.Archiver(this.server, params.req?.query.nigthly);
+  let path = Node.path.join(this.config.directory, this.user.userName, this.name);
+  let pathTemp = Node.path.join(this.config.directory, this.user.userName, `tmp_${this.name}`);
   //
-  var pathCloud;
-  if (params.req && params.req.query.path) {
+  let pathCloud;
+  if (params.req?.query.path) {
     // Given path could be a full file path (with .tar.gz extension) or a folder
     pathCloud = params.req.query.path;
-    if (pathCloud.substr(-7) !== ".tar.gz")
-      pathCloud += "/" + this.name + ".tar.gz";   // Was a folder
+    if (!pathCloud.endsWith(".tar.gz"))
+      pathCloud += `/${this.name}.tar.gz`;   // Was a folder
   }
   else
-    pathCloud = "users/" + this.config.serverType + "/" + this.user.userName + "/backups/projects/" + this.name + "/" + this.name + ".tar.gz";
+    pathCloud = `users/${this.config.serverType}/${this.user.userName}/backups/projects/${this.name}/${this.name}.tar.gz`;
   //
-  this.log("DEBUG", "Project restore", "Project.restore", {pathCloud: pathCloud, params: (params.req ? params.req.query : undefined)});
+  this.log("DEBUG", "Project restore", "Project.restore", {pathCloud, params: (params.req ? params.req.query : undefined)});
   //
   // Define useful functions
-  var errorFnc = function (msg) {
-    pthis.log("ERROR", msg, "Project.restore");
+  let errorFnc = msg => {
+    this.log("ERROR", msg, "Project.restore");
     callback(msg);
     //
     // Operation failed -> clean up
     Node.fs.rm(pathTemp, {recursive: true, force: true}, () => {
     });
   };
-  var successFnc = function () {
-    pthis.log("INFO", "Restore of the project succeeded", "Project.restore");
+  let successFnc = () => {
+    this.log("INFO", "Restore of the project succeeded", "Project.restore");
     callback();
   };
   //
-  var completeRestore = function () {
+  let completeRestore = () => {
     // If not CLONE nor FORK -> I've done!
-    var mode = (params.req ? params.req.query.mode : "");
+    let mode = (params.req ? params.req.query.mode : "");
     if (mode !== "clone" && mode !== "fork")
       return successFnc();
     //
     // Create a new session for setting properly the TW
-    pthis.server.createSession(pthis, {type: "TWrestore", mode: mode}, function (result) {
+    this.server.createSession(this, {type: "TWrestore", mode: mode}, result => {
       if (result.err)
-        return errorFnc("Error while resetting changes: " + result.err);
+        return errorFnc(`Error while resetting changes: ${result.err}`);
       //
       // If it was a FORK I've done
       if (mode === "fork")
         return successFnc();
       //
       // It was a CLONE -> I need to clean TW
-      Node.fs.rm(path + "/branches", {recursive: true, force: true}, function (err) {
+      Node.fs.rm(Node.path.join(path, "branches"), {recursive: true, force: true}, err => {
         if (err)
-          return errorFnc("Error deleting the BRANCHES folder: " + err);
+          return errorFnc(`Error deleting the BRANCHES folder: ${err}`);
         //
-        Node.fs.rm(path + "/trans", {recursive: true, force: true}, function (err) {
+        Node.fs.rm(Node.path.join(path, "trans"), {recursive: true, force: true}, err => {
           if (err)
-            return errorFnc("Error deleting the TRANS folder: " + err);
+            return errorFnc(`Error deleting the TRANS folder: ${err}`);
           //
-          Node.fs.rm(path + "/TwConfig.json", {force: true}, function (err) {
+          Node.fs.rm(Node.path.join(path, "TwConfig.json"), {force: true}, err => {
             if (err)
-              return errorFnc("Error deleting the TwConfig.json file: " + err);
+              return errorFnc(`Error deleting the TwConfig.json file: ${err}`);
             //
             successFnc();
           });
@@ -1054,36 +1062,33 @@ Node.Project.prototype.restore = function (params, callback)
   };
   //
   // Create a temp folder
-  Node.fs.mkdir(pathTemp, function (err) {
+  Node.fs.mkdir(pathTemp, err => {
     if (err)
-      return errorFnc("Error creating the " + pathTemp + " folder:" + err);
+      return errorFnc(`Error creating the ${pathTemp} folder: ${err}`);
     //
     // Restore files from the cloud
-    archiver.restore(pathTemp + "/" + pthis.name, pathCloud, function (err) {
-      if (err)
-        return errorFnc("Error restoring files: " + err);
-      //
+    archiver.restore(Node.path.join(pathTemp, this.name), pathCloud).then(() => {
       // Get the name of the first object inside the temporary folder
       // (should be the name of the "original" project)
-      Node.fs.readdir(pathTemp + "/", function (err, files) {
+      Node.fs.readdir(pathTemp, (err, files) => {
         if (err)
-          return errorFnc("Error retrieving the first file:" + err);
+          return errorFnc(`Error retrieving the first file: ${err}`);
         //
         // Copy all files from the "original" directory to the project directory
-        Node.ncp(pathTemp + "/" + files[0] + "/", path, function (err) {
+        Node.ncp(Node.path.join(pathTemp, files[0]), path, err => {
           if (err)
-            return errorFnc("Error copying the folder: " + err);
+            return errorFnc(`Error copying the folder: ${err}`);
           //
           // Delete the temp folder
-          Node.fs.rm(pathTemp, {recursive: true, force: true}, function (err) {
+          Node.fs.rm(pathTemp, {recursive: true, force: true}, err => {
             if (err)
-              return errorFnc("Error removing the temp folder (" + pathTemp + "): " + err);
+              return errorFnc(`Error removing the temp folder (${pathTemp}): ${err}`);
             //
             // Done file extraction. Fix permissions then complete the restore procedure
-            if (!pthis.config.local) {
-              pthis.server.execFileAsRoot("ChownChmod", [pthis.user.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
+            if (!this.config.local) {
+              this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path], (err, stdout, stderr) => {
                 if (err)
-                  return errorFnc("Error adjusting files: " + (stderr || err));
+                  return errorFnc(`Error adjusting files: ${stderr || err}`);
                 //
                 completeRestore();
               });
@@ -1093,7 +1098,7 @@ Node.Project.prototype.restore = function (params, callback)
           });
         });
       });
-    });
+    }, err => errorFnc(`Error restoring files: ${err}`));
   });
 };
 
@@ -1387,7 +1392,7 @@ Node.Project.prototype.uploadRecFile = function (params, callback)
   var form = new Node.multiparty.Form();
   form.on("part", function (part) {
     // Create a directory where to store uploaded file
-    Node.fs.mkdir(filePath, 0770, function (err) {
+    Node.fs.mkdir(filePath, 0o0770, function (err) {
       if (err && err.code !== "EEXIST") {
         pthis.log("ERROR", "Error while creating directory " + filePath + ": " + err, "Project.uploadRecFile");
         return callback("Error while creating directory " + filePath + ": " + err);

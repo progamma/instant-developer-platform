@@ -82,14 +82,12 @@ Node.AppClient.prototype.log = function (level, message, sender, data)
  */
 Node.AppClient.prototype.init = function (req, res)
 {
-  var pthis = this;
-  //
   // Save test auto id
   if (req.query.testid)
     this.session.testAutoId = req.query.testid;
   //
   // If requested, send SID and CID via query string
-  var qrys = "";
+  let qrys = "";
   if (req.query.addsid !== undefined) {
     qrys = "?" + Node.querystring.stringify({sid: this.session.id, cid: this.id});
     //
@@ -98,7 +96,7 @@ Node.AppClient.prototype.init = function (req, res)
   }
   //
   // If there was a query string, add it
-  var qryKeys = JSON.parse(JSON.stringify(req.query));
+  let qryKeys = JSON.parse(JSON.stringify(req.query));
   delete qryKeys.addsid;
   if (Object.keys(qryKeys).length)
     qrys += (qrys ? "&" : "?") + Node.querystring.stringify(qryKeys);
@@ -111,14 +109,14 @@ Node.AppClient.prototype.init = function (req, res)
   }
   //
   // Redirect to the main app page
-  var appPage = (this.app.params ? this.app.params.startPage : "") || this.config.getAppMainFile(mode);
+  let appPage = this.app.params?.startPage || this.config.getAppMainFile(mode);
   res.redirect("/" + this.app.name + "/" + appPage + qrys);
   //
   // Create a timer. If an openConnection does not arrive within 10 seconds,
   // the app client is deleted
-  this.killClient = setTimeout(function () {
-    pthis.log("DEBUG", "Client did not confirm its connection within 10 sec -> deleted", "AppClient.init");
-    pthis.session.deleteAppClient(pthis, true);
+  this.killClient = setTimeout(() => {
+    this.log("DEBUG", "Client did not confirm its connection within 10 sec -> deleted", "AppClient.init");
+    this.session.deleteAppClient(this, true);
   }, 10000);
 };
 
@@ -130,10 +128,8 @@ Node.AppClient.prototype.init = function (req, res)
  */
 Node.AppClient.prototype.openConnection = function (socket, lastMsg)
 {
-  var pthis = this;
-  //
   // If my ID is inside the cTokens array, my ID is a CTOKEN
-  var ctoken = (this.session.cTokens.indexOf(this.id) !== -1 ? this.id : undefined);
+  let ctoken = (this.session.cTokens.includes(this.id) ? this.id : undefined);
   if (ctoken) { // I've been invited...
     // I've been invited: if this session has not a master -> that's not allowed
     if (!this.session.masterAppClient) {
@@ -143,7 +139,7 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
     }
     //
     // "Eat" the token from the list of valid tokens
-    var id = this.session.cTokens.indexOf(ctoken);
+    let id = this.session.cTokens.indexOf(ctoken);
     this.session.cTokens.splice(id, 1);
     //
     this.log("DEBUG", "A new client is SLAVE for session", "AppClient.openConnection");
@@ -151,7 +147,7 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
   else {  // I've not been invited
     // If the SID is invalid
     if (this.session.invalidSID(socket, this)) {
-      var exitUrl = this.config.saveProperties().exitUrl;
+      let exitUrl = this.config.saveProperties().exitUrl;
       this.log("WARN", "Invalid SID -> redirect to " + exitUrl, "AppClient.openConnection");
       socket.emit(Node.AppClient.msgTypeMap.redirect, exitUrl);
       return;
@@ -178,84 +174,89 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
   }
   //
   // Listen for "appmsg" (sent by client app.js)
-  socket.on("appmsg", function (msg, callback) {
+  socket.on("appmsg", (msg, callback) => {
     // Update query string
-    if (msg.appurl && pthis.session.request) {
+    if (msg.appurl && this.session.request) {
       let query = Node.url.parse(msg.appurl).query;
-      pthis.session.request.query = (query ? Node.querystring.parse(query) : undefined);
+      this.session.request.query = (query ? Node.querystring.parse(query) : {});
     }
     //
     // Route this message to the child
-    pthis.session.sendToChild({type: Node.AppClient.msgTypeMap.appmsg, sid: msg.sid, cid: pthis.id,
-      content: msg.events, master: (pthis.session.masterAppClient === pthis), request: pthis.session.request, cookies: pthis.session.cookies});
+    this.session.sendToChild({
+      type: Node.AppClient.msgTypeMap.appmsg,
+      sid: msg.sid,
+      cid: this.id,
+      content: msg.events,
+      master: this.session.masterAppClient === this,
+      request: this.session.request,
+      cookies: this.session.cookies
+    });
     //
     // During a test auto some requests may arrive before onStart (for example onPause/onResume...).
     // So I don't have to delete request and cookies until onStart message arrives
-    var testAuto = pthis.app.getTestById(pthis.session.testAutoId);
+    let testAuto = this.app.getTestById(this.session.testAutoId);
     if (testAuto && !testAuto.onStartArrived)
       return;
     //
     // Delete the content of the request after it has been sent
-//    delete pthis.session.request;
-    delete pthis.session.cookies;
+//    delete this.session.request;
+    delete this.session.cookies;
     //
     if (callback) // Old apps does not provide the callback
       callback(); // Message received
   });
   //
   // Listen for disconnect
-  socket.on("disconnect", function () {
+  socket.on("disconnect", () => {
     // Log disconnection
-    pthis.log("DEBUG", "Received disconnect from " +
-            (pthis.session.masterAppClient === pthis ? "MASTER" : "SLAVE") + " client socket", "AppClient.openConnection");
+    this.log("DEBUG", "Received disconnect from " +
+            (this.session.masterAppClient === this ? "MASTER" : "SLAVE") + " client socket", "AppClient.openConnection");
     //
     // Socket is not connected anymore
-    delete pthis.socket;
+    delete this.socket;
     //
-    var testAuto = pthis.app.getTestById(pthis.session.testAutoId);
-    if (testAuto)
-      testAuto.onDisconnectClient();
+    var testAuto = this.app.getTestById(this.session.testAutoId);
+    testAuto?.onDisconnectClient();
     //
     // If the disconnected client was the session master, the session looses the master
-    if (pthis.session.masterAppClient === pthis)
-      delete pthis.session.masterAppClient;
+    if (this.session.masterAppClient === this)
+      delete this.session.masterAppClient;
     //
     // If the app is updating... die immediately (no wait for reconnect... I'm installing!!!)
-    if (pthis.app.updating) {
-      pthis.log("DEBUG", "App is updating -> delete session", "AppClient.openConnection");
-      return pthis.session.deleteAppClient(pthis);
+    if (this.app.updating) {
+      this.log("DEBUG", "App is updating -> delete session", "AppClient.openConnection");
+      return this.session.deleteAppClient(this);
     }
     //
     // Ask my parent to delete me
     // Wait 15 seconds before actually deleting this session...
     // So that if the client has been disconnected and comes back I'm here waiting for him
-    var sessTimeout = 15000; // 15 sec for REFRESH handling
-    pthis.killClient = setTimeout(function () {
-      pthis.log("DEBUG", "Client did not return within " + (sessTimeout / 1000) + " sec -> deleted", "AppClient.openConnection");
-      pthis.session.deleteAppClient(pthis);
+    let sessTimeout = 15000; // 15 sec for REFRESH handling
+    this.killClient = setTimeout(() => {
+      this.log("DEBUG", "Client did not return within " + (sessTimeout / 1000) + " sec -> deleted", "AppClient.openConnection");
+      this.session.deleteAppClient(this);
     }, sessTimeout);
   });
   //
   // Get test auto of this session and initialize it giving session, so that it can send recorded message to client in case of replay mode
-  var testAuto = this.app.getTestById(this.session.testAutoId);
-  if (testAuto)
-    testAuto.init(this);
+  let testAuto = this.app.getTestById(this.session.testAutoId);
+  testAuto?.init(this);
   //
   // If there are unsent messages, resynch with client
   if (lastMsg && this.sentMsgs) {
     // First search inside the unsent messages the last client message
     // If not found it means that we were in synch and I just need to send all messages
-    let lastidx = Math.max(this.sentMsgs.findIndex(function (el) { return (JSON.stringify(el) === JSON.stringify(lastMsg)); }), 0);
-    for (let i=lastidx; i<this.sentMsgs.length; i++) {
+    let lastidx = Math.max(this.sentMsgs.findIndex(el => JSON.stringify(el) === JSON.stringify(lastMsg)), 0);
+    for (let i = lastidx; i < this.sentMsgs.length; i++) {
       let msg = this.sentMsgs[i];
-      socket.emit("appmsg", msg, function() {
+      socket.emit("appmsg", msg, () => {
         let index = this.sentMsgs.indexOf(msg);
         if (index > -1) {
           this.sentMsgs.splice(index, 1);
           if (this.sentMsgs.length === 0)
             delete this.sentMsgs;
         }
-      }.bind(this));
+      });
     }
   }
 };
@@ -274,14 +275,13 @@ Node.AppClient.prototype.sendAppMessage = function (msg)
   this.sentMsgs = this.sentMsgs || [];
   this.sentMsgs.push(msg);
   //
-  this.socket.emit("appmsg", msg, function() {
+  this.socket.emit("appmsg", msg, () => {
     // Client received the message -> remove from the sent messages list
     let index = this.sentMsgs.indexOf(msg);
     if (index > -1)
       this.sentMsgs.splice(index, 1);
-  }.bind(this));
+  });
 };
-
 
 
 /**
@@ -289,8 +289,7 @@ Node.AppClient.prototype.sendAppMessage = function (msg)
  */
 Node.AppClient.prototype.close = function ()
 {
-  if (this.socket)
-    this.socket.disconnect();
+  this.socket?.disconnect();
 };
 
 

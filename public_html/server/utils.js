@@ -3,7 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global module, process, __filename */
 
 var Node = Node || {};
 
@@ -12,12 +11,13 @@ Node.fs = require("fs");
 Node.path = require("path");
 Node.tar = require("tar");
 Node.multiparty = require("multiparty");
-Node.mime = require("mime");
+Node.mime = require("mime-types");
 Node.os = require("os");
 Node.child = require("child_process");
 Node.zlib = require("zlib");
 Node.yauzl = require("yauzl");
 Node.ncp = require("./ncp_fixed");
+Node.archiver = require("archiver");
 
 /**
  * Utils object class
@@ -25,6 +25,21 @@ Node.ncp = require("./ncp_fixed");
  */
 Node.Utils = function ()
 {
+};
+
+
+// Module flags for license checking
+Node.Utils.IdfModules = {
+  MOD_DEMO         : 0x0001,
+  MOD_CSHARP       : 0x0002,
+  MOD_JAVA         : 0x0004,
+  MOD_WEBSERVICES  : 0x0008,
+  MOD_RTC          : 0x0010,
+  MOD_TRACKING     : 0x0020,
+  MOD_TESTING      : 0x0040,
+  MOD_ELEARNING    : 0x0080,
+  MOD_REPORT       : 0x0100,
+  MOD_TW           : 0x0200
 };
 
 
@@ -190,7 +205,8 @@ Node.Utils.handleFileSystem = function (options, callback)
             for (var i = 0; i < files.length; i++) {
               (function (idx) {
                 // https://nodejs.org/api/fs.html#fs_class_fs_stats
-                Node.fs.stat(options.path + (options.path.substr(-1) === "/" ? "" : "/") + files[idx], function (err, stats) {
+                Node.fs.stat(options.path + (options.path.endsWith("/") ? "" : "/") + files[idx], function (err, stats)
+                {
                   // https://nodejs.org/api/fs.html#fs_file_mode_constants
                   if (err)
                     filesInfo.push({name: files[idx], err: err});
@@ -218,7 +234,7 @@ Node.Utils.handleFileSystem = function (options, callback)
                 headerSent = true;
                 //
                 var stat = Node.fs.statSync(path);
-                var mimetype = Node.mime.getType(path);
+                var mimetype = Node.mime.lookup(path);
                 options.params.res.writeHead(200, {
                   "Content-disposition": (options.params.req.query.inline ? "inline" : "attachment; filename = " + path.substring(path.lastIndexOf("/") + 1)),
                   "Content-Length": stat.size,
@@ -235,7 +251,7 @@ Node.Utils.handleFileSystem = function (options, callback)
           if (pathStats.isDirectory()) {
             var parentPath = options.path.substring(0, options.path.lastIndexOf("/"));
             var dirName = options.path.substring(options.path.lastIndexOf("/") + 1);
-            var tarFile = options.tempPath + (options.tempPath.substr(-1) === "/" ? "" : "/") + dirName + ".tar.gz";
+            var tarFile = options.tempPath + (options.tempPath.endsWith("/") ? "" : "/") + dirName + ".tar.gz";
             Node.tar.create({file: tarFile, cwd: parentPath, gzip: true, portable: true}, [dirName], function (err) {
               if (err)
                 return callback("Can't compress path: " + err);
@@ -301,7 +317,7 @@ Node.Utils.handleFileSystem = function (options, callback)
             for (var i = 0; i < farr.length; i++) {
               var k = farr[i];
               var f = files[k][0];
-              var newfile = options.path + (options.path.substr(-1) === "/" ? "" : "/") + f.originalFilename;
+              var newfile = options.path + (options.path.endsWith("/") ? "" : "/") + f.originalFilename;
               Node.fs.rename(f.path, newfile, function (err) {
                 if (err)
                   callback("Error moving POST file: " + err);
@@ -415,7 +431,7 @@ Node.Utils.handleFileSystem = function (options, callback)
 
         case "del":
           // Can't delete the "main" FILES directory
-          if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.substr(-7) === "/files/")
+          if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.endsWith("/files/"))
             return callback("Can't delete FILES directory");
           //
           Node.fs.rm(options.path, {recursive: true, force: true}, function (err) {
@@ -429,7 +445,7 @@ Node.Utils.handleFileSystem = function (options, callback)
         case "copy":
         case "move":
           // Can't copy/rename the "main" FILES directory
-          if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.substr(-7) === "/files/")
+          if ((options.path.match(/\/files\//g) || []).length === 1 && options.path.endsWith("/files/"))
             return callback("Can't " + (options.command === "move" ? "move" : "copy") + " FILES directory");
           //
           var newName = (options.params.req.query || {}).newname;
@@ -694,89 +710,25 @@ Node.Utils.loadObject = function (filename, callback)
 };
 
 
-Node.Utils.unzip = async function (sourceZipPath, destinationDirPath) {
-  const fs = Node.fs;
-  const path = Node.path;
-  const yauzl = require("yauzl");
+Node.Utils.unlockRequestQuery = function (req) {
+  let query = req.query;
+  Object.defineProperty(req, "query", {
+    configurable: true,
+    enumerable: true,
+    get: () => req._query = req._query || {},
+    set: (q) => req._query = q
+  });
+  req.query = query;
+};
 
-  try {
-    // Assicurati che la directory di destinazione esista
-    await fs.promises.mkdir(destinationDirPath, {recursive: true});
-
-    // Apri il file ZIP
-    const openZip = (filePath, options) => {
-      return new Promise((resolve, reject) => {
-        yauzl.open(filePath, options, (err, zipFile) => {
-          if (err)
-            return reject(err);
-          resolve(zipFile);
-        });
-      });
-    };
-
-    const zipFile = await openZip(sourceZipPath, {lazyEntries: true});
-
-    const processEntry = async (entry) => {
-      const entryPath = path.join(destinationDirPath, entry.fileName);
-
-      // Normalizza il percorso per evitare percorsi relativi malevoli
-      const normalizedPath = path.normalize(entryPath);
-
-      if (!normalizedPath.startsWith(destinationDirPath)) {
-        throw new Error(`Tentativo di estrazione al di fuori della directory: ${normalizedPath}`);
-      }
-
-      if (/\/$/.test(entry.fileName)) {
-        // Entry è una directory
-        await fs.promises.mkdir(normalizedPath, {recursive: true});
-      }
-      else {
-        // Entry è un file
-        await fs.promises.mkdir(path.dirname(normalizedPath), {recursive: true}); // Crea la directory genitore
-        return new Promise((resolve, reject) => {
-          zipFile.openReadStream(entry, (err, readStream) => {
-            if (err)
-              return reject(err);
-
-            const writeStream = fs.createWriteStream(normalizedPath);
-            readStream.pipe(writeStream);
-
-            readStream.on("end", () => resolve());
-            readStream.on("error", (err) => reject(err));
-            writeStream.on("error", (err) => reject(err));
-          });
-        });
-      }
-    };
-
-    // Itera attraverso le entry
-    const readEntries = () => {
-      return new Promise((resolve, reject) => {
-        zipFile.readEntry();
-        zipFile.on("entry", async (entry) => {
-          try {
-            await processEntry(entry);
-            zipFile.readEntry(); // Leggi la prossima entry
-          }
-          catch (err) {
-            reject(err);
-          }
-        });
-        zipFile.on("end", resolve); // Completamento
-        zipFile.on("error", reject); // Errori
-      });
-    };
-
-    await readEntries();
-    zipFile.close();
-
-    return true;
-  }
-  catch (e) {
-    console.error("Errore durante l'unzip:", e);
-    this.lastError = e.message;
-    return false;
-  }
+Node.Utils.fixMimeTypes = function ()
+{
+  // Fix mime types
+  Node.mime = require("mime-types");
+  Node.mime.types["mp4"] = "video/mp4"; // Force mp4 to be video/mp4 (not application/mp4) 
+  Node.mime.types["mpg4"] = "video/mp4"; // Force mpg4 to be video/mp4 (not application/mp4)
+  Node.mime.types["yaml"] = "text/yaml"; // Add support for YAML files
+  Node.mime.types["yml"] = "text/yaml"; // Add support for YML files
 };
 
 

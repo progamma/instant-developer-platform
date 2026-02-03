@@ -17,6 +17,7 @@ Node.cookie = require("cookie");
 Node.Utils = require("./utils");
 Node.IDEAppClient = require("./ideappclient");
 Node.Archiver = require("./archiver");
+Node.AI = require("./ai/ai");
 
 
 /**
@@ -59,7 +60,13 @@ Node.IDESession = function (prj, options, callback)
     this.startAutoKillTimer(60000);
   //
   // callback list for send and wait
-  this.cbList = {};  
+  this.cbList = {};
+  //
+  // Initialize AI for IDE sessions
+  if (this.options.type === "ide" || this.options.type === "tutorial") {
+    this.ai = new Node.AI(this);
+    // AI will be initialized when first used
+  }
 };
 
 
@@ -108,7 +115,13 @@ Node.IDESession.msgTypeMap = {
   remoteQueryResult: "rqres",
   //
   apiCommand:"apic",
-  apiCommandResult:"apir"
+  apiCommandResult:"apir",
+  //
+  getProjectStructure: "gps",
+  projectStructureResult: "psr",
+  //
+  agentMessage: "agm",
+  agentMessageResult: "agmr"
 };
 
 
@@ -325,7 +338,11 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
       //
       dev.sendCommand(msg.cnt);
     }
-    else  // Not for a device -> send it to the child
+    else if (msg.type === "ide-agent" && pthis.ai) {
+      // Handle AI messages - pass socket ID too
+      pthis.ai.handleClientMessage(msg.data, sod);
+    }
+    else  // Not for a device or AI -> send it to the child
       pthis.sendToChild({type: Node.IDESession.msgTypeMap.generalChannel, sod: sod, cnt: msg});
   });
   //
@@ -530,6 +547,14 @@ Node.IDESession.prototype.processMessage = function (msg)
       this.handleApiCommandResult(msg);
       break;
 
+    case Node.IDESession.msgTypeMap.projectStructureResult:
+      this.handleProjectStructureResult(msg);
+      break;
+
+    case Node.IDESession.msgTypeMap.agentMessageResult:
+      this.handleAgentMessageResult(msg);
+      break;
+
     default:
       this.handleOtherMessages(msg);
       break;
@@ -571,7 +596,7 @@ Node.IDESession.prototype.sendMessageToClientApp = function (msg)
 Node.IDESession.prototype.sendApiCommand = function (command, cb)
 {
   let cbid = Node.Utils.generateUID36();
-  this.cbList[cbid]=cb;
+  this.cbList[cbid] = cb;
   this.sendToChild({type: Node.IDESession.msgTypeMap.apiCommand, cbid, command});
 };
 
@@ -584,8 +609,9 @@ Node.IDESession.prototype.sendApiCommand = function (command, cb)
 Node.IDESession.prototype.handleApiCommandResult = function (message)
 {
   let cb = this.cbList[message.cbid];
+  delete this.cbList[message.cbid];
   if (cb) {
-    cb(message.result);
+    cb(message.result, message.error);
   }
 };
 
@@ -616,6 +642,128 @@ Node.IDESession.prototype.handleCTokenOpMsg = function (msg)
     this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
   else if (msg.cnt.op === "del" && ctidx !== -1)
     this.cTokens.splice(ctidx, 1);  // Add the ctoken to the array (if not there already)
+};
+
+
+/**
+ * Request project structure from child process
+ * @param {Array} elements - Array of element IDs to retrieve
+ * @param {Function} callback - Callback with structure result
+ */
+Node.IDESession.prototype.getProjectStructureAsync = async function (elements)
+{
+  return new Promise((resolve, reject) => {
+    let requestId = Node.Utils.generateUID36();
+    //
+    // Store callback
+    if (!this.structureCallbacks)
+      this.structureCallbacks = {};
+    //
+    this.structureCallbacks[requestId] = {
+      resolve: resolve,
+      reject: reject,
+      timeout: setTimeout(() => {
+        delete this.structureCallbacks[requestId];
+        reject(new Error("Project structure request timeout"));
+      }, 10000) // 10 second timeout
+    };
+    //
+    // Send request to child
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.getProjectStructure,
+      requestId: requestId,
+      elements: elements
+    });
+  });
+};
+
+
+/**
+ * Handle project structure result from child
+ * @param {Object} msg - Message from child
+ */
+Node.IDESession.prototype.handleProjectStructureResult = function (msg)
+{
+  if (!this.structureCallbacks || !this.structureCallbacks[msg.requestId])
+    return;
+  //
+  let callback = this.structureCallbacks[msg.requestId];
+  clearTimeout(callback.timeout);
+  //
+  if (msg.error) {
+    let errorMessage = typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error);
+    callback.reject(new Error(errorMessage));
+  }
+  else
+    callback.resolve(msg.result);
+  //
+  delete this.structureCallbacks[msg.requestId];
+};
+
+
+/**
+ * Send agent message to child process (async)
+ * @param {Object} message - Agent message with command and params
+ * @returns {Promise} Promise with result
+ */
+Node.IDESession.prototype.sendAgentMessageAsync = async function (message)
+{
+  return new Promise((resolve, reject) => {
+    let requestId = Node.Utils.generateUID36();
+    //
+    // Store callback
+    if (!this.agentCallbacks)
+      this.agentCallbacks = {};
+    //
+    this.agentCallbacks[requestId] = {
+      resolve: resolve,
+      reject: reject,
+      timeout: setTimeout(() => {
+        delete this.agentCallbacks[requestId];
+        reject(new Error(`Agent message timeout: ${message.command}`));
+      }, 30000) // 30 second timeout for complex operations
+    };
+    //
+    // Send message to child
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.agentMessage,
+      requestId: requestId,
+      message: message
+    });
+  });
+};
+
+
+/**
+ * Handle agent message result from child
+ * @param {Object} msg - Message from child
+ */
+Node.IDESession.prototype.handleAgentMessageResult = function (msg)
+{
+  if (!this.agentCallbacks || !this.agentCallbacks[msg.requestId])
+    return;
+  //
+  let callback = this.agentCallbacks[msg.requestId];
+  clearTimeout(callback.timeout);
+  //
+  if (msg.error) {
+    let errorMessage = typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error);
+    callback.reject(new Error(errorMessage));
+  }
+  else {
+    // Generic handling: if there's a 'result' field, use it;
+    // otherwise return the entire message excluding metadata fields
+    if (msg.result !== undefined) {
+      callback.resolve(msg.result);
+    }
+    else {
+      // Remove only the protocol fields, keep everything else
+      let { type, requestId, ...dataFields } = msg;
+      callback.resolve(dataFields);
+    }
+  }
+  //
+  delete this.agentCallbacks[msg.requestId];
 };
 
 
@@ -897,12 +1045,12 @@ Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
     var user = this.config.getUser(options.user || "manager");
     if (!user) {
       this.log("WARN", "User not found", "IDESession.handleRemoteQueryMessage", options);
-      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, err: "User not found"});
+      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, err: "User not found"});
     }
     var db = user.getDatabase(options.database);
     if (!db) {
       this.log("WARN", "Database not found", "IDESession.handleRemoteQueryMessage", options);
-      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, err: "Database not found"});
+      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, err: "Database not found"});
     }
     //
     var params = {req: {query: {query: encodeURIComponent(options.sql)}}};

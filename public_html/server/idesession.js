@@ -17,7 +17,7 @@ Node.cookie = require("cookie");
 Node.Utils = require("./utils");
 Node.IDEAppClient = require("./ideappclient");
 Node.Archiver = require("./archiver");
-Node.AI = require("./ai/ai");
+Node.AI = {};
 
 
 /**
@@ -64,7 +64,7 @@ Node.IDESession = function (prj, options, callback)
   //
   // Initialize AI for IDE sessions
   if (this.options.type === "ide" || this.options.type === "tutorial") {
-    this.ai = new Node.AI(this);
+    this.ai = {};
     // AI will be initialized when first used
   }
 };

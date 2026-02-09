@@ -2,7 +2,7 @@
 
 ## ITA
 1. [Installazione di Node.js](#installazione-di-nodejs)
-1. [Installazione di npm](#installazione-di-npm)
+1. [Installazione di pm2](#installazione-di-pm2)
 1. [Installazione di Postgres 13](#installazione-di-postgres-13)
 1. [Download del pacchetto da github e configurazione](#download-del-pacchetto-da-github-e-configurazione)
 
@@ -25,7 +25,7 @@ Per versioni precedenti di Instant Developer Cloud si consiglia di utilizzare la
 | < 19              | 6                         |
 
 
-### Installazione di npm
+### Installazione di pm2
 Per installare pm2 è consigliabile aggiornare prima la versione di npm
 
 ```
@@ -198,3 +198,4 @@ L’accesso al Servizio di Supporto Tecnico non è consentito per richieste di s
 > [!NOTE]
 > ### MyCloud
 > Per l'installazione di un server di tipo MyCloud è possibile consultare la guida riportata nel capito **I server MyCloud** del manuale [17-I server di produzione](https://storage.googleapis.com/inde-downloads/doc/17-I%20server%20di%20produzione.pdf)https://storage.googleapis.com/inde-downloads/doc/17-I%20server%20di%20produzione.pdf disponibile dalla Console di Instant Developer Cloud.
+

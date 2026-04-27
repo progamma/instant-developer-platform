@@ -3,7 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
 
 var Node = Node || {};
 //
@@ -28,7 +27,7 @@ Node.TestAuto = function (app, options)
   this.mode = options.mode;
   this.pathList = [];
   if (options.pathList) {
-    var decodedPaths = decodeURIComponent(options.pathList);
+    let decodedPaths = decodeURIComponent(options.pathList);
     this.pathList = JSON.parse(decodedPaths);
   }
   this.rid = options.rid;
@@ -41,9 +40,19 @@ Node.TestAuto = function (app, options)
   this.outputMessages = [];
   this.delays = [];
   this.consoleTest = [];
-  this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [],
-    tagErrors: [], noResponseErrors: [], consoleTestErrors: [], totErrors: [],
-    slownessWarnings: [], percentageCompleted: 0, nonCreatedSessions: 0};
+  this.testResult = {
+    cpu: [],
+    memory: [],
+    activeSessions: [],
+    exceptions: [],
+    tagErrors: [],
+    noResponseErrors: [],
+    consoleTestErrors: [],
+    totErrors: [],
+    slownessWarnings: [],
+    percentageCompleted: 0,
+    nonCreatedSessions: 0
+  };
   this.lastCPUValues = [];
   this.reqIndex = 0;
   this.startTime = 0;
@@ -102,12 +111,23 @@ Node.TestAuto.prototype.init = function (appClient)
   }
   //
   // Tell app this is a test auto
-  var ev = [{id: "setTestAuto"}];
-  this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+  this.session.sendToChild({
+    type: Node.TestAuto.msgTypeMap.appmsg,
+    sid: this.session.id,
+    content: [{
+      id: "setTestAuto"
+    }]
+  }); 
   //
   // Tell app to update its dbs
   if (this.mode !== Node.TestAuto.ModeMap.rec)
-    this.session.sendToChild({type: Node.TestAuto.msgTypeMap.testStart, sid: this.session.id, cnt: {testAutoId: this.id}});
+    this.session.sendToChild({
+      type: Node.TestAuto.msgTypeMap.testStart,
+      sid: this.session.id,
+      cnt: {
+        testAutoId: this.id
+      }
+    });
 };
 
 
@@ -117,8 +137,8 @@ Node.TestAuto.prototype.init = function (appClient)
  * */
 Node.TestAuto.prototype.handleUpdateSchemaResult = function (res)
 {
-  if (res && res.err) {
-    this.consoleRequest.sendResponse(this.rid, 500, "Update schema failed: " + res.err);
+  if (res?.err) {
+    this.consoleRequest.sendResponse(this.rid, 500, `Update schema failed: ${res.err}`);
     return;
   }
   //
@@ -139,7 +159,7 @@ Node.TestAuto.prototype.handleUpdateSchemaResult = function (res)
 Node.TestAuto.prototype.sniff = function (req, cts)
 {
   // If I receive an initTestAuto request in replay mode, I start the replay
-  for (var i = 0; i < req.length; i++) {
+  for (let i = 0; i < req.length; i++) {
     // Add an entry to objects map for each element found inside current request content
     if (req[i].cnt)
       this.addObjToMap(req[i].cnt);
@@ -151,13 +171,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       // In step by step mode, check if need to wait for files to be read
       if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
         if (!this.filesReady) {
-          this.waitFilesInterval = setInterval(function () {
+          this.waitFilesInterval = setInterval(() => {
             if (this.filesReady) {
               this.playRequest();
               clearInterval(this.waitFilesInterval);
               delete this.waitFilesInterval;
             }
-          }.bind(this), 200);
+          }, 200);
         }
         else
           this.playRequest();
@@ -223,7 +243,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       }
     }
     //
-    if (["setTestAuto", "calculateTagResults", "setTaggingData", "closePopup", "onPause", "onResume", "getTestProperties", "sendMessageToTestAuto"].indexOf(req[i].id) !== -1) {
+    if (["setTestAuto", "calculateTagResults", "setTaggingData", "closePopup", "onPause", "onResume", "getTestProperties", "sendMessageToTestAuto"].includes(req[i].id)) {
       if (req.length === 1)
         return;
       else {
@@ -232,13 +252,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       }
     }
     //
-    if (["alertCB", "confirmCB", "promptCB"].indexOf(req[i].id) !== -1)
+    if (["alertCB", "confirmCB", "promptCB"].includes(req[i].id))
       this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: [{id: "closePopup"}]});
     //
     // Save the last opened popup callback id. In record mode I saved a popupBoxReturn message having a certain cbId
     // as a parameter. But this cbId is a "record-time" value. So I save the current cbId in order to replace the cbId into
     // popupBoxReturn message when I'll go to send it
-    if (["popup", "confirm", "prompt"].indexOf(req[i].id) !== -1) {
+    if (["popup", "confirm", "prompt"].includes(req[i].id)) {
       if (!this.lastPopupCbId)
         this.lastPopupCbId = req[i].cnt.cbId;
     }
@@ -259,13 +279,13 @@ Node.TestAuto.prototype.sniff = function (req, cts)
   if (this.mode === Node.TestAuto.ModeMap.rec && !this.onStartArrived)
     return;
   //
-  var currentTime = new Date().getTime();
+  let currentTime = new Date().getTime();
   //
   // Client event
   if (cts) {
     if (this.mode === Node.TestAuto.ModeMap.rec) {
       // Check if I received saveTestAuto request, because I don't want to save it
-      for (i = 0; i < req.length; i++) {
+      for (let i = 0; i < req.length; i++) {
         if (req[i].id === "saveTestAuto") {
           this.needToSave = true;
           this.desc = req[i].content;
@@ -279,7 +299,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
       if (this.inputMessages.length === 0)
         this.inputMessages.push({content: req, time: currentTime});
       else {
-        var delay;
+        let delay;
         //
         // If I didn't receive any output message yet, calculate the delay since last input message
         if (this.outputMessages.length === 0)
@@ -309,7 +329,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
             if (this.paused)
               this.totPauseTime += currentTime - this.pauseTimeStamp;
             //
-            var delayToPush = (delay - this.totPauseTime) > 0 ? (delay - this.totPauseTime) : 0;
+            let delayToPush = (delay - this.totPauseTime) > 0 ? (delay - this.totPauseTime) : 0;
             this.delays.push(delayToPush);
             this.reqClosed = true;
             this.totPauseTime = 0;
@@ -321,7 +341,7 @@ Node.TestAuto.prototype.sniff = function (req, cts)
     }
   }
   else { // Server command
-    var syntReq = this.synthesizeReq(req);
+    let syntReq = this.synthesizeReq(req);
     this.outputMessages.push({content: syntReq, time: currentTime});
     //
     // Process next request
@@ -342,49 +362,45 @@ Node.TestAuto.prototype.sniff = function (req, cts)
  * */
 Node.TestAuto.prototype.synthesizeReq = function (req)
 {
-  var synReq = [];
-  for (var i = 0; i < req.length; i++)
-    synReq.push({id: req[i].id, obj: req[i].obj});
-  //
-  return synReq;
+  return req.map(r => ({id: r.id, obj: r.obj}));
 };
 
 
 /**
- * Save given exception adding it to my exceptions list
- * @param {Exception} ex
+ * Save an exception received from the application during test execution
+ * @param {Exception} ex - Exception object containing:
+ *                        - msg: error message
+ *                        - stack: error stack trace (optional)
  * */
 Node.TestAuto.prototype.saveException = function (ex)
 {
-  var exception = {};
-  exception.occurr = 1;
-  exception.msg = ex.msg;
+  // Create exception object with initial occurrence counter
+  let exception = {
+    occurr: 1,
+    msg: ex.msg
+  };
+  //
+  // Extract method name from stack trace if available
   if (ex.stack) {
-    var atPos = ex.stack.indexOf("at") + 3;
-    var wholeStackMsg = ex.stack.substring(atPos);
-    var stackMsg = wholeStackMsg.substring(0, wholeStackMsg.indexOf(" "));
+    let atPos = ex.stack.indexOf("at") + 3;
+    let wholeStackMsg = ex.stack.substring(atPos);
+    let stackMsg = wholeStackMsg.substring(0, wholeStackMsg.indexOf(" "));
     exception.method = stackMsg;
   }
   //
-  // Save exceptions as parent result. In case of step-by-step the parent is myself
-  var testAuto = this.parent || this;
+  // Save exception to parent test results
+  // (in step-by-step mode the parent is the test itself)
+  let testAuto = this.parent || this;
   //
-  // Check if need to save this exception
-  var insert = true;
-  for (var i = 0; i < testAuto.testResult.exceptions.length; i++) {
-    // Save old occurr value and temporarily set it to 1 to compare exceptions without this property
-    var occurr = testAuto.testResult.exceptions[i].occurr;
-    testAuto.testResult.exceptions[i].occurr = 1;
-    if (JSON.stringify(testAuto.testResult.exceptions[i]) === JSON.stringify(exception)) {
-      insert = false;
-      testAuto.testResult.exceptions[i].occurr = occurr + 1;
-      break;
-    }
-    else
-      testAuto.testResult.exceptions[i].occurr = occurr;
-  }
+  // Check if an identical exception already exists (same message and method)
+  let existingException = testAuto.testResult.exceptions.find(e =>
+    e.msg === exception.msg && e.method === exception.method
+  );
   //
-  if (insert)
+  // Increment counter if exception exists, otherwise add it to the list
+  if (existingException)
+    existingException.occurr++;
+  else
     testAuto.testResult.exceptions.push(exception);
 };
 
@@ -392,7 +408,7 @@ Node.TestAuto.prototype.saveException = function (ex)
 /**
  * Save recorded session
  * */
-Node.TestAuto.prototype.save = function ()
+Node.TestAuto.prototype.save = async function ()
 {
   // Sometimes there are client messages without a releted server response.
   // These will result in a pending request, so close it.
@@ -402,8 +418,8 @@ Node.TestAuto.prototype.save = function ()
   delete this.needToSave;
   //
   // Cut all delays greater than 1000 ms
-  var totDelays = 0;
-  for (var i = 0; i < this.delays.length - 1; i++) {
+  let totDelays = 0;
+  for (let i = 0; i < this.delays.length - 1; i++) {
     this.delays[i] = this.delays[i] > 1000 ? 1000 : this.delays[i];
     totDelays += this.delays[i];
   }
@@ -411,33 +427,31 @@ Node.TestAuto.prototype.save = function ()
   this.delays[this.delays.length - 1] = 1000;
   //
   // Create recorded session object
-  var rec = {};
-  rec.requests = this.requests;
-  rec.delays = this.delays;
-  rec.description = this.desc;
-  rec.duration = totDelays + 1000;
-  rec.consoleTest = this.consoleTest;
-  rec.objectsMap = this.objectsMap;
+  let rec = {
+    requests : this.requests,
+    delays : this.delays,
+    description : this.desc,
+    duration : totDelays + 1000,
+    consoleTest : this.consoleTest,
+    objectsMap : this.objectsMap
+  };
   //
   // Upload file to GCloud
-  var archiver = new Node.Archiver(this.app.server);
-  archiver.saveObject(this.pathList[0], JSON.stringify(rec), function (err) {
-    if (err) {
-      // Send error to console
-      this.consoleRequest.sendResponse(this.rid, 500, err);
-      //
-      // Terminate test session
-      this.terminate();
-      return;
-    }
+  let archiver = new Node.Archiver(this.app.server);
+  try {
+    await archiver.saveObject(this.pathList[0], JSON.stringify(rec));
     //
     // Send response to console
-    var responseText = JSON.stringify({duration: parseInt(rec.duration / 1000), description: rec.description});
+    let responseText = JSON.stringify({duration: parseInt(rec.duration / 1000), description: rec.description});
     this.consoleRequest.sendResponse(this.rid, 200, responseText);
-    //
-    // Terminate test session
-    this.terminate();
-  }.bind(this));
+  }
+  catch (err) {
+    // Send error to console
+    this.consoleRequest.sendResponse(this.rid, 500, err);
+  }
+  //
+  // Terminate test session
+  this.terminate();
 };
 
 
@@ -464,14 +478,12 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
   delete this.killSessionTimeout;
   //
   // Check if test is ended
-  var ev;
   if (this.reqIndex === this.requests.length) {
     this.paused = true;
-    var duration = new Date().getTime() - this.startTime;
     //
     // If a browser is involved in testing send info about test to it
     if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
-      var msgContent = {
+      let msgContent = {
         id: "endTest",
         exceptions: this.testResult.exceptions,
         consoleTestErrors: this.testResult.consoleTestErrors,
@@ -479,8 +491,16 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         noResponseErrors: this.testResult.noResponseErrors,
         slownessWarnings: this.testResult.slownessWarnings
       };
-      ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: msgContent}}];
-      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
+      this.session.sendMessageToClientApp({
+        type: Node.TestAuto.msgTypeMap.appmsg,
+        content: [{
+          id: "sendMessageToTestAuto",
+          cnt: {
+            type: "testAutoMsg",
+            content: msgContent
+          }
+        }]
+      });
       //
       this.testResult.duration = parseInt(this.recDuration / 1000);
       this.testResult.percentageCompleted = 100;
@@ -499,19 +519,30 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     return;
   }
   //
-  var req = [];
-  var delay = 0;
+  let req = [];
+  let delay = 0;
   //
   // If play request is caused by a step forward command, tell preview to update its timer adding giving value
   if (this.mode === Node.TestAuto.ModeMap.stepByStep && stepForward) {
-    ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "updateTimer", millisecToAdd: this.delays[this.reqIndex]}}}];
-    this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
+    this.session.sendMessageToClientApp({
+      type: Node.TestAuto.msgTypeMap.appmsg,
+      content: [{
+        id: "sendMessageToTestAuto",
+        cnt: {
+          type: "testAutoMsg",
+          content: {
+            id: "updateTimer",
+            millisecToAdd: this.delays[this.reqIndex]
+          }
+        }
+      }]
+    });
   }
   //
   // Get next delay
   delay = !this.paused ? this.delays[this.reqIndex] : 0;
   //
-  this.playTimeout = setTimeout(function () {
+  this.playTimeout = setTimeout(() => {
     // Clear timeouts
     clearTimeout(this.playTimeout);
     delete this.playTimeout;
@@ -527,13 +558,25 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     //
     // Tell preview to update its requests counter
     if (this.mode === Node.TestAuto.ModeMap.stepByStep) {
-      var ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "updateReqNumber", reqIndex: this.reqIndex, reqTotal: this.requests.length}}}];
-      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
+      this.session.sendMessageToClientApp({
+        type: Node.TestAuto.msgTypeMap.appmsg,
+        content: [{
+          id: "sendMessageToTestAuto",
+          cnt: {
+            type: "testAutoMsg",
+            content: {
+              id: "updateReqNumber",
+              reqIndex: this.reqIndex,
+              reqTotal: this.requests.length
+            }
+          }
+        }]
+      });
     }
     //
     // Set expected number of responses
     this.expectedResponses = 0;
-    for (var i = 0; i < req.output.length; i++)
+    for (let i = 0; i < req.output.length; i++)
       this.expectedResponses += req.output[i].content.length;
     //
     // this.expectedResponses changes every time a response come from server.
@@ -542,9 +585,9 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     this.outputLength = this.expectedResponses;
     //
     // Process request
-    var processRequest = function (request, i, timer) {
-      setTimeout(function () {
-        for (var j = 0; j < request.input[i].content.length; j++) {
+    let processRequest = (request, i, timer) => {
+      setTimeout(() => {
+        for (let j = 0; j < request.input[i].content.length; j++) {
           if (request.input[i].content[j].id === "saveTaggingData") {
             // In step-by-step mode, when I'm processing saveTaggingData command
             // I send recorded taggingData to client, so it can compare values with
@@ -553,10 +596,10 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
               this.paused = true;
             //
             // If needed, convert remelems id to the new ones
-            var tagValues = request.input[i].content[j].content;
+            let tagValues = request.input[i].content[j].content;
             if (tagValues) {
-              var newId;
-              for (var k = 0; k < tagValues.length; k++) {
+              let newId;
+              for (let k = 0; k < tagValues.length; k++) {
                 // Skip popup elements
                 if (tagValues[k].elId === "popup")
                   continue;
@@ -572,8 +615,14 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
               }
               //
               // Tell client to calculate tag results
-              ev = [{id: "calculateTagResults", content: tagValues}];
-              this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: ev});
+              this.session.sendToChild({
+                type: Node.TestAuto.msgTypeMap.appmsg,
+                sid: this.session.id,
+                content: [{
+                  id: "calculateTagResults",
+                  content: tagValues
+                }]
+              });
             }
           }
           else if (request.input[i].content[j].id === "popupBoxReturn") {
@@ -585,19 +634,24 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         }
         //
         // If needed, convert remelems id to the new ones
-        var input = request.input[i].content;
-        for (var k = 0; k < input.length; k++)
+        let input = request.input[i].content;
+        for (let k = 0; k < input.length; k++)
           input[k].obj = this.getNewIdFromOldId(input[k].obj) || input[k].obj;
         //
-        this.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: this.session.id, content: input, request: {}});
-      }.bind(this), timer);
-    }.bind(this);
+        this.session.sendToChild({
+          type: Node.TestAuto.msgTypeMap.appmsg,
+          sid: this.session.id,
+          content: input,
+          request: {}
+        });
+      }, timer);
+    };
     //
     // A client request can be multiple (i.e. it can consists of more sub-request).
     // Process all them
-    var reqDelay = 0;
-    for (var i = 0; i < req.input.length; i++) {
-      var timeout = req.input[i - 1] ? req.input[i].time - req.input[i - 1].time : 0;
+    let reqDelay = 0;
+    for (let i = 0; i < req.input.length; i++) {
+      let timeout = req.input[i - 1] ? req.input[i].time - req.input[i - 1].time : 0;
       reqDelay += timeout;
       processRequest(req, i, reqDelay);
     }
@@ -606,10 +660,10 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
     // When replay is paused it means I'm replay step-by-step, so I don't want to automatically play next request
     if (!this.paused) {
       // Try to play next request if test has not done yet by itself
-      var reqDuration = this.getReqDuration(req);
+      let reqDuration = this.getReqDuration(req);
       //
       // Set min delay to 1 second
-      var nextDelay = Math.max(1000, reqDuration * 5);
+      let nextDelay = Math.max(1000, reqDuration * 5);
       //
       // Set max delay to 10 seconds (or to reqDuration * 2 if this calculation is greater than 10 seconds)
       nextDelay = Math.min(Math.max(10000, reqDuration * 2), nextDelay);
@@ -618,31 +672,31 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
       nextDelay = (reqDuration >= 10000) ? reqDuration * 2 : nextDelay;
       //
       // Get slow and kill timer from parent (load or non-reg test) or from test itself (step-by-step test)
-      var st = this.parent ? this.parent.slowTimer : this.slowTimer;
-      var kt = this.parent ? this.parent.killTimer : this.killTimer;
+      let st = this.parent ? this.parent.slowTimer : this.slowTimer;
+      let kt = this.parent ? this.parent.killTimer : this.killTimer;
       //
       // Calculate delays to notify session slowness or session killing
-      var slowDelay = st ? Math.max(st, nextDelay) : nextDelay;
-      var killDelay = kt ? Math.max(kt, nextDelay) : nextDelay;
+      let slowDelay = st ? Math.max(st, nextDelay) : nextDelay;
+      let killDelay = kt ? Math.max(kt, nextDelay) : nextDelay;
       //
       // If the delayes are the same, posticipate killDelay
       if (slowDelay === killDelay)
         killDelay = slowDelay + 500;
       //
-      this.slowSessionTimeout = setTimeout(function (request, timeout) {
+      this.slowSessionTimeout = setTimeout(() => {
         clearTimeout(this.slowSessionTimeout);
         delete this.slowSessionTimeout;
         //
         if (this.outputLength !== 0 && this.outputLength === this.expectedResponses)
-          this.saveNoResponse(request, timeout, true);
-      }.bind(this, req, slowDelay), slowDelay);
+          this.saveNoResponse(req, slowDelay, true);
+      }, slowDelay);
       //
-      this.killSessionTimeout = setTimeout(function (request, timeout) {
+      this.killSessionTimeout = setTimeout(() => {
         clearTimeout(this.killSessionTimeout);
         delete this.killSessionTimeout;
         //
         if (this.outputLength !== 0 && this.outputLength === this.expectedResponses) {
-          this.saveNoResponse(request, timeout);
+          this.saveNoResponse(req, killDelay);
           //
           if (this.mode !== Node.TestAuto.ModeMap.stepByStep) {
             this.parent.onTerminateTest(this.childId);
@@ -654,13 +708,13 @@ Node.TestAuto.prototype.playRequest = function (stepForward)
         }
         //
         this.playRequest();
-      }.bind(this, req, killDelay), killDelay);
+      }, killDelay);
       //
       // No need to wait for response. Process next request
       if (req.output.length === 0)
         this.playRequest();
     }
-  }.bind(this), delay);
+  }, delay);
 };
 
 
@@ -717,37 +771,28 @@ Node.TestAuto.prototype.play = function ()
 /**
  * Get recording file/files to replay
  * */
-Node.TestAuto.prototype.getRecording = function ()
+Node.TestAuto.prototype.getRecording = async function ()
 {
-  var readFile = function (filePath) {
-    // Read file from GCloud
-    var archiver = new Node.Archiver(this.app.server);
-    archiver.readObject(filePath, function (res, err) {
-      if (err) {
-        // Send error to console
-        this.consoleRequest.sendResponse(this.rid, 500, err);
-        //
-        // Terminate test session
-        this.terminate();
-        return;
-      }
+  let archiver = new Node.Archiver(this.app.server);
+  for (let i = 0; i < this.pathList.length; i++) {
+    try {
+      // Read file from GCloud
+      this.recFiles.push(await archiver.readObject(this.pathList[i]));
+    }
+    catch (err) {
+      // Send error to console
+      this.consoleRequest.sendResponse(this.rid, 500, err);
       //
-      // Get file content and name
-      this.recFiles.push(res);
-      //
-      // Check if I've read all files
-      if (this.recFiles.length === this.pathList.length) {
-        // Prepare test replay
-        this.prepareReplay();
-      }
-    }.bind(this));
-  }.bind(this);
-
+      // Terminate test session
+      this.terminate();
+      return;
+    }
+  }
   //
-  // Get files
-  for (var i = 0; i < this.pathList.length; i++)
-    readFile(this.pathList[i]);
+  // Prepare test replay
+  this.prepareReplay();
 };
+
 
 /**
  * Prepare replay creating sessions
@@ -766,7 +811,7 @@ Node.TestAuto.prototype.prepareReplay = function ()
   // client. In fact I'll create a session for each recording I want to replay and they
   // will do the work.
   switch (this.mode) {
-    case Node.TestAuto.ModeMap.stepByStep:
+    case Node.TestAuto.ModeMap.stepByStep: {
       this.requests = this.recFiles[0].requests;
       this.delays = this.recFiles[0].delays;
       this.consoleTest = this.recFiles[0].consoleTest;
@@ -775,45 +820,58 @@ Node.TestAuto.prototype.prepareReplay = function ()
       this.filesReady = true;
       //
       // Tell client test replay is ready to start
-      var ev = [{id: "sendMessageToTestAuto", cnt: {type: "testAutoMsg", content: {id: "readyToStart"}}}];
-      this.session.sendMessageToClientApp({type: Node.TestAuto.msgTypeMap.appmsg, content: ev});
+      this.session.sendMessageToClientApp({
+        type: Node.TestAuto.msgTypeMap.appmsg,
+        content: [{
+          id: "sendMessageToTestAuto",
+          cnt: {
+            type: "testAutoMsg",
+            content: {
+              id: "readyToStart"
+            }
+          }
+        }]
+      });
       break;
+    }
 
-    case Node.TestAuto.ModeMap.nonReg:
-      var test = {};
-      test.requests = this.recFiles[0].requests;
-      test.delays = this.recFiles[0].delays;
-      test.consoleTest = this.recFiles[0].consoleTest;
-      test.recDuration = this.recFiles[0].duration;
-      test.objectsMap = this.recFiles[0].objectsMap || {};
+    case Node.TestAuto.ModeMap.nonReg: {
+      let test = {
+        requests: this.recFiles[0].requests,
+        delays: this.recFiles[0].delays,
+        consoleTest: this.recFiles[0].consoleTest,
+        recDuration: this.recFiles[0].duration,
+        objectsMap: this.recFiles[0].objectsMap || {}
+      };
       //
       // Create a child test auto to execute test
       this.createChild(test);
       break;
+    }
 
-    case Node.TestAuto.ModeMap.load:
-      for (var i = 0; i < this.recFiles.length; i++)
+    case Node.TestAuto.ModeMap.load: {
+      for (let i = 0; i < this.recFiles.length; i++)
         this.consoleTest = this.consoleTest.concat(this.recFiles[i].consoleTest);
       //
       // Set slot duration
-      var slotDuration = parseFloat(this.replayDuration / 5);
+      let slotDuration = parseFloat(this.replayDuration / 5);
       //
-      var currentSlot = 0;
+      let currentSlot = 0;
       //
       // Set children number to create in first slot (10% of total)
-      var slotChildren = parseFloat((this.maxSessions * 10) / 100);
+      let slotChildren = parseFloat((this.maxSessions * 10) / 100);
       //
       // Set child time for first slot (i.e. delay between two consecutives children creation)
-      var childTime = parseInt((slotDuration / slotChildren) * 1000);
+      let childTime = parseInt((slotDuration / slotChildren) * 1000);
       //
       // Number of children created into current slot
-      var currentSlotChildren = 0;
+      let currentSlotChildren = 0;
       //
       // Total children created
       this.totalChildren = 0;
       //
       // Callback for create child timeout
-      var loadCallback = function () {
+      let loadCallback = () => {
         // If I created all requested children, do nothing else
         if (this.totalChildren === this.maxSessions) {
           clearTimeout(this.loadTimeout);
@@ -821,14 +879,15 @@ Node.TestAuto.prototype.prepareReplay = function ()
           return;
         }
         //
-        var fileIndexToUse = this.totalChildren % this.recFiles.length;
+        let fileIndexToUse = this.totalChildren % this.recFiles.length;
         //
-        var test = {};
-        test.requests = this.recFiles[fileIndexToUse].requests;
-        test.delays = this.recFiles[fileIndexToUse].delays;
-        test.recDuration = this.recFiles[fileIndexToUse].duration;
-        test.consoleTest = this.recFiles[fileIndexToUse].consoleTest;
-        test.objectsMap = this.recFiles[fileIndexToUse].objectsMap || {};
+        let test = {
+          requests: this.recFiles[fileIndexToUse].requests,
+          delays: this.recFiles[fileIndexToUse].delays,
+          recDuration: this.recFiles[fileIndexToUse].duration,
+          consoleTest: this.recFiles[fileIndexToUse].consoleTest,
+          objectsMap: this.recFiles[fileIndexToUse].objectsMap || {}
+        };
         //
         currentSlotChildren++;
         this.totalChildren++;
@@ -866,39 +925,40 @@ Node.TestAuto.prototype.prepareReplay = function ()
         //
         // Create next child
         this.loadTimeout = setTimeout(loadCallback, childTime);
-      }.bind(this);
+      };
       //
       // Start creating children
       this.loadTimeout = setTimeout(loadCallback, childTime);
       break;
+    }
   }
   //
   // Set 1 sec interval to get results
-  if ([Node.TestAuto.ModeMap.load, Node.TestAuto.ModeMap.nonReg].indexOf(this.mode) !== -1) {
-    this.resultInterval = setInterval(function () {
+  if ([Node.TestAuto.ModeMap.load, Node.TestAuto.ModeMap.nonReg].includes(this.mode)) {
+    this.resultInterval = setInterval(() => {
       // Calculate cpu usage
-      Node.Utils.getCPUload(function (cpuUsage) {
+      Node.Utils.getCPUload().then(cpuUsage => {
         // Save last 10 cpu usage values
         if (this.lastCPUValues.length > 10)
           this.lastCPUValues.splice(0, 1);
         //
         this.lastCPUValues.push(cpuUsage);
         //
-        var sum = 0;
-        for (var i = 0; i < this.lastCPUValues.length; i++)
+        let sum = 0;
+        for (let i = 0; i < this.lastCPUValues.length; i++)
           sum += this.lastCPUValues[i];
         //
-        var cpuAvg = Math.round((sum / this.lastCPUValues.length) * 100) / 100;    // 2 dec digits
+        let cpuAvg = Math.round((sum / this.lastCPUValues.length) * 100) / 100;    // 2 dec digits
         this.testResult.cpu.push(cpuAvg);
-      }.bind(this));
+      });
       //
       // Calculate memory usage
-      var freeMem = (Node.os.freemem() / (1024 * 1024)).toFixed(2);
-      var totalMem = (Node.os.totalmem() / (1024 * 1024)).toFixed(2);
-      var memoryUsage = ((totalMem - freeMem) * 100 / totalMem).toFixed(2);
+      let freeMem = (Node.os.freemem() / (1024 * 1024)).toFixed(2);
+      let totalMem = (Node.os.totalmem() / (1024 * 1024)).toFixed(2);
+      let memoryUsage = ((totalMem - freeMem) * 100 / totalMem).toFixed(2);
       this.testResult.memory.push(memoryUsage);
       //
-      var childrenIds = Object.keys(this.children);
+      let childrenIds = Object.keys(this.children);
       //
       this.testResult.activeSessions.push(childrenIds.length);
       //
@@ -907,7 +967,7 @@ Node.TestAuto.prototype.prepareReplay = function ()
         this.testResult.percentageCompleted = (((this.testsEnded || 0) + this.totalChildren) * 100) / (this.maxSessions * 2);
       else
         this.testResult.percentageCompleted = (this.children[childrenIds[0]].reqIndex * 100) / this.children[childrenIds[0]].requests.length;
-    }.bind(this), 1000);
+    }, 1000);
   }
 };
 
@@ -927,9 +987,19 @@ Node.TestAuto.prototype.reset = function (options)
   this.outputMessages = [];
   this.delays = [];
   this.consoleTest = [];
-  this.testResult = {cpu: [], memory: [], activeSessions: [], exceptions: [], tagErrors: [],
-    noResponseErrors: [], slownessWarnings: [], consoleTestErrors: [], totErrors: [],
-    percentageCompleted: 0, nonCreatedSessions: 0};
+  this.testResult = {
+    cpu: [],
+    memory: [],
+    activeSessions: [],
+    exceptions: [],
+    tagErrors: [],
+    noResponseErrors: [],
+    slownessWarnings: [],
+    consoleTestErrors: [],
+    totErrors: [],
+    percentageCompleted: 0,
+    nonCreatedSessions: 0
+  };
   this.lastCPUValues = [];
   this.reqIndex = 0;
   this.startTime = 0;
@@ -959,7 +1029,7 @@ Node.TestAuto.prototype.onDisconnectClient = function ()
 {
   if (this.needToSave)
     this.save();
-  else if ([Node.TestAuto.ModeMap.rec, Node.TestAuto.ModeMap.stepByStep].indexOf(this.mode) !== -1 && !this.terminated) {
+  else if ([Node.TestAuto.ModeMap.rec, Node.TestAuto.ModeMap.stepByStep].includes(this.mode) && !this.terminated) {
     // Send response to console
     this.consoleRequest.sendResponse(this.rid, 499, "Client disconnected");
     //
@@ -977,7 +1047,7 @@ Node.TestAuto.prototype.onDisconnectClient = function ()
  * */
 Node.TestAuto.prototype.createChild = function (test)
 {
-  var options = {
+  let options = {
     id: this.id,
     mode: this.mode,
     duration: this.replayDuration ? parseInt(this.replayDuration) : 0,
@@ -985,7 +1055,7 @@ Node.TestAuto.prototype.createChild = function (test)
   };
   //
   // Create new test session
-  var session = this.app.createNewSession();
+  let session = this.app.createNewSession();
   //
   // If there isn't a session it means numbers of active sessions has reached the maximum number of sessions
   // server can handle. So it's not possible to create another session
@@ -997,11 +1067,11 @@ Node.TestAuto.prototype.createChild = function (test)
   session.testAutoId = this.id;
   //
   // Create app client
-  var req = {query: {}};
-  var res = {};
-  res.redirect = function () {
+  let req = {query: {}};
+  let res = {};
+  res.redirect = () => {
   };
-  var appClient = session.createAppClient(req, res);
+  let appClient = session.createAppClient(req, res);
   //
   // If needed ask the worker to create the physical child process
   if (!session.worker.child)
@@ -1015,7 +1085,7 @@ Node.TestAuto.prototype.createChild = function (test)
   }
   //
   // Create a child test auto
-  var childTestAuto = new Node.TestAuto(this.app, options);
+  let childTestAuto = new Node.TestAuto(this.app, options);
   childTestAuto.childId = Node.Utils.generateUID24();
   childTestAuto.parent = this;
   childTestAuto.session = session;
@@ -1031,8 +1101,13 @@ Node.TestAuto.prototype.createChild = function (test)
   this.children[childTestAuto.childId] = childTestAuto;
   //
   // Tell app this is a test auto
-  var ev = [{id: "setTestAuto"}];
-  childTestAuto.session.sendToChild({type: Node.TestAuto.msgTypeMap.appmsg, sid: childTestAuto.session.id, content: ev});
+  childTestAuto.session.sendToChild({
+    type: Node.TestAuto.msgTypeMap.appmsg,
+    sid: childTestAuto.session.id,
+    content: [{
+      id: "setTestAuto"
+    }]
+  }); 
   //
   // Starting play requests
   this.children[childTestAuto.childId].playRequest();
@@ -1059,29 +1134,27 @@ Node.TestAuto.prototype.onTerminateTest = function (id)
   if (this.mode === Node.TestAuto.ModeMap.load)
     this.testResult.percentageCompleted = ((this.testsEnded + this.totalChildren) * 100) / (this.maxSessions * 2);
   //
-  var i;
-  //
   // Calculate total exceptions occurred
-  var totExceptions = 0, totTagErrors = 0, totConsoleTestErrors = 0, totNoResponseErrors = 0;
-  for (i = 0; i < this.testResult.exceptions.length; i++)
+  let totExceptions = 0, totTagErrors = 0, totConsoleTestErrors = 0, totNoResponseErrors = 0;
+  for (let i = 0; i < this.testResult.exceptions.length; i++)
     totExceptions += this.testResult.exceptions[i].occurr;
   //
   // Calculate total tag errors occurred
-  for (i = 0; i < this.testResult.tagErrors.length; i++)
+  for (let i = 0; i < this.testResult.tagErrors.length; i++)
     totTagErrors += this.testResult.tagErrors[i].occurr;
   //
   // Calculate total console test errors occurred
-  for (i = 0; i < this.testResult.consoleTestErrors.length; i++)
+  for (let i = 0; i < this.testResult.consoleTestErrors.length; i++)
     totConsoleTestErrors += this.testResult.consoleTestErrors[i].occurr;
   //
   // Calculate total no response errors occurred
-  for (i = 0; i < this.testResult.noResponseErrors.length; i++)
+  for (let i = 0; i < this.testResult.noResponseErrors.length; i++)
     totNoResponseErrors += this.testResult.noResponseErrors[i].occurr;
   //
   // Calculate error average for ended session
   this.totalSessionsError = totExceptions + totTagErrors + totConsoleTestErrors + totNoResponseErrors;
-  var totChildren = this.mode === Node.TestAuto.ModeMap.load ? this.totalChildren : 1;
-  var totErrors = this.totalSessionsError / totChildren;
+  let totChildren = this.mode === Node.TestAuto.ModeMap.load ? this.totalChildren : 1;
+  let totErrors = this.totalSessionsError / totChildren;
   this.testResult.totErrors.push(totErrors.toFixed(2));
   //
   if (this.testsEnded === this.maxSessions) {
@@ -1114,28 +1187,29 @@ Node.TestAuto.prototype.saveTagResults = function (res)
     return;
   //
   // Save tag as parent result. In case of step-by-step the parent is myself
-  var testAuto = this.parent || this;
+  let testAuto = this.parent || this;
   //
   // Save just tag with errors
-  for (var i = 0; i < res.length; i++) {
+  for (let i = 0; i < res.length; i++) {
     if (res[i].error && res[i].props) {
-      for (var k = 0; k < res[i].props.length; k++) {
+      for (let k = 0; k < res[i].props.length; k++) {
         if ((res[i].props[k].oldValue !== res[i].props[k].newValue) || res[i].elNotFound) {
-          var insert = true;
-          var tagErr = {};
-          tagErr.requestNumber = testAuto.reqIndex - 1;
-          tagErr.elId = res[i].elId;
-          tagErr.elName = res[i].elName;
-          tagErr.viewName = res[i].viewName;
-          tagErr.error = true;
-          tagErr.elNotFound = res[i].elNotFound;
-          tagErr.propName = res[i].props[k].propName;
-          tagErr.oldValue = res[i].props[k].oldValue;
-          tagErr.newValue = res[i].props[k].newValue;
-          tagErr.occurr = 1;
+          let insert = true;
+          let tagErr = {
+            requestNumber: testAuto.reqIndex - 1,
+            elId: res[i].elId,
+            elName: res[i].elName,
+            viewName: res[i].viewName,
+            error: true,
+            elNotFound: res[i].elNotFound,
+            propName: res[i].props[k].propName,
+            oldValue: res[i].props[k].oldValue,
+            newValue: res[i].props[k].newValue,
+            occurr: 1
+          };
           //
-          for (var j = 0; j < testAuto.testResult.tagErrors.length; j++) {
-            var occurr = testAuto.testResult.tagErrors[j].occurr;
+          for (let j = 0; j < testAuto.testResult.tagErrors.length; j++) {
+            let occurr = testAuto.testResult.tagErrors[j].occurr;
             testAuto.testResult.tagErrors[j].occurr = 1;
             if (JSON.stringify(testAuto.testResult.tagErrors[j]) === JSON.stringify(tagErr)) {
               insert = false;
@@ -1167,27 +1241,26 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
     return;
   //
   // Save consoleTestResults as parent result. In case of step-by-step the parent is myself
-  var testAuto = this.parent || this;
-  var i;
-  for (i = 0; i < this.consoleTest.length; i++) {
+  let testAuto = this.parent || this;
+  for (let i = 0; i < this.consoleTest.length; i++) {
     // If I found the same console test into my saved list, don't save this console test as error
-    if (this.consoleTest[i].name === consoleTest.name &&
-            this.consoleTest[i].value === consoleTest.value)
+    if (this.consoleTest[i].name === consoleTest.name && this.consoleTest[i].value === consoleTest.value)
       return;
   }
   //
-  for (i = 0; i < this.consoleTest.length; i++) {
+  for (let i = 0; i < this.consoleTest.length; i++) {
     if (this.consoleTest[i].name === consoleTest.name && this.consoleTest[i].value !== consoleTest.value) {
-      var obj = {};
-      obj.name = consoleTest.name;
-      obj.oldValue = this.consoleTest[i].value;
-      obj.newValue = consoleTest.value;
-      obj.occurr = 1;
+      let obj = {
+        name: consoleTest.name,
+        oldValue: this.consoleTest[i].value,
+        newValue: consoleTest.value,
+        occurr: 1
+      };
       //
-      var insert = true;
-      for (var j = 0; j < testAuto.testResult.consoleTestErrors.length; j++) {
+      let insert = true;
+      for (let j = 0; j < testAuto.testResult.consoleTestErrors.length; j++) {
         // Save old occurr value and temporarily set it to 1 to compare console tests without this property
-        var occurr = testAuto.testResult.consoleTestErrors[j].occurr;
+        let occurr = testAuto.testResult.consoleTestErrors[j].occurr;
         testAuto.testResult.consoleTestErrors[j].occurr = 1;
         if (JSON.stringify(testAuto.testResult.consoleTestErrors[j]) === JSON.stringify(obj)) {
           insert = false;
@@ -1214,16 +1287,15 @@ Node.TestAuto.prototype.saveConsoleTestResults = function (consoleTest)
  * */
 Node.TestAuto.prototype.saveNoResponse = function (req, timeout, slowness)
 {
-  var testAuto = this.parent || this;
+  let testAuto = this.parent || this;
   //
   // Extract object and operation from req
-  var operation;
-  var object;
-  if (req && req.input) {
-    for (var i = 0; i < req.input.length; i++) {
-      var exit = false;
+  let operation, object;
+  if (req?.input) {
+    for (let i = 0; i < req.input.length; i++) {
+      let exit = false;
       if (req.input[i].content) {
-        for (var j = 0; j < req.input[i].content.length; j++) {
+        for (let j = 0; j < req.input[i].content.length; j++) {
           operation = req.input[i].content[j].id;
           object = req.input[i].content[j].obj;
           exit = true;
@@ -1236,20 +1308,20 @@ Node.TestAuto.prototype.saveNoResponse = function (req, timeout, slowness)
     }
   }
   //
-  var obj = {};
-  obj.requestNumber = this.reqIndex - 1;
-  obj.originalRequestDuration = this.getReqDuration(req);
-  obj.message = slowness ? "Session was slow" : "Server didn't respond";
-  obj.operation = operation;
-  obj.object = object;
-  obj.timeout = timeout;
-  obj.occurr = 1;
+  let obj = {
+    requestNumber: this.reqIndex - 1,
+    originalRequestDuration: this.getReqDuration(req),
+    message: slowness ? "Session was slow" : "Server didn't respond",
+    operation,
+    object,
+    timeout,
+    occurr: 1
+  };
   //
   // Check if need to save this error
-  var i;
-  var insert = true;
-  var arr = slowness ? testAuto.testResult.slownessWarnings : testAuto.testResult.noResponseErrors;
-  for (i = 0; i < arr.length; i++) {
+  let insert = true;
+  let arr = slowness ? testAuto.testResult.slownessWarnings : testAuto.testResult.noResponseErrors;
+  for (let i = 0; i < arr.length; i++) {
     if (arr[i].requestNumber === obj.requestNumber) {
       insert = false;
       arr[i].occurr++;
@@ -1263,7 +1335,7 @@ Node.TestAuto.prototype.saveNoResponse = function (req, timeout, slowness)
   // When I save a no response error I have to remove an occurrencies from slowness warnings
   // because what was previously a warning is now an error
   if (!slowness) {
-    for (i = 0; i < testAuto.testResult.slownessWarnings.length; i++) {
+    for (let i = 0; i < testAuto.testResult.slownessWarnings.length; i++) {
       if (testAuto.testResult.slownessWarnings[i].requestNumber === obj.requestNumber) {
         testAuto.testResult.slownessWarnings[i].occurr--;
         //
@@ -1305,9 +1377,9 @@ Node.TestAuto.prototype.saveResults = function (res, overload)
 Node.TestAuto.prototype.terminate = function ()
 {
   // Terminate children
-  var ids = Object.keys(this.children);
-  for (var i = 0; i < ids.length; i++) {
-    var child = this.children[ids[i]];
+  let ids = Object.keys(this.children);
+  for (let i = 0; i < ids.length; i++) {
+    let child = this.children[ids[i]];
     if (child.session && child.session.worker)
       child.session.worker.deleteSession(child.session);
   }
@@ -1334,16 +1406,11 @@ Node.TestAuto.prototype.terminate = function ()
  * */
 Node.TestAuto.prototype.getChildBySID = function (sid)
 {
-  var child;
-  var ids = Object.keys(this.children);
-  for (var i = 0; i < ids.length; i++) {
-    if (this.children[ids[i]].session && this.children[ids[i]].session.id === sid) {
-      child = this.children[ids[i]];
-      break;
-    }
+  let ids = Object.keys(this.children);
+  for (let i = 0; i < ids.length; i++) {
+    if (this.children[ids[i]].session && this.children[ids[i]].session.id === sid)
+      return this.children[ids[i]];
   }
-  //
-  return child;
 };
 
 
@@ -1358,8 +1425,8 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
     // the same pid (i.e. dataMap rows or cloned objects)
     this.objectsMap[obj.pid] = this.objectsMap[obj.pid] || [];
     //
-    var oldIdPos = -1;
-    for (var i = 0; i < this.objectsMap[obj.pid].length; i++) {
+    let oldIdPos = -1;
+    for (let i = 0; i < this.objectsMap[obj.pid].length; i++) {
       if (this.objectsMap[obj.pid][i].oldId === obj.id) {
         oldIdPos = i;
         break;
@@ -1370,7 +1437,7 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
         this.objectsMap[obj.pid].push({oldId: obj.id});
     }
     else {
-      for (var i = 0; i < this.objectsMap[obj.pid].length; i++) {
+      for (let i = 0; i < this.objectsMap[obj.pid].length; i++) {
         if (this.objectsMap[obj.pid][i].newId === obj.id)
           break;
         else if (!this.objectsMap[obj.pid][i].newId) {
@@ -1382,12 +1449,12 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
   }
   //
   if (obj.children) {
-    for (var i = 0; i < obj.children.length; i++)
+    for (let i = 0; i < obj.children.length; i++)
       this.addObjToMap(obj.children[i]);
   }
   //
   if (obj.elements) {
-    for (var i = 0; i < obj.elements.length; i++)
+    for (let i = 0; i < obj.elements.length; i++)
       this.addObjToMap(obj.elements[i]);
   }
   //
@@ -1405,21 +1472,13 @@ Node.TestAuto.prototype.addObjToMap = function (obj)
  * */
 Node.TestAuto.prototype.getNewIdFromOldId = function (oldId)
 {
-  var newId;
-  var pids = Object.keys(this.objectsMap);
-  //
-  for (var i = 0; i < pids.length; i++) {
-    for (var j = 0; j < this.objectsMap[pids[i]].length; j++) {
-      if (this.objectsMap[pids[i]][j].oldId === oldId) {
-        newId = this.objectsMap[pids[i]][j].newId;
-        break;
-      }
+  let pids = Object.keys(this.objectsMap);
+  for (let i = 0; i < pids.length; i++) {
+    for (let j = 0; j < this.objectsMap[pids[i]].length; j++) {
+      if (this.objectsMap[pids[i]][j].oldId === oldId)
+        return this.objectsMap[pids[i]][j].newId;
     }
-    if (newId)
-      break;
   }
-  //
-  return newId;
 };
 
 
@@ -1429,15 +1488,15 @@ Node.TestAuto.prototype.getNewIdFromOldId = function (oldId)
  * */
 Node.TestAuto.prototype.getReqDuration = function (req)
 {
-  if (!req || !req.input || !req.output)
+  if (!req || !req?.input || !req.output)
     return 0;
   //
   // Get first input item and last output item
-  var firstInputItem = req.input[0];
-  var lastOutputItem = req.output[req.output.length - 1] || req.input[req.input.length - 1];
+  let firstInputItem = req.input[0];
+  let lastOutputItem = req.output[req.output.length - 1] || req.input[req.input.length - 1];
   //
-  var startTimeStamp = firstInputItem && firstInputItem.time ? firstInputItem.time : 0;
-  var endTimeStamp = lastOutputItem && lastOutputItem.time ? lastOutputItem.time : 0;
+  let startTimeStamp = firstInputItem?.time || 0;
+  let endTimeStamp = lastOutputItem?.time || 0;
   //
   return endTimeStamp - startTimeStamp;
 };
@@ -1454,17 +1513,18 @@ Node.TestAuto.prototype.watchdog = function (stop)
     return;
   }
   //
-  this.watchdogTimeout = setTimeout(function (lastTimeStamp) {
+  let lastTimeStamp = new Date().getTime();
+  this.watchdogTimeout = setTimeout(() => {
     clearTimeout(this.watchdogTimeout);
     //
-    var now = new Date().getTime();
+    let now = new Date().getTime();
     //
     // The server is becoming too slow. Stop the test and send results to console
     if (now - lastTimeStamp > 1000)
       this.saveResults(this.testResult, true);
     else
       this.watchdog();
-  }.bind(this, new Date().getTime()), 500);
+  }, 500);
 };
 
 

@@ -33,22 +33,22 @@ Node.App = function (par)
 // Define usefull properties for this object
 Object.defineProperties(Node.App.prototype, {
   user: {
-    get: function () {
+    get() {
       return this.parent;
     }
   },
   server: {
-    get: function () {
+    get() {
       return this.parent.parent.parent;
     }
   },
   config: {
-    get: function () {
+    get() {
       return this.parent.parent;
     }
   },
   logger: {
-    get: function () {
+    get() {
       return this.server.logger;
     }
   }
@@ -78,11 +78,18 @@ Node.App.prototype.log = function (level, message, sender, data)
  */
 Node.App.prototype.save = function ()
 {
-  var r = {cl: "Node.App", name: this.name, version: this.version, date: this.date,
-    stopped: this.stopped, startSS: this.startSS,
-    maxAppUsers: this.maxAppUsers, minAppUsersPerWorker: this.minAppUsersPerWorker, maxAppWorkers: this.maxAppWorkers,
-    customWorkerConf: this.customWorkerConf};
-  return r;
+  return {
+    cl: "Node.App",
+    name: this.name,
+    version: this.version,
+    date: this.date,
+    stopped: this.stopped,
+    startSS: this.startSS,
+    maxAppUsers: this.maxAppUsers,
+    minAppUsersPerWorker: this.minAppUsersPerWorker,
+    maxAppWorkers: this.maxAppWorkers,
+    customWorkerConf: this.customWorkerConf
+  };
 };
 
 
@@ -117,11 +124,11 @@ Node.App.prototype.setParent = function (p)
   this.parent = p;
   //
   // Load parameters file
-  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
+  let filename = Node.path.join(this.config.appDirectory, "apps", this.name, "files", "private", "app_params.json");
   //
   // I need to do it synchronously because I need to do it before starting the ServerSession (if enabled)
   if (Node.fs.existsSync(filename)) {
-    var json = Node.fs.readFileSync(filename);
+    let json = Node.fs.readFileSync(filename);
     if (json.length)
       this.params = JSON.parse(json);
   }
@@ -150,26 +157,26 @@ Node.App.prototype.createNewSession = function (options)
   //   "maxAppUsers": indicates how many users this app can handle
   //   "minAppUsersPerWorker": indicates the minimum number of users that a worker can handle before the system needs a new worker
   //   "maxAppWorkers": maxmimum number of workers
-  var maxAppUsers = this.maxAppUsers || this.config.maxAppUsers;
-  var minAppUsersPerWorker = this.minAppUsersPerWorker || this.config.minAppUsersPerWorker;
-  var maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
+  let maxAppUsers = this.maxAppUsers || this.config.maxAppUsers;
+  let minAppUsersPerWorker = this.minAppUsersPerWorker || this.config.minAppUsersPerWorker;
+  let maxAppWorkers = this.maxAppWorkers || this.config.maxAppWorkers;
   //
   // Handle optional options
   options = options || {};
   options.type = options.type || "web";
   //
   // Check if a custom app worker configuration applies
-  var wrkConf = {type: "*"};    // Default server/app configuration: type:ANY, query:NONE
+  let wrkConf = {type: "*"};    // Default server/app configuration: type:ANY, query:NONE
   if (this.customWorkerConf) {
-    for (var i = 0; i < this.customWorkerConf.length; i++) {
-      var conf = this.customWorkerConf[i];
+    for (let i = 0; i < this.customWorkerConf.length; i++) {
+      let conf = this.customWorkerConf[i];
       //
       // If the configuration has nothing to do with what callee asked for
       if (conf.type !== options.type)
         continue;
       //
       // If the configuration is specific to a particular query string
-      if (conf.query && (!options.query || options.query.indexOf(conf.query) === -1))
+      if (conf.query && (!options.query || !options.query.includes(conf.query)))
         continue;
       //
       // Found it! Use this custom configuration settings (if given)
@@ -183,13 +190,13 @@ Node.App.prototype.createNewSession = function (options)
   }
   //
   // Choose the worker that will handle the new user
-  var worker;
+  let worker;
   //
   // Locate the worker that have that has less users (i.e. the unloaded one)
   // and, while doing that, check if there are too many users for this worker type
-  var minload, nusers = 0;
-  for (var i = 0; i < this.workers.length; i++) {
-    var wrk = this.workers[i];
+  let minload, numUsers = 0;
+  for (let i = 0; i < this.workers.length; i++) {
+    let wrk = this.workers[i];
     //
     if (wrk.hibernated)
       continue; // Skip hibernated workers
@@ -198,28 +205,37 @@ Node.App.prototype.createNewSession = function (options)
     if (JSON.stringify(wrk.options) !== JSON.stringify(wrkConf))
       continue;   // Wrong options
     //
-    var wrkload = wrk.getLoad();
+    let wrkload = wrk.getLoad();
+    //
+    // If event loop utilization is too high (>70%), skip this worker
+    if (wrk.lastMinuteAvgUtilization > 0.7) {
+      this.log("DEBUG", "Worker skipped (high ELU)", "App.createNewSession", {
+        workerIdx: i,
+        utilization: wrk.lastMinuteAvgUtilization,
+        sessions: wrkload
+      });
+      continue;
+    }
+    //
     if (minload === undefined || wrkload < minload) {
       minload = wrkload;
       worker = wrk;
     }
     //
     // Compute total worker-type load (i.e. the sum of all sessions for all workers of wkrConf type)
-    nusers += wrkload;
+    numUsers += wrkload;
   }
   //
   // First check if this app can handle this new user
-  if (nusers >= maxAppUsers) {
+  if (numUsers >= maxAppUsers) {
     this.log("DEBUG", "Too many users", "App.createNewSession",
-            {options: options, wrkConf: wrkConf, numUsers: nusers});
+            {options, wrkConf, numUsers});
     return;   // Too many users
   }
   //
   // If I've found a worker but it has already too many users and I can create new workers
-  var numwrk = this.workers.filter(function (w) {
-    return (!w.hibernated);
-  }).length;
-  if (worker && worker.getLoad() >= minAppUsersPerWorker && numwrk < maxAppWorkers)
+  let numwrk = this.workers.filter(w => !w.hibernated).length;
+  if (worker?.getLoad() >= minAppUsersPerWorker && numwrk < maxAppWorkers)
     worker = undefined;   // Create a new worker
   //
   // If I haven't found one, create a new worker
@@ -231,11 +247,11 @@ Node.App.prototype.createNewSession = function (options)
     worker.options = wrkConf;
     //
     this.log("DEBUG", "Worker created", "App.createNewSession",
-            {workerIdx: this.workers.indexOf(worker), options: options, wrkConf: wrkConf});
+            {workerIdx: this.workers.indexOf(worker), options, wrkConf});
   }
   else
     this.log("DEBUG", "Reuse worker", "App.createNewSession",
-            {workerIdx: this.workers.indexOf(worker), options: options, wrkConf: wrkConf});
+            {workerIdx: this.workers.indexOf(worker), options, wrkConf});
   //
   // Ask the worker I've found/created to create a new session
   return worker.createNewSession();
@@ -249,8 +265,8 @@ Node.App.prototype.createNewSession = function (options)
  */
 Node.App.prototype.getServerSession = function (name)
 {
-  for (var i = 0; i < this.workers.length; i++) {
-    var s = this.workers[i].getServerSession(name);
+  for (let i = 0; i < this.workers.length; i++) {
+    let s = this.workers[i].getServerSession(name);
     if (s)
       return s;
   }
@@ -267,13 +283,13 @@ Node.App.prototype.startServerSession = function (name, request)
   // Check if a session with same name already exists
   if (this.getServerSession(name))
     return this.log("WARN", "Can't start server session: session with same name already exists",
-            "App.startServerSession", {name: name, request: request});
+            "App.startServerSession", {name, request});
   //
-  var ss = this.createNewSession({type: "ss"});
+  let ss = this.createNewSession({type: "ss"});
   //
   // If a session can't be created -> do nothing
   if (!ss)
-    return this.log("WARN", "Session can't be created: too many users", "App.startServerSession", {name: name});
+    return this.log("WARN", "Session can't be created: too many users", "App.startServerSession", {name});
   //
   ss.name = name;
   //
@@ -282,8 +298,17 @@ Node.App.prototype.startServerSession = function (name, request)
     ss.worker.createChild();
   //
   // Route this message to the child
-  var ev = {id: "onStart", name: name, content: {}, master: true};
-  ss.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: ss.id, content: [ev], request: request});
+  ss.sendToChild({
+    type: Node.AppSession.msgTypeMap.appmsg,
+    sid: ss.id,
+    content: [{
+      id: "onStart",
+      name,
+      content: {},
+      master: true
+    }],
+    request
+  });
   //
   return ss;
 };
@@ -301,17 +326,17 @@ Node.App.prototype.startDefaultServerSession = function ()
   //
   // Periodically check if the default server session dies... if so, restart it
   if (!this.defaultSStimeoutID)
-    this.defaultSStimeoutID = setInterval(function () {
+    this.defaultSStimeoutID = setInterval(() => {
       // If the app is updating or stopped, wait...
       if (this.updating || this.stopped)
         return;
       //
-      var s = this.getServerSession("_default");
+      let s = this.getServerSession("_default");
       if (!s) {
         this.log("WARN", "Default server session evaporated -> start a new one", "App.startDefaultServerSession");
         this.startDefaultServerSession();   // Resurrect default server session
       }
-    }.bind(this), 5000);
+    }, 5000);
 };
 
 
@@ -323,9 +348,7 @@ Node.App.prototype.stopDefaultServerSession = function ()
   if (!this.startSS)
     return;
   //
-  var s = this.getServerSession("_default");
-  if (s)
-    s.terminate();
+  this.getServerSession("_default")?.terminate();
   //
   // Stop default server session interval
   if (this.defaultSStimeoutID) {
@@ -341,9 +364,7 @@ Node.App.prototype.stopDefaultServerSession = function ()
  */
 Node.App.prototype.deleteWorker = function (worker)
 {
-  var pthis = this;
-  //
-  var idx = this.workers.indexOf(worker);
+  let idx = this.workers.indexOf(worker);
   if (idx === -1)
     return this.log("WARN", "Worker not found", "App.deleteWorker");
   //
@@ -355,9 +376,9 @@ Node.App.prototype.deleteWorker = function (worker)
     worker.killChild();
     //
     // If the child does not end normally, I'll (forcedly) kill him in 3 seconds
-    setTimeout(function () {
+    setTimeout(() => {
       if (worker.child && worker.child.connected) {
-        pthis.log("WARN", "Worker did not quit in 3 seconds -> killing him", "App.deleteWorker", {workerIdx: idx});
+        this.log("WARN", "Worker did not quit in 3 seconds -> killing him", "App.deleteWorker", {workerIdx: idx});
         worker.killChild(true);
       }
     }, 3000);
@@ -373,43 +394,53 @@ Node.App.prototype.deleteWorker = function (worker)
 /**
  * Send the "install" message to the App
  * @param {object} options for install (see App::handleInstallMsg in app.js (app/server))
- * @param {function} callback (result)
+ * @returns {Promise<object>} result
  */
-Node.App.prototype.sendInstallToApp = function (options, callback)
+Node.App.prototype.sendInstallToApp = async function (options)
 {
   // Create a dummy worker so that I can send install to app
-  var worker = new Node.Worker(this);
+  let worker = new Node.Worker(this);
   //
-  // Store a callback in the worker so that it will be called when install is completed
-  worker.installCallback = function (result) {
+  // Store a promise in the worker so that it will be called when install is completed
+  try {
+    let result = await new Promise((resolve, reject) => {
+      worker.installPromise = {resolve, reject};
+      //
+      // Create the worker and tell him that the app have to be installed
+      worker.createChild();
+      worker.stopWatchDog();  // I don't need it
+      worker.child.send({
+        type: Node.Worker.msgTypeMap.install,
+        cnt: options
+      });
+    });
+    //
+    if (!worker.child)
+      throw new Error("Child process is dead");
+    //
+    return result;
+  }
+  finally {
     // Terminate the worker (N.B.: the worker has no sessions, it's just a dummy process...
     // then I have to kill it directly!)
-    if (worker.child)     // Only if it's still alive
-      worker.child.kill();
-    else
-      result.err = result.err || "Child process is dead";
-    //
-    // Done!
-    callback(result);
-  }.bind(this);
-  //
-  // Create the worker and tell him that the app have to be installed
-  worker.createChild();
-  worker.stopWatchDog();  // I don't need it
-  worker.child.send({type: Node.Worker.msgTypeMap.install, cnt: options});
+    worker.child?.kill();
+  }
 };
 
 
 /**
  * Send the actual status of the App
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
+ * @returns {Promise<{msg: string}>}
  */
-Node.App.prototype.sendStatus = function (params, callback)
+Node.App.prototype.sendStatus = async function (params)
 {
-  var pthis = this;
-  //
-  var stat = {name: this.name, version: this.version, date: this.date, params: this.params};
+  let stat = {
+    name: this.name,
+    version: this.version,
+    date: this.date,
+    params: this.params
+  };
   if (this.stopped)
     stat.status = "stopped";
   else if (this.updating)
@@ -418,87 +449,79 @@ Node.App.prototype.sendStatus = function (params, callback)
     stat.status = "running";
   //
   // Get the size of the app directory
-  var path = this.config.appDirectory + "/apps/" + this.name;
-  var cmd, cmdParams;
+  let path = Node.path.join(this.config.appDirectory, "apps", this.name);
+  let cmd, cmdParams;
   if (!/^win/.test(process.platform)) {   // linux
     cmd = "/usr/bin/du";
     cmdParams = ["-sh", path];
   }
   else {  // windows
     cmd = "cmd";
-    cmdParams = ["/c", "powershell", "(Get-ChildItem -Path \"" + path.replace(/\//g, "\\") + "\" -Recurse | Measure-Object -Property Length -Sum).Sum"];      // Inside "cmd /c" command / are not allowed
+    cmdParams = ["/c", "powershell", `(Get-ChildItem -Path "${path.replace(/\//g, "\\")}" -Recurse | Measure-Object -Property Length -Sum).Sum`];      // Inside "cmd /c" command / are not allowed
   }
-  this.server.execFileAsRoot(cmd, cmdParams, function (err, stdout, stderr) {
-    if (err) {
-      pthis.log("ERROR", "Error getting the size of app folder: " + (stderr || err), "App.sendStatus", {path: path});
-      return callback("Error getting the size of app folder: " + (stderr || err));
-    }
-    //
-    var size;
-    if (!/^win/.test(process.platform))    // linux
-      size = stdout.split("\t")[0];
-    else {
-      stdout = stdout.split("\r\n");        // Convert into array
-      size = stdout[0];
-    }
-    switch (size.slice(-1)) {
-      case "K":
-        size = Math.ceil(parseFloat(size) * 1024);
-        break;
-      case "M":
-        size = Math.ceil(parseFloat(size) * 1024 * 1024);
-        break;
-      case "G":
-        size = Math.ceil(parseFloat(size) * 1024 * 1024 * 1024);
-        break;
-    }
-    //
-    stat.diskSize = size;
-    callback({msg: JSON.stringify(stat)});
-  });
+  //
+  let stdout;
+  try {
+    stdout = await this.server.execFileAsRoot(cmd, cmdParams);
+  }
+  catch (err) {
+    this.log("ERROR", `Error getting the size of app folder: ${err}`, "App.sendStatus", {path});
+    throw new Error(`Error getting the size of app folder: ${err}`);
+  }
+  //
+  let size;
+  if (!/^win/.test(process.platform))    // linux
+    size = stdout.split("\t")[0];
+  else {
+    stdout = stdout.split("\r\n");        // Convert into array
+    size = stdout[0];
+  }
+  switch (size.slice(-1)) {
+    case "K":
+      size = Math.ceil(parseFloat(size) * 1024);
+      break;
+    case "M":
+      size = Math.ceil(parseFloat(size) * 1024 * 1024);
+      break;
+    case "G":
+      size = Math.ceil(parseFloat(size) * 1024 * 1024 * 1024);
+      break;
+  }
+  //
+  stat.diskSize = size;
+  return {msg: JSON.stringify(stat)};
 };
 
 
 /**
  * Send the list of sessions for this app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.sendSessions = function (params, callback)
+Node.App.prototype.sendSessions = async function (params)
 {
   // Reply:
   //  sessions: {total number of sessions}
   //  workers: [{worker 1 details}, {worker 2  details}, ...]}  (see worker::getStatus)
-  var sessions = {sessions: 0, workers: []};
-  //
-  // If there are no workers I've done
-  if (this.workers.length === 0)
-    return callback({msg: JSON.stringify(sessions)});
+  let sessions = {sessions: 0, workers: []};
   //
   // Add worker's details
-  var nwrk = 0;
-  for (var i = 0; i < this.workers.length; i++) {
-    var wrk = this.workers[i];
-    //
+  for (let wrk of this.workers) {
     // Compute total app sessions (by adding worker's count)
     sessions.sessions += wrk.sessions.length;
     //
     // Add worker status
-    wrk.getStatus(params, function (result) {
-      sessions.workers.push(result);        // Add worker's status
-      if (++nwrk === this.workers.length)   // If that's the last one report to callee
-        callback({msg: JSON.stringify(sessions)});
-    }.bind(this));    // jshint ignore:line
+    sessions.workers.push(await wrk.getStatus(params));
   }
+  //
+  return {msg: JSON.stringify(sessions)};
 };
 
 
 /**
  * Send the list of DTT sessions for this app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.sendDttSessions = function (params, callback)
+Node.App.prototype.sendDttSessions = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -507,9 +530,8 @@ Node.App.prototype.sendDttSessions = function (params, callback)
 /**
  * Deletes one or more DTT sessions for this app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.deleteDttSessions = function (params, callback)
+Node.App.prototype.deleteDttSessions = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -518,40 +540,36 @@ Node.App.prototype.deleteDttSessions = function (params, callback)
 /**
  * Start the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.start = function (params, callback)
+Node.App.prototype.start = async function (params)
 {
-  // Send "install" message to app and wait for reply
-  this.sendInstallToApp({updateDB: false}, function (result) {
-    // If there is an error, stop
-    if (result.err) {
-      this.log("WARN", "Error while starting the app: " + result.err, "App.start");
-      return callback("Error while starting the app: " + result.err);
-    }
-    //
-    // App is started -> save config
-    this.updating = false;
-    this.stopped = false;
-    this.config.saveConfig();
-    //
-    // If needed, start app's server session
-    this.startDefaultServerSession();
-    //
-    // Log the operation
-    this.log("INFO", "Application started", "App.start");
-    //
-    callback();
-  }.bind(this));
+  try {
+    // Send "install" message to app and wait for reply
+    await this.sendInstallToApp({updateDB: false});
+  }
+  catch (err) {
+    this.log("WARN", `Error while starting the app: ${err}`, "App.start");
+    throw new Error(`Error while starting the app: ${err}`);
+  }
+  //
+  // App is started -> save config
+  this.updating = false;
+  this.stopped = false;
+  this.config.saveConfig();
+  //
+  // If needed, start app's server session
+  this.startDefaultServerSession();
+  //
+  // Log the operation
+  this.log("INFO", "Application started", "App.start");
 };
 
 
 /**
  * Stop the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.stop = function (params, callback)
+Node.App.prototype.stop = async function (params)
 {
   // App is stopped -> save config
   this.stopped = true;
@@ -562,55 +580,48 @@ Node.App.prototype.stop = function (params, callback)
   //
   // Log the operation
   this.log("INFO", "Application stopped", "App.stop");
-  //
-  callback();
 };
 
 
 /**
  * Terminates the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.terminate = function (params, callback)
+Node.App.prototype.terminate = async function (params)
 {
-  var pthis = this;
-  var waitWorkersStart = new Date();
-  var timeout = 30000;
-  //
-  // Function that waits for all workers to end
-  var waitWorkersTerminate = function () {
-    if (pthis.workers.length) {
-      // If the workers did not stop in timeout ms -> error
-      if (new Date() - waitWorkersStart > timeout) {
-        pthis.log("WARN", "Workers did not stop in " + timeout / 1000 + " seconds", "App.terminate", {workersLeft: pthis.workers.length});
-        //
-        // Delete all workers still alive (if they don't die smothly they will be killed)
-        for (var i = 0; i < pthis.workers.length; i++)
-          pthis.deleteWorker(pthis.workers[i]);
-      }
-      //
-      // Check every 500 ms
-      setTimeout(function () {
-        waitWorkersTerminate();
-      }, 500);
-      //
-      return;
-    }
-    //
-    // Done. All worker terminated
-    pthis.log("DEBUG", "All workers have been terminated", "App.terminate");
-    callback();
-  };
+  let waitWorkersStart = new Date();
+  let timeout = 30000;
   //
   // Tell all workers to terminate
-  var options = (params.req ? {force: params.req.query.force, timeout: params.req.query.timeout, msg: params.req.query.msg} : {});
+  let options = {
+    force: params.req?.query.force,
+    timeout: params.req?.query.timeout,
+    msg: params.req?.query.msg
+  };
   this.log("DEBUG", "Send terminate to all workers", "App.terminate");
-  for (var i = 0; i < this.workers.length; i++)
+  //
+  for (let i = 0; i < this.workers.length; i++)
     this.workers[i].terminate(options);
   //
-  // Wait for them to terminate
-  waitWorkersTerminate();
+  // Wait for all workers to end
+  while (this.workers.length) {
+    // If the workers did not stop in timeout ms -> error
+    if (new Date() - waitWorkersStart > timeout) {
+      this.log("WARN", `Workers did not stop in ${timeout / 1000} seconds`, "App.terminate", {workersLeft: this.workers.length});
+      //
+      // Delete all workers still alive (if they don't die smothly they will be killed)
+      for (let worker of this.workers)
+        this.deleteWorker(worker);
+      //
+      break;
+    }
+    //
+    // Wait 500 ms before checking again
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  //
+  // Done. All worker terminated
+  this.log("DEBUG", "All workers have been terminated", "App.terminate");
 };
 
 
@@ -622,7 +633,7 @@ Node.App.prototype.hibernateWorkers = function ()
   // Server session must be stoped
   this.stopDefaultServerSession();
   //
-  for (var i = 0; i < this.workers.length; i++)
+  for (let i = 0; i < this.workers.length; i++)
     this.workers[i].hibernated = true;
 };
 
@@ -630,9 +641,8 @@ Node.App.prototype.hibernateWorkers = function ()
 /*
  * Install the app in the production server getting the installation package from S3
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.install = function (params, callback)
+Node.App.prototype.install = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -641,54 +651,54 @@ Node.App.prototype.install = function (params, callback)
 /**
  * Uninstalls the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.uninstall = function (params, callback)
+Node.App.prototype.uninstall = async function (params)
 {
-  var pthis = this;
-  //
-  // First terminate all sessions
-  params.req.query.force = true;      // force TERMINATE
-  this.terminate(params, function (err) {
-    if (err) {
-      pthis.log("WARN", "Can't terminate the app: " + err, "App.uninstall");
-      return callback("Can't terminate the app: " + err);
+  try {
+    // First terminate all sessions
+    try {
+      // force TERMINATE
+      params.req.query.force = true;
+      await this.terminate(params);
+    }
+    catch (err) {
+      throw new Error(`Can't terminate the app: ${err}`);
     }
     //
-    // First remove app directory
-    Node.fs.rm(pthis.config.appDirectory + "/apps/" + pthis.name, {recursive: true, force: true}, function (err) {
-      if (err) {
-        pthis.log("WARN", "Can't delete app folder: " + err, "App.uninstall");
-        return callback("Can't delete app folder: " + err);
-      }
-      //
-      // Remove app backups (if any)
-      Node.fs.rm(pthis.config.appDirectory + "/backups/" + pthis.name, {recursive: true, force: true}, function (err) {
-        if (err) {
-          pthis.log("WARN", "Can't delete backup folder: " + err, "App.uninstall");
-          return callback("Can't delete backup folder: " + err);
-        }
-        //
-        // Tell the user to delete this app
-        pthis.user.deleteApp(pthis);
-        //
-        // Log the operation
-        pthis.log("INFO", "App deleted", "App.uninstall");
-        //
-        // Report to callee
-        callback();
-      });
-    });
-  });
+    // Remove app directory
+    try {
+      await Node.fs.promises.rm(Node.path.join(this.config.appDirectory, "apps", this.name), {recursive: true, force: true});
+    }
+    catch (err) {
+      throw new Error(`Can't delete app folder: ${err}`);
+    }
+    //
+    // Remove app backups (if any)
+    try {
+      await Node.fs.promises.rm(Node.path.join(this.config.appDirectory, "backups", this.name), {recursive: true, force: true});
+    }
+    catch (err) {
+      throw new Error(`Can't delete backup folder: ${err}`);
+    }
+    //
+    // Tell the user to delete this app
+    this.user.deleteApp(this);
+    //
+    // Log the operation
+    this.log("INFO", "App deleted", "App.uninstall");
+  }
+  catch (err) {
+    this.log("WARN", err.message || err, "App.uninstall");
+    throw err;
+  }
 };
 
 
 /**
  * Updates app's DBs schema
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.updateDBschema = function (params, callback)
+Node.App.prototype.updateDBschema = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -699,7 +709,7 @@ Node.App.prototype.updateDBschema = function (params, callback)
  * @param {Object} msg
  * @param {boolean} skipSave - if true the params.json file will not be saved
  */
-Node.App.prototype.handleChangedAppParamMsg = function (msg, skipSave)
+Node.App.prototype.handleChangedAppParamMsg = async function (msg, skipSave)
 {
   // Get the new parameter
   this.params = this.params || {};
@@ -709,14 +719,17 @@ Node.App.prototype.handleChangedAppParamMsg = function (msg, skipSave)
     delete this.params[msg.par];
   //
   // Tell it to every session in every worker
-  for (var i = 0; i < this.workers.length; i++) {
-    var wrk = this.workers[i];
+  for (let i = 0; i < this.workers.length; i++) {
+    let wrk = this.workers[i];
     //
     // Skip "dead" workers (i.e. workers with no child process)
     if (!wrk.child)
       continue;
     //
-    wrk.child.send({type: Node.Worker.msgTypeMap.changedAppParam, cnt: msg});
+    wrk.child.send({
+      type: Node.Worker.msgTypeMap.changedAppParam,
+      cnt: msg
+    });
   }
   //
   // If I don't need to save, I've done my job
@@ -724,21 +737,25 @@ Node.App.prototype.handleChangedAppParamMsg = function (msg, skipSave)
     return;
   //
   // Save parameters to disk
-  this.saveParameters(function (err) {
-    if (err)
-      this.log("ERROR", "Can't update app parameters: " + err, "App.handleChangedAppParamMsg", msg);
-  });
+  clearTimeout(this.saveParamsTimer);
+  this.saveParamsTimer = setTimeout(async () => {
+    try {
+      await this.saveParameters();
+    }
+    catch (err) {
+      this.log("ERROR", `Can't update app parameters: ${err}`, "App.handleChangedAppParamMsg", msg);
+    }
+  }, 100);
 };
 
 
 /**
  * Save app parameters on disk
- * @param {function} callback (err)
  */
-Node.App.prototype.saveParameters = function (callback)
+Node.App.prototype.saveParameters = async function ()
 {
   // If params is empty, forget about it
-  var par;
+  let par;
   if (Object.keys(this.params).length === 0)
     delete this.params;
   else {
@@ -753,17 +770,16 @@ Node.App.prototype.saveParameters = function (callback)
   }
   //
   // Save parameter file
-  var filename = this.config.appDirectory + "/apps/" + this.name + "/files/private/app_params.json";
-  Node.Utils.saveObject(filename, par, callback);
+  let filename = Node.path.join(this.config.appDirectory, "apps", this.name, "files", "private", "app_params.json");
+  await Node.Utils.saveObject(filename, par);
 };
 
 
 /**
  * Backup the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.backupToDisk = function (params, callback)
+Node.App.prototype.backupToDisk = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -772,9 +788,8 @@ Node.App.prototype.backupToDisk = function (params, callback)
 /**
  * Restore an app backup
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.restoreFromDisk = function (params, callback)
+Node.App.prototype.restoreFromDisk = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -783,9 +798,8 @@ Node.App.prototype.restoreFromDisk = function (params, callback)
 /**
  * Backup the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.backup = function (params, callback)
+Node.App.prototype.backup = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -794,9 +808,8 @@ Node.App.prototype.backup = function (params, callback)
 /**
  * Restore the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.restore = function (params, callback)
+Node.App.prototype.restore = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -805,9 +818,8 @@ Node.App.prototype.restore = function (params, callback)
 /**
  * Handle file system commands
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.handleFileSystem = function (params, callback)
+Node.App.prototype.handleFileSystem = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -826,160 +838,156 @@ Node.App.prototype.handleFeedbackMsgToConsole = function (msg)
 /**
  * Change the app configuration via web commands
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-/*jshint maxcomplexity:40 */
-Node.App.prototype.configure = function (params, callback)
+Node.App.prototype.configure = async function (params)
 {
   // Compute the array of properties provided via url
-  var query = params.req.query;
-  var queryProps = Object.getOwnPropertyNames(query);
-  if (queryProps.length === 0) {
-    this.log("WARN", "No property specified", "App.configure");
-    return callback("No property specified");
-  }
+  let query = params.req.query;
   //
   this.log("INFO", "Update app settings", "App.configure", query);
   //
-  if (query.name) {
-    try {
-      Node.fs.renameSync(this.config.appDirectory + "/apps/" + this.name, this.config.appDirectory + "/apps/" + query.name);
-      this.name = query.name;
+  let logData;
+  let warning = false;
+  try {
+    let queryProps = Object.getOwnPropertyNames(query);
+    if (queryProps.length === 0) {
+      warning = true;
+      throw new Error("No property specified");
     }
-    catch (ex) {
-      this.log("ERROR", "Can't rename app: " + ex.message, "App.configure", {newName: query.name});
-      return callback("Can't rename app: " + ex.message);
-    }
-  }
-  if (query.version !== undefined)
-    this.version = query.version || undefined;
-  if (query.date !== undefined)
-    this.date = query.date || undefined;
-  if (query.stopped) {
-    if (query.stopped === "false")
-      this.stopped = false;
-    else if (query.stopped === "true")
-      this.stopped = true;
-  }
-  if (query.updating) {
-    if (query.updating === "false")
-      this.updating = false;
-    else if (query.updating === "true")
-      this.updating = true;
-  }
-  if (query.startSS) {
-    if (query.startSS === "false" && this.startSS) {
-      this.stopDefaultServerSession();
-      this.startSS = false;
-    }
-    else if (query.startSS === "true" && !this.startSS) {
-      this.startSS = true;
-      this.startDefaultServerSession();
-    }
-  }
-  if (query.maxAppUsers !== undefined)
-    this.maxAppUsers = (query.maxAppUsers ? parseInt(query.maxAppUsers, 10) : undefined);
-  if (query.minAppUsersPerWorker !== undefined)
-    this.minAppUsersPerWorker = (query.minAppUsersPerWorker ? parseInt(query.minAppUsersPerWorker, 10) : undefined);
-  if (query.maxAppWorkers !== undefined)
-    this.maxAppWorkers = (query.maxAppWorkers ? parseInt(query.maxAppWorkers, 10) : undefined);
-  if (query.customWorkerConf !== undefined) {
-    try {
-      this.customWorkerConf = (query.customWorkerConf ? JSON.parse(query.customWorkerConf) : undefined);
-    }
-    catch (ex) {
-      this.log("WARN", "Invalid customWorkerConf setting: " + ex.message, "App.configure", {customWorkerConf: query.customWorkerConf});
-      return callback("Invalid customWorkerConf setting: " + ex.message);
-    }
-  }
-  if (query.params !== undefined) {
-    var i, newParams = {};
-    if (query.params) {
-      // Callee will send every time all parameters as an array of NAME=VALUE couples
+    //
+    if (query.name) {
       try {
-        var paramsArray = JSON.parse(query.params);
-        //
-        // Change from
-        //    ["par1=valuePar1", "par2=valuePar2", ...]
-        // to
-        //    {
-        //     "par1": "valuePar1",
-        //     "par2": "valuePar2",
-        //    }
-        for (i = 0; i < paramsArray.length; i++) {
-          var par = paramsArray[i].split("=");
-          //
-          var parName = par[0];
-          var parValue = par.slice(1).join("=");
-          //
-          newParams[parName] = parValue;
-        }
+        await Node.fs.promises.rename(Node.path.join(this.config.appDirectory, "apps", this.name), Node.path.join(this.config.appDirectory, "apps", query.name));
+        this.name = query.name;
       }
       catch (ex) {
-        this.log("WARN", "Can't update app parameters: " + ex.message, "App.configure", {newParams: query.params});
-        return callback("Can't update app parameters: " + ex.message);
+        logData = {newName: query.name};
+        throw new Error(`Can't rename app: ${ex.message}`);
       }
     }
-    else  // No parameters
-      newParams = {};
-    //
-    // Create a new params object if needed
-    this.params = this.params || {};
-    //
-    // Now check new parameters
-    var saveParamFile = false;
-    var parr = Object.keys(Object.assign({}, newParams, this.params));
-    for (i = 0; i < parr.length; i++) {
-      var parName = parr[i];
-      if (newParams[parName] === this.params[parName])
-        continue;   // Value hasn't changed
-      //
-      // Value has changed -> tell every session that a parameter has changed
-      this.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : newParams[parName]}, true);   // SkipSave
-      //
-      // Don't save volatile (i.e. non permanent) parameters
-      if (["enableDtt", "logDttQueries"].indexOf(parName) === -1)
-        saveParamFile = true; // Params file should be saved at the end
+    if (query.version !== undefined)
+      this.version = query.version || undefined;
+    if (query.date !== undefined)
+      this.date = query.date || undefined;
+    if (query.stopped) {
+      if (query.stopped === "false")
+        this.stopped = false;
+      else if (query.stopped === "true")
+        this.stopped = true;
     }
-    //
-    // Save param object
-    if (saveParamFile) {
-      this.saveParameters(function (err) {
-        if (err) {
-          this.log("ERROR", "Can't update app parameters: " + err, "App.configure", {newParams: query.params});
-          return callback("Can't update app parameters: " + err);
+    if (query.updating) {
+      if (query.updating === "false")
+        this.updating = false;
+      else if (query.updating === "true")
+        this.updating = true;
+    }
+    if (query.startSS) {
+      if (query.startSS === "false" && this.startSS) {
+        this.stopDefaultServerSession();
+        this.startSS = false;
+      }
+      else if (query.startSS === "true" && !this.startSS) {
+        this.startSS = true;
+        this.startDefaultServerSession();
+      }
+    }
+    if (query.maxAppUsers !== undefined)
+      this.maxAppUsers = (query.maxAppUsers ? parseInt(query.maxAppUsers, 10) : undefined);
+    if (query.minAppUsersPerWorker !== undefined)
+      this.minAppUsersPerWorker = (query.minAppUsersPerWorker ? parseInt(query.minAppUsersPerWorker, 10) : undefined);
+    if (query.maxAppWorkers !== undefined)
+      this.maxAppWorkers = (query.maxAppWorkers ? parseInt(query.maxAppWorkers, 10) : undefined);
+    if (query.customWorkerConf !== undefined) {
+      try {
+        this.customWorkerConf = (query.customWorkerConf ? JSON.parse(query.customWorkerConf) : undefined);
+      }
+      catch (ex) {
+        warning = true;
+        logData = {customWorkerConf: query.customWorkerConf};
+        throw new Error(`Invalid customWorkerConf setting: ${ex.message}`);
+      }
+    }
+    if (query.params !== undefined) {
+      let newParams = {};
+      if (query.params) {
+        // Callee will send every time all parameters as an array of NAME=VALUE couples
+        try {
+          let paramsArray = JSON.parse(query.params);
+          //
+          // Change from
+          //    ["par1=valuePar1", "par2=valuePar2", ...]
+          // to
+          //    {
+          //     "par1": "valuePar1",
+          //     "par2": "valuePar2",
+          //    }
+          for (let i = 0; i < paramsArray.length; i++) {
+            let par = paramsArray[i].split("=");
+            //
+            let parName = par[0];
+            let parValue = par.slice(1).join("=");
+            //
+            newParams[parName] = parValue;
+          }
         }
-        //
-        // Save the new configuration
-        this.config.saveConfig();
-        //
-        // Log the operation
-        this.log("INFO", "App settings updated", "App.configure");
-        //
-        callback();
-      }.bind(this));
+        catch (ex) {
+          warning = true;
+          logData = {newParams: query.params};
+          throw new Error(`Can't update app parameters: ${ex.message}`);
+        }
+      }
+      else  // No parameters
+        newParams = {};
       //
-      // Wait for param file to be written
-      return;
+      // Create a new params object if needed
+      this.params = this.params || {};
+      //
+      // Now check new parameters
+      let saveParamFile = false;
+      let parr = Object.keys(Object.assign({}, newParams, this.params));
+      for (let i = 0; i < parr.length; i++) {
+        let parName = parr[i];
+        if (newParams[parName] === this.params[parName])
+          continue;   // Value hasn't changed
+        //
+        // Value has changed -> tell every session that a parameter has changed
+        await this.handleChangedAppParamMsg({par: parName, old: this.params[parName], new : newParams[parName]}, true);   // SkipSave
+        //
+        // Don't save volatile (i.e. non permanent) parameters
+        if (!["enableDtt", "logDttQueries"].includes(parName))
+          saveParamFile = true; // Params file should be saved at the end
+      }
+      //
+      // Save param object
+      if (saveParamFile) {
+        try {
+          await this.saveParameters();
+        }
+        catch (err) {
+          logData = {params: this.params};
+          throw new Error(`Can't update app parameters: ${err}`);
+        }
+      }
     }
+    //
+    // Save the new configuration
+    this.config.saveConfig();
+    //
+    // Log the operation
+    this.log("INFO", "App settings updated", "App.configure");
   }
-  //
-  // Save the new configuration
-  this.config.saveConfig();
-  //
-  // Log the operation
-  this.log("INFO", "App settings updated", "App.configure");
-  //
-  callback();
+  catch (err) {
+    this.log(warning ? "WARN" : "ERROR", err.message || err, "App.configure", logData);
+    throw err;
+  }
 };
 
 
 /**
  * Start a test session for this app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.test = function (params, callback)
+Node.App.prototype.test = function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -998,80 +1006,78 @@ Node.App.prototype.getTestById = function (id)
 /**
  * Process the commands related to this app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.App.prototype.processCommand = function (params, callback)
+Node.App.prototype.processCommand = async function (params)
 {
-  this.execCommand(params, callback);
+  return await this.execCommand(params);
 };
 
 
 /**
  * Execute commands for the app
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
+ * @returns {Promise}
  */
-Node.App.prototype.execCommand = function (params, callback)
+Node.App.prototype.execCommand = async function (params)
 {
-  var command = params.tokens[0];
+  let command = params.tokens[0];
   //
   // If the authorization key is enabled and the given one does not match -> error
   if (this.config.auth && params.req.query.autk !== this.config.autk) {
     this.log("WARN", "Unauthorized", "App.execCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
+    throw {err: "Unauthorized", code: 401};
   }
   //
   // Valid AUTK (or AUTK not enabled)
   switch (command) {
     case "status":
-      this.sendStatus(params, callback);
-      break;
+      return await this.sendStatus(params);
+
     case "sessions":
-      this.sendSessions(params, callback);
-      break;
+      return await this.sendSessions(params);
+
     case "dttsessions":
-      this.sendDttSessions(params, callback);
-      break;
+      return await this.sendDttSessions(params);
+
     case "deletedttsessions":
-      this.deleteDttSessions(params, callback);
-      break;
+      return await this.deleteDttSessions(params);
+
     case "start":
-      this.start(params, callback);
-      break;
+      return await this.start(params);
+
     case "stop":
-      this.stop(params, callback);
-      break;
+      return await this.stop(params);
+
     case "terminate":
-      this.terminate(params, callback);
-      break;
+      return await this.terminate(params);
+
     case "install":
-      this.install(params, callback);
-      break;
+      return await this.install(params);
+
     case "uninstall":
-      this.uninstall(params, callback);
-      break;
+      return await this.uninstall(params);
+
     case "backup":
-      this.backup(params, callback);
-      break;
+      return await this.backup(params);
+
     case "restore":
-      this.restore(params, callback);
-      break;
+      return await this.restore(params);
+
     case "updatedbschema":
-      this.updateDBschema(params, callback);
-      break;
+      return await this.updateDBschema(params);
+
     case "filesystem":
-      this.handleFileSystem(params, callback);
-      break;
+      return await this.handleFileSystem(params);
+
     case "config":
-      this.configure(params, callback);
-      break;
+      return await this.configure(params);
+
     case "test":
-      this.test(params, callback);
-      break;
+      return this.test(params);
+
     default:
       this.log("WARN", "Invalid Command", "App.execCommand", {cmd: command, url: params.req.originalUrl});
-      callback("Invalid Command");
-      break;
+      throw new Error("Invalid Command");
   }
 };
 

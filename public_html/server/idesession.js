@@ -3,8 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
-
 var Node = Node || {};
 var InDe = InDe || {};
 
@@ -17,20 +15,18 @@ Node.cookie = require("cookie");
 Node.Utils = require("./utils");
 Node.IDEAppClient = require("./ideappclient");
 Node.Archiver = require("./archiver");
-Node.AI = {};
+
 
 
 /**
- * @Class represent an Instan Developer session
+ * @class represent an Instan Developer session
  * @param {Node.Project} prj
- * @param {obj} options - options for the session
- * @param {function} callback - called when session completed its job
+ * @param {Object} options - options for the session
  */
-Node.IDESession = function (prj, options, callback)
+Node.IDESession = function (prj, options)
 {
   this.project = prj;
   this.options = options;
-  this.sessionCompletedCB = callback;
   //
   // List of client tokens (tele-collaboration)
   this.cTokens = [];
@@ -40,9 +36,9 @@ Node.IDESession = function (prj, options, callback)
   //
   // Compute the "active" path
   // (tutorials are "redirected" to the proper tutorial path)
-  this.path = this.config.directory + "/" + this.project.user.userName + "/" + this.project.name;
+  this.path = Node.path.join(this.config.directory, this.project.user.userName, this.project.name);
   if (this.options.type === "tutorial")
-    this.path += "/tutorials/" + this.options.recFolder;
+    this.path = Node.path.join(this.path, "tutorials", this.options.recFolder);
   //
   // Map of sockets connected with this session (master and telecollaborators)
   this.sockets = {};
@@ -59,13 +55,32 @@ Node.IDESession = function (prj, options, callback)
   if (this.options.type === "ide" || this.options.type === "tutorial")
     this.startAutoKillTimer(60000);
   //
-  // callback list for send and wait
-  this.cbList = {};
-  //
-  // Initialize AI for IDE sessions
-  if (this.options.type === "ide" || this.options.type === "tutorial") {
-    this.ai = {};
-    // AI will be initialized when first used
+  // promise list for send and wait
+  this.promisesList = {};
+};
+
+
+/**
+ * Decrypt devAgentOptions from base64 encrypted string.
+ * Same algorithm as Child.decryptDevAgentOptions (child process).
+ * @param {String} encrypted - base64 encoded AES-256-CBC encrypted JSON
+ * @returns {Object|null} decrypted options or null on error
+ * KEEP IN SYNC with Node.Child.decryptDevAgentOptions (ide/child.js)
+ */
+Node.IDESession.decryptDevAgentOptions = function (encrypted)
+{
+  if (!encrypted)
+    return null;
+  try {
+    let crypto = require("crypto");
+    let key = crypto.scryptSync("LzgllCM/6rulryr4WbDZwj+rU20TZLnhV1YRz6szf/nK1sH9ib/fE1oNf3ejQcKJ", "salt", 32);
+    let buffer = Buffer.from(encrypted, "base64");
+    let decipher = crypto.createDecipheriv("aes-256-cbc", key, buffer.subarray(0, 16));
+    let decrypted = Buffer.concat([decipher.update(buffer.subarray(16)), decipher.final()]);
+    return JSON.parse(decrypted.toString("utf8"));
+  }
+  catch (e) {
+    return null;
   }
 };
 
@@ -117,33 +132,29 @@ Node.IDESession.msgTypeMap = {
   apiCommand:"apic",
   apiCommandResult:"apir",
   //
-  getProjectStructure: "gps",
-  projectStructureResult: "psr",
-  //
-  agentMessage: "agm",
-  agentMessageResult: "agmr"
+  saveDevAgentOptions: "sdao"
 };
 
 
 // Define usefull properties for this object
 Object.defineProperties(Node.IDESession.prototype, {
   server: {
-    get: function () {
+    get() {
       return this.project.server;
     }
   },
   childer: {
-    get: function () {
+    get() {
       return this.server.childer;
     }
   },
   config: {
-    get: function () {
+    get() {
       return this.server.config;
     }
   },
   logger: {
-    get: function () {
+    get() {
       return this.server.logger;
     }
   }
@@ -151,11 +162,21 @@ Object.defineProperties(Node.IDESession.prototype, {
 
 
 /**
+ * Waits for the IDE session to complete.
+ * @returns {Promise} Promise that resolves on session completion
+ */
+Node.IDESession.prototype.waitCompleted = async function ()
+{
+  return await new Promise((resolve, reject) => this.sessionCompletedPromise = {resolve, reject});
+};
+
+
+/**
  * Log a new message
- * @param {string} level - message level (DEBUG, INFO, WARN, ERROR)
- * @param {string} message - text message
- * @param {string} sender - function that generated the message
- * @param {object} data - optional data to log
+ * @param {String} level - message level (DEBUG, INFO, WARN, ERROR)
+ * @param {String} message - text message
+ * @param {String} sender - function that generated the message
+ * @param {Object} data - optional data to log
  */
 Node.IDESession.prototype.log = function (level, message, sender, data)
 {
@@ -173,45 +194,59 @@ Node.IDESession.prototype.log = function (level, message, sender, data)
 Node.IDESession.prototype.createChild = function ()
 {
   // Send a message to the childer asking him to create a new child process corresponding to this session
-  this.childer.send({type: Node.IDESession.msgTypeMap.createChild, id: this.id,
-    uid: this.project.user.uid, gid: this.project.user.gid, path: this.path});
+  this.childer.send({
+    type: Node.IDESession.msgTypeMap.createChild,
+    id: this.id,
+    uid: this.project.user.uid,
+    gid: this.project.user.gid,
+    path: this.path
+  });
   //
   // Send an init message to the child process
-  this.sendToChild({type: Node.IDESession.msgTypeMap.initChild, sid: this.id, path: this.path, options: this.options,
-    project: this.project.saveProperties(), config: this.config.saveProperties()});
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.initChild,
+    sid: this.id,
+    path: this.path,
+    options: this.options,
+    project: this.project.saveProperties(),
+    config: this.config.saveProperties(),
+    devAgentOptions: this.project.user?.devAgentOptions
+  });
   //
   this.log("DEBUG", "Created new child", "IDESession.createChild", {options: this.options});
 };
 
 
-/*
+/**
  * Send a message to the childer which will route it to the child process corresponding to this session
  * (i.e. the child with my same id)
- * @param {object} msg - message to send
+ * @param {Object} msg - message to send
  */
 Node.IDESession.prototype.sendToChild = function (msg)
 {
-  this.childer.send({id: this.id, type: Node.IDESession.msgTypeMap.forwardToChild, msg: msg});
+  this.childer.send({
+    id: this.id,
+    type: Node.IDESession.msgTypeMap.forwardToChild,
+    msg
+  });
 };
 
 
 /**
  * Start an auto-kill timer that will kill this session if no one "confirm" it
- * @param {int} timeout - (ms)
- * @param {boolean} logStart - if true remember when the timer has been started
+ * @param {Number} timeout - (ms)
+ * @param {Boolean} logStart - if true remember when the timer has been started
  */
 Node.IDESession.prototype.startAutoKillTimer = function (timeout, logStart)
 {
-  var pthis = this;
-  //
   // Stop kill timer if already started
   if (this.killSessionTimer)
     clearTimeout(this.killSessionTimer.timerID);
   //
   // Create a new timer that will fire after the given timeout
-  var timerID = setTimeout(function () {
-    pthis.log("DEBUG", "Auto-kill fired -> delete session", "IDESession.startAutoKillTimer", {timeout: timeout});
-    pthis.closeAllConnections();
+  let timerID = setTimeout(() => {
+    this.log("DEBUG", "Auto-kill fired -> delete session", "IDESession.startAutoKillTimer", {timeout});
+    this.closeAllConnections();
   }, timeout);
   //
   this.killSessionTimer = {timerID: timerID};
@@ -222,32 +257,31 @@ Node.IDESession.prototype.startAutoKillTimer = function (timeout, logStart)
 
 /**
  * Opens a new socket connection with this session (called by server)
- * @param {socket} socket - socket that initiated the connection
- * @param {object} msg - SID message received from the client
+ * @param {Socket} socket - socket that initiated the connection
+ * @param {Object} msg - SID message received from the client
  */
 Node.IDESession.prototype.openConnection = function (socket, msg)
 {
-  var pthis = this;
-  var ctoken = msg.ctoken;
-  var reconnected;      // TRUE if this is a succesful reconnection
+  let ctoken = msg.ctoken;
+  let reconnected;      // TRUE if this is a succesful reconnection
   //
   // Check if I can accept this message. If the client sent a CTOKEN
   if (ctoken) {
     // If the session has NO master -> that's not allowed
     // If the the session has a master but the CTOKEN is invalid -> that's not allowed
-    if (!this.masterClientSod || this.cTokens.indexOf(ctoken) === -1) {
+    if (!this.masterClientSod || !this.cTokens.includes(ctoken)) {
       this.log("WARN", "Session refuses to accept an invited client", "IDESession.openConnection",
-              {ctoken: ctoken, masterSOD: this.masterClientSod});
+              {ctoken, masterSOD: this.masterClientSod});
       socket.emit(Node.IDESession.msgTypeMap.sessionError, {type: "noPermission"});
       return;
     }
     //
     // The session is connected with a valid MASTER and the client sent a valid CTOKEN
     this.log("DEBUG", "Session has a Master and a valid CTOKEN was received", "IDESession.openConnection",
-            {ctoken: ctoken, masterSOD: this.masterClientSod});
+            {ctoken, masterSOD: this.masterClientSod});
     //
     // "Eat" the token from the list of valid tokens
-    var id = this.cTokens.indexOf(ctoken);
+    let id = this.cTokens.indexOf(ctoken);
     this.cTokens.splice(id, 1);
     //
     // Session has a master and a valid ctoken was received -> accept this connection
@@ -255,8 +289,8 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
   else {  // No ctoken received
     // If the SID is invalid
     if (this.invalidSID(socket)) {
-      var exitUrl = this.config.saveProperties().exitUrl;
-      this.log("WARN", "Invalid SID -> redirect to " + exitUrl, "IDESession.openConnection");
+      let exitUrl = this.config.saveProperties().exitUrl;
+      this.log("WARN", `Invalid SID -> redirect to ${exitUrl}`, "IDESession.openConnection");
       socket.emit(Node.IDESession.msgTypeMap.redirect, exitUrl);
       return;
     }
@@ -268,7 +302,7 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
       // It's a reconnect attempt. If this session is already owned by someone else
       if (this.masterClientSod) {
         // Detach this session from the "old" master
-        var oldSocket = this.sockets[this.masterClientSod];
+        let oldSocket = this.sockets[this.masterClientSod];
         oldSocket.disconnect();
         //
         this.log("WARN", "This session was owned by another client -> take session ownership", "IDESession.openConnection",
@@ -299,12 +333,34 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
   }
   //
   // Create a new Socket ID and add this socket to the map
-  var sod = Node.Utils.generateUID36();
+  let sod = Node.Utils.generateUID36();
   this.sockets[sod] = socket;
   //
   // Prepare profile data I'll send to the client
-  var profile = {name: this.project.user.name, surname: this.project.user.surname,
-    projectname: this.project.name, username: this.project.user.userName};
+  let profile = {
+    name: this.project.user.name,
+    surname: this.project.user.surname,
+    projectname: this.project.name,
+    username: this.project.user.userName,
+    language: this.project.user.idfdata?.language || "ITA",
+    hasDevAgentKey: !!this.project.user?.devAgentOptions || !!this.config.devAgentApiKey,
+    devAgentModel: null,
+    devAgentEffort: null,
+    devAgentSupportConsent: false,
+    isOnboarding: this.config.serverType === "Instant Developer"
+  };
+  //
+  // Decrypt devAgent options to extract model/effort/supportConsent/onboarding for the settings panel
+  if (this.project.user?.devAgentOptions) {
+    let opts = Node.IDESession.decryptDevAgentOptions(this.project.user.devAgentOptions);
+    if (opts) {
+      profile.devAgentModel = opts.model || null;
+      profile.devAgentEffort = opts.effort || null;
+      profile.devAgentSupportConsent = !!opts.supportConsent;
+      if (opts.onboarding)
+        profile.isOnboarding = true;
+    }
+  }
   //
   // If I've not a master client the incoming connection become my master SOD
   // (do this only for IDE or tutorial sessions)
@@ -313,7 +369,7 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
     //
     // If the user has an image, use it for profile
     if (this.project.user.IID)
-      profile.img = "/" + this.project.user.userName + "/picture";
+      profile.img = `/${this.project.user.userName}/picture`;
   }
   //
   // If not reconnected
@@ -322,58 +378,69 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
     socket.emit(Node.IDESession.msgTypeMap.profile, profile);
     //
     // Tell the child that a new client has arrived
-    this.sendToChild({type: Node.IDESession.msgTypeMap.initNewClient, sod: sod,
-      cnt: {master: (sod === this.masterClientSod)}});
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.initNewClient,
+      sod,
+      cnt: {
+        master: sod === this.masterClientSod
+      }
+    });
   }
   else   // Reconnect: inform the client that we've successfully reconnected
-    this.sendToChild({type: Node.IDESession.msgTypeMap.reconnectedClient, sod: sod});
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.reconnectedClient,
+      sod
+    });
   //
   // Listen to generalChannel messages
-  socket.on(Node.IDESession.msgTypeMap.generalChannel, function (msg) {
+  socket.on(Node.IDESession.msgTypeMap.generalChannel, msg => {
     // If the message is for a device, send it to the device
     if (msg.type === Node.IDESession.msgTypeMap.ideToDev) {
-      var dev = pthis.project.user.getDeviceByUuid(msg.devid);
+      let dev = this.project.user.getDeviceByUuid(msg.devid);
       if (!dev)
-        return pthis.log("WARN", "Can't send message to unknown device", "IDESession.openConnection", msg);
+        return this.log("WARN", "Can't send message to unknown device", "IDESession.openConnection", msg);
       //
       dev.sendCommand(msg.cnt);
     }
-    else if (msg.type === "ide-agent" && pthis.ai) {
-      // Handle AI messages - pass socket ID too
-      pthis.ai.handleClientMessage(msg.data, sod);
-    }
-    else  // Not for a device or AI -> send it to the child
-      pthis.sendToChild({type: Node.IDESession.msgTypeMap.generalChannel, sod: sod, cnt: msg});
+    else  // Not for a device -> send it to the child
+      this.sendToChild({
+        type: Node.IDESession.msgTypeMap.generalChannel,
+        sod,
+        cnt: msg
+      });
   });
   //
   // Listen to disconnect event
-  socket.on("disconnect", function () {
-    pthis.log("DEBUG", "IDE socket disconnected", "IDESession.openConnection", msg);
+  socket.on("disconnect", () => {
+    this.log("DEBUG", "IDE socket disconnected", "IDESession.openConnection", msg);
     //
     // Close all apps started by this session
     // (do it backwards because the "close()" call will close the socket that will send
     // a synchronous message to session that will remove the client from the appClients array)
-    for (var i = pthis.appClients.length - 1; i >= 0; i--)
-      pthis.appClients[i].close();
+    for (let i = this.appClients.length - 1; i >= 0; i--)
+      this.appClients[i].close();
     //
     // Tell the child that this socked has gone
-    pthis.sendToChild({type: Node.IDESession.msgTypeMap.disconnectClient, sod: sod});
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.disconnectClient,
+      sod
+    });
     //
     // Remove the socket from the socket map
-    delete pthis.sockets[sod];
+    delete this.sockets[sod];
     //
     // If the socket that has left was the MASTER one, close everything
-    if (pthis.masterClientSod === sod) {
+    if (this.masterClientSod === sod) {
       // This session has no MASTER sod starting from now
-      delete pthis.masterClientSod;
+      delete this.masterClientSod;
       //
       // Start the "kill-session" timer
-      pthis.startAutoKillTimer(pthis.config.timerSession, true);
+      this.startAutoKillTimer(this.config.timerSession, true);
     }
-    else  // The disconnected socket was not the MASTER
+    else if (ctoken)  // The disconnected socket was not the MASTER
       // Put the ctoken back in the list of "valid" tokens
       // (the client can come back until the MASTER is alive)
-      pthis.cTokens.push(ctoken);
+      this.cTokens.push(ctoken);
   });
 };
 
@@ -387,25 +454,25 @@ Node.IDESession.prototype.openConnection = function (socket, msg)
 Node.IDESession.prototype.protectSID = function (req, res)
 {
   // Add another HTTP-only cookie that will "protect" the SID/CID cookie
-  var secure = (!this.config.local && this.config.protocol === "https");
+  let secure = !this.config.local && this.config.protocol === "https";
   this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
-  res.cookie(this.id + "_secureSID", this.secureSID, {path: "/", httpOnly: true, secure: secure});
+  res.cookie(`${this.id}_secureSID`, this.secureSID, {path: "/", httpOnly: true, secure});
   //
   // Remove old _secureSID cookies
   // (for every cookie there have to be a valid IDE/APP session...
   // if such session is not there the corresponding cookie is old and useles)
-  var cookies = Node.cookie.parse(req.headers.cookie || "{}");
-  Object.keys(cookies).forEach(function (key) {
+  let cookies = Node.cookie.parse(req.headers.cookie || "{}");
+  Object.keys(cookies).forEach(key => {
     if (!key.endsWith("_secureSID"))
       return;
     //
-    var sid = key.substring(0, key.length - "_secureSID".length);
-    var session = (this.server.IDESessions[sid] || this.server.appSessions[sid]);
+    let sid = key.substring(0, key.length - "_secureSID".length);
+    let session = (this.server.IDESessions[sid] || this.server.appSessions[sid]);
     if (!session) {
-      this.log("DEBUG", "Remove OLD cookie " + key, "IDESession.protectSID");
+      this.log("DEBUG", `Remove OLD cookie ${key}`, "IDESession.protectSID");
       res.clearCookie(key);
     }
-  }.bind(this));
+  });
 };
 
 
@@ -415,7 +482,7 @@ Node.IDESession.prototype.protectSID = function (req, res)
  */
 Node.IDESession.prototype.invalidSID = function (socket)
 {
-  var secureID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
+  let secureID = Node.cookie.parse(socket.request.headers.cookie || "{}")[`${this.id}_secureSID`];
   if (secureID !== this.secureSID) {
     this.log("WARN", "Secure SID does not match", "IDESession.invalidSID",
             {sid: this.id, expectedSecureSID: this.secureID, secureSID: secureID});
@@ -426,17 +493,21 @@ Node.IDESession.prototype.invalidSID = function (socket)
 
 /**
  * New sync connection
- * @param {socket} socket
+ * @param {Socket} socket
  * @param {Object} msg
  */
-Node.IDESession.prototype.openSyncConnection = function (socket, msg)   // jshint ignore:line
+Node.IDESession.prototype.openSyncConnection = function (socket, msg)
 {
-  var pthis = this;
-  //
   this.syncSocket = socket;
-  socket.on("disconnect", function () {
-    delete pthis.syncSocket;
-    pthis.sendToChild({type: "sync", sid: msg.sid, cnt: {id: "disconnect"}});
+  socket.on("disconnect", () => {
+    delete this.syncSocket;
+    this.sendToChild({
+      type: "sync",
+      sid: msg.sid,
+      cnt: {
+        id: "disconnect"
+      }
+    });
   });
 };
 
@@ -447,9 +518,9 @@ Node.IDESession.prototype.openSyncConnection = function (socket, msg)   // jshin
 Node.IDESession.prototype.closeAllConnections = function ()
 {
   // First, close all sockets
-  var skey = Object.keys(this.sockets);
-  for (var k = 0; k < skey.length; k++) {
-    var sod = skey[k];
+  let skey = Object.keys(this.sockets);
+  for (let k = 0; k < skey.length; k++) {
+    let sod = skey[k];
     this.sockets[sod].disconnect();
   }
   //
@@ -460,13 +531,15 @@ Node.IDESession.prototype.closeAllConnections = function ()
   }
   //
   // Ask the child to gracefully terminate
-  this.sendToChild({type: Node.IDESession.msgTypeMap.terminateChild});
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.terminateChild
+  });
 };
 
 
 /**
  * Handle messages coming from the childer relative to this session
- * @param {object} msg - message
+ * @param {Object} msg - message
  */
 Node.IDESession.prototype.processMessage = function (msg)
 {
@@ -484,10 +557,6 @@ Node.IDESession.prototype.processMessage = function (msg)
       break;
 
     case Node.IDESession.msgTypeMap.sessionCompleted:      // I've done my job
-      // If this session had a callback, call the callback
-      if (this.sessionCompletedCB)
-        this.sessionCompletedCB(msg.result);
-      //
       // Close all connections for this session
       this.closeAllConnections();
       //
@@ -495,6 +564,16 @@ Node.IDESession.prototype.processMessage = function (msg)
       //
       // Tell the server that I've been terminated and he needs to forget about me
       this.server.closeSession(this);
+      //
+      // If this session had a promise, resolve the promise
+      if (this.sessionCompletedPromise) {
+        let {resolve, reject} = this.sessionCompletedPromise;
+        delete this.sessionCompletedPromise;
+        if (msg.result.err)
+          reject(msg.result.err);
+        else
+          resolve(msg.result);
+      }
       break;
 
     case Node.IDESession.msgTypeMap.closeClient:
@@ -547,12 +626,13 @@ Node.IDESession.prototype.processMessage = function (msg)
       this.handleApiCommandResult(msg);
       break;
 
-    case Node.IDESession.msgTypeMap.projectStructureResult:
-      this.handleProjectStructureResult(msg);
-      break;
-
-    case Node.IDESession.msgTypeMap.agentMessageResult:
-      this.handleAgentMessageResult(msg);
+    case Node.IDESession.msgTypeMap.saveDevAgentOptions:
+      // Save encrypted devAgentOptions to user config (validate base64 payload)
+      if (typeof msg.cnt === "string" && msg.cnt.length < 4096
+          && /^[A-Za-z0-9+/=]+$/.test(msg.cnt)) {
+        this.project.user.devAgentOptions = msg.cnt;
+        this.config.saveConfig();
+      }
       break;
 
     default:
@@ -564,14 +644,14 @@ Node.IDESession.prototype.processMessage = function (msg)
 
 /**
  * Sends a message to an online app
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.sendMessageToClientApp = function (msg)
 {
-  for (var i = 0; i < this.appClients.length; i++) {
-    var acli = this.appClients[i];
+  for (let i = 0; i < this.appClients.length; i++) {
+    let acli = this.appClients[i];
     //
-    var send;
+    let send;
     if (!msg.cidr)
       send = true;      // No CIDR -> send message to every app client
     else {
@@ -590,41 +670,46 @@ Node.IDESession.prototype.sendMessageToClientApp = function (msg)
 
 /**
  * Sends a message to the IDE (browser) and wait for reply
- * @param {object} cnt
- * @param {callback} cb
+ * @param {Object} cnt
  */
-Node.IDESession.prototype.sendApiCommand = function (command, cb)
+Node.IDESession.prototype.sendApiCommand = async function (command)
 {
-  let cbid = Node.Utils.generateUID36();
-  this.cbList[cbid] = cb;
-  this.sendToChild({type: Node.IDESession.msgTypeMap.apiCommand, cbid, command});
+  let promiseId = Node.Utils.generateUID36();
+  return await new Promise((resolve, reject) => {
+    this.promisesList[promiseId] = {resolve, reject};
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.apiCommand,
+      promiseId,
+      command
+    });
+  });
 };
 
 
 /**
  * Sends a message to the IDE (browser) and wait for reply
- * @param {object} cnt
- * @param {callback} cb
+ * @param {Object} cnt
  */
 Node.IDESession.prototype.handleApiCommandResult = function (message)
 {
-  let cb = this.cbList[message.cbid];
-  delete this.cbList[message.cbid];
-  if (cb) {
-    cb(message.result, message.error);
-  }
+  let promise = this.promisesList[message.promiseId];
+  delete this.promisesList[message.promiseId];
+  if (message.error)
+    promise?.reject(message.error)
+  else
+    promise?.resolve(message.result);
 };
 
 
 /**
  * Sends a message to an offline app
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.sendMessageToOffline = function (msg)
 {
   // Locate the client app and send the message
-  for (var i = 0; i < this.appClients.length; i++) {
-    var acli = this.appClients[i];
+  for (let i = 0; i < this.appClients.length; i++) {
+    let acli = this.appClients[i];
     if (acli.id === msg.cid)
       return acli.sendOfflineMessage(msg.content);
   }
@@ -633,11 +718,11 @@ Node.IDESession.prototype.sendMessageToOffline = function (msg)
 
 /**
  * Handles a CToken operation for this session
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.handleCTokenOpMsg = function (msg)
 {
-  var ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
+  let ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
   if (msg.cnt.op === "add" && ctidx === -1)
     this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
   else if (msg.cnt.op === "del" && ctidx !== -1)
@@ -645,162 +730,110 @@ Node.IDESession.prototype.handleCTokenOpMsg = function (msg)
 };
 
 
-/**
- * Request project structure from child process
- * @param {Array} elements - Array of element IDs to retrieve
- * @param {Function} callback - Callback with structure result
- */
-Node.IDESession.prototype.getProjectStructureAsync = async function (elements)
-{
-  return new Promise((resolve, reject) => {
-    let requestId = Node.Utils.generateUID36();
-    //
-    // Store callback
-    if (!this.structureCallbacks)
-      this.structureCallbacks = {};
-    //
-    this.structureCallbacks[requestId] = {
-      resolve: resolve,
-      reject: reject,
-      timeout: setTimeout(() => {
-        delete this.structureCallbacks[requestId];
-        reject(new Error("Project structure request timeout"));
-      }, 10000) // 10 second timeout
-    };
-    //
-    // Send request to child
-    this.sendToChild({
-      type: Node.IDESession.msgTypeMap.getProjectStructure,
-      requestId: requestId,
-      elements: elements
-    });
-  });
-};
 
 
-/**
- * Handle project structure result from child
- * @param {Object} msg - Message from child
- */
-Node.IDESession.prototype.handleProjectStructureResult = function (msg)
-{
-  if (!this.structureCallbacks || !this.structureCallbacks[msg.requestId])
-    return;
-  //
-  let callback = this.structureCallbacks[msg.requestId];
-  clearTimeout(callback.timeout);
-  //
-  if (msg.error) {
-    let errorMessage = typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error);
-    callback.reject(new Error(errorMessage));
-  }
-  else
-    callback.resolve(msg.result);
-  //
-  delete this.structureCallbacks[msg.requestId];
-};
 
 
-/**
- * Send agent message to child process (async)
- * @param {Object} message - Agent message with command and params
- * @returns {Promise} Promise with result
- */
-Node.IDESession.prototype.sendAgentMessageAsync = async function (message)
-{
-  return new Promise((resolve, reject) => {
-    let requestId = Node.Utils.generateUID36();
-    //
-    // Store callback
-    if (!this.agentCallbacks)
-      this.agentCallbacks = {};
-    //
-    this.agentCallbacks[requestId] = {
-      resolve: resolve,
-      reject: reject,
-      timeout: setTimeout(() => {
-        delete this.agentCallbacks[requestId];
-        reject(new Error(`Agent message timeout: ${message.command}`));
-      }, 30000) // 30 second timeout for complex operations
-    };
-    //
-    // Send message to child
-    this.sendToChild({
-      type: Node.IDESession.msgTypeMap.agentMessage,
-      requestId: requestId,
-      message: message
-    });
-  });
-};
 
 
-/**
- * Handle agent message result from child
- * @param {Object} msg - Message from child
- */
-Node.IDESession.prototype.handleAgentMessageResult = function (msg)
-{
-  if (!this.agentCallbacks || !this.agentCallbacks[msg.requestId])
-    return;
-  //
-  let callback = this.agentCallbacks[msg.requestId];
-  clearTimeout(callback.timeout);
-  //
-  if (msg.error) {
-    let errorMessage = typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error);
-    callback.reject(new Error(errorMessage));
-  }
-  else {
-    // Generic handling: if there's a 'result' field, use it;
-    // otherwise return the entire message excluding metadata fields
-    if (msg.result !== undefined) {
-      callback.resolve(msg.result);
-    }
-    else {
-      // Remove only the protocol fields, keep everything else
-      let { type, requestId, ...dataFields } = msg;
-      callback.resolve(dataFields);
-    }
-  }
-  //
-  delete this.agentCallbacks[msg.requestId];
-};
+
+
+
+
 
 
 /**
  * Handles a create DB message
- * @param {object} msg
+ * @param {Object} msg
  */
-Node.IDESession.prototype.handleCreateDBMsg = function (msg)
+Node.IDESession.prototype.handleCreateDBMsg = async function (msg)
 {
-  var pthis = this;
-  //
   // Create the database for project's user
-  this.project.user.createDatabase(msg.dbname, function (result) {
-    // Extract error message (if embedded)
-    if (result && result.err)
-      result = result.err;
-    //
+  let err;
+  try {
+    await this.project.user.createDatabase(msg.dbname);
+  }
+  catch (e) {
     // It's an error only if the error is not "the DB already exists"
-    var err = (result !== "Database already exists" ? result : undefined);
-    if (err)
-      pthis.log("WARN", "Can't create database: " + err, "IDESession.handleCreateDBMsg", {dbname: msg.dbname});
-    //
-    // Report to callee
-    pthis.sendToChild({type: Node.IDESession.msgTypeMap.createDBresult, dbname: msg.dbname, err: err});
+    if (e.message !== "Database already exists") {
+      this.log("WARN", `Can't create database: ${e}`, "IDESession.handleCreateDBMsg", {dbname: msg.dbname});
+      err = e;
+    }
+  }
+  // Report to callee
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.createDBresult,
+    dbname: msg.dbname,
+    err
   });
 };
 
 
 /**
  * Handles a send response message
- * @param {object} msg
+ * Supports both batch and streaming responses
+ * @param {Object} msg - {code, text, options}
  */
 Node.IDESession.prototype.handleSendResponseMsg = function (msg)
 {
   if (!this.restRes)
     return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)",
             "IDESession.handleSendResponseMsg", msg);
+  //
+  // STREAMING MODE - START
+  if (msg.options.stream === "start") {
+    try {
+      // Prepare headers
+      let headers = Object.assign({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      }, msg.options.headers || {});
+      //
+      // Start streaming
+      this.restRes.writeHead(msg.code, headers);
+    }
+    catch (ex) {
+      this.log("WARN", "Can't start streaming: " + ex, "IDESession.handleSendResponseMsg", msg);
+    }
+    return;
+  }
+  //
+  // STREAMING MODE - CHUNK
+  if (msg.options.stream === "chunk") {
+    try {
+      let chunk = msg.text;
+      //
+      // Handle buffer chunks
+      if (msg.options.type === "buffer")
+        chunk = Buffer.from(chunk, "base64");
+      else if (typeof chunk !== "string")
+        chunk = JSON.stringify(chunk);
+      //
+      this.restRes.write(chunk);
+    }
+    catch (ex) {
+      this.log("WARN", "Can't send chunk: " + ex, "IDESession.handleSendResponseMsg", msg);
+    }
+    return;
+  }
+  //
+  // STREAMING MODE - END
+  if (msg.options.stream === "end") {
+    try {
+      this.restRes.end();
+    }
+    catch (ex) {
+      this.log("WARN", "Can't end stream: " + ex, "IDESession.handleSendResponseMsg", msg);
+    }
+    //
+    // Session termination will happen in child process (app.js) after sendResponse with stream:"end"
+    // REST death timer will be automatically canceled during termination
+    return;
+  }
+  //
+  // BATCH MODE (existing code)
   //
   this.log("DEBUG", "Send REST response", "IDESession.handleSendResponseMsg", msg);
   //
@@ -827,9 +860,9 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
   try {
     // Send headers
     if (msg.options.headers && typeof msg.options.headers === "object") {
-      Object.keys(msg.options.headers).forEach(function (header) {
+      Object.keys(msg.options.headers).forEach(header => {
         this.restRes.setHeader(header, msg.options.headers[header]);
-      }.bind(this));
+      });
     }
     //
     // Send code
@@ -844,21 +877,26 @@ Node.IDESession.prototype.handleSendResponseMsg = function (msg)
       this.restRes.end(typeof msg.text !== "string" ? JSON.stringify(msg.text) : msg.text);
   }
   catch (ex) {
-    this.log("WARN", "Can't send REST response: " + ex, "IDESession.handleSendResponseMsg", msg);
+    this.log("WARN", `Can't send REST response: ${ex}`, "IDESession.handleSendResponseMsg", msg);
   }
 };
 
 
 /**
  * Handle a device message
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.handleDeviceMessage = function (msg)
 {
   switch (msg.cnt.type) {
     case "deviceListRequest":   // Send DEVICE list to child process
-      this.sendToChild({type: Node.IDESession.msgTypeMap.deviceMsg,
-        cnt: {type: "deviceList", data: this.project.user.getUiDeviceList(this)}});
+      this.sendToChild({
+        type: Node.IDESession.msgTypeMap.deviceMsg,
+        cnt: {
+          type: "deviceList",
+          data: this.project.user.getUiDeviceList(this)
+        }
+      });
       break;
   }
 };
@@ -866,7 +904,7 @@ Node.IDESession.prototype.handleDeviceMessage = function (msg)
 
 /**
  * Handle a SYNC message
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.handleSyncMessage = function (msg)
 {
@@ -882,22 +920,22 @@ Node.IDESession.prototype.handleSyncMessage = function (msg)
 
 /**
  * Handle other messages
- * @param {object} msg
+ * @param {Object} msg
  */
 Node.IDESession.prototype.handleOtherMessages = function (msg)
 {
-  var socket = this.sockets[msg.sod];
+  let socket = this.sockets[msg.sod];
   if (!socket) {
     // Clean up General Channel message (it's too big to be logged!)
     if (msg.type === Node.IDESession.msgTypeMap.generalChannel && msg.cnt) {
       try {
         let msgContent = JSON.stringify(msg.cnt);
         if (msgContent.length > 1000) {
-          msgContent = msgContent.substring(0, 1000) + "...";
+          msgContent = `${msgContent.slice(0, 1000)}...`;
           msg.cnt = {"PARTIAL MESSAGE": msgContent};
         }
       }
-      catch (ex) {
+      catch {
         msg.cnt = {"ORIGINAL MESSAGE": "NOT SERIALIZABLE"};
       }
     }
@@ -916,15 +954,20 @@ Node.IDESession.prototype.handleOtherMessages = function (msg)
  */
 Node.IDESession.prototype.startRest = function (req, res)
 {
-  var appid = (req.params ? req.params.appid.replace(/-/g, "/") : undefined);
+  let appid = req.params?.appid.replace(/-/g, "/");
   //
   // Store the request/response objects so that the app can use them
   // (for instance, the app can answer to a REST request using the .restRes property and the app::sendResponse method)
   this.restReq = req;
   this.restRes = res;
   //
-  this.sendToChild({type: Node.IDESession.msgTypeMap.appmsg2ide, appid: appid, sid: this.id,
-    request: this.request, cookies: this.cookies});
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.appmsg2ide,
+    appid,
+    sid: this.id,
+    request: this.request,
+    cookies: this.cookies
+  });
 };
 
 
@@ -936,7 +979,7 @@ Node.IDESession.prototype.startRest = function (req, res)
 Node.IDESession.prototype.createAppClient = function (req, res)
 {
   // Create a new app client
-  var appClient = new Node.IDEAppClient(this);
+  let appClient = new Node.IDEAppClient(this);
   //
   // Add it to the app clients array
   this.appClients.push(appClient);
@@ -949,18 +992,22 @@ Node.IDESession.prototype.createAppClient = function (req, res)
   // febe property on that app. This property is used by offline AApp
   // to know if need to preset serverUrl property for synchronization
   if (this.appClients.length === 2) {
-    var febeMode;
+    let febeMode;
     //
-    var isOfflineFirstAppClient = this.appClients[0].mode === "offline";
-    var isOfflineSecondAppClient = this.appClients[1].mode === "offline";
+    let isOfflineFirstAppClient = this.appClients[0].mode === "offline";
+    let isOfflineSecondAppClient = this.appClients[1].mode === "offline";
     //
     // If the appclients have opposing modes, I'm in febe mode
     if (isOfflineFirstAppClient !== isOfflineSecondAppClient)
       febeMode = true;
     //
     if (febeMode) {
-      for (var i = 0; i < this.appClients.length; i++)
-        this.sendToChild({type: Node.IDESession.msgTypeMap.febeMode, appid: this.appClients[i].appid, enabled: true});
+      for (let i = 0; i < this.appClients.length; i++)
+        this.sendToChild({
+          type: Node.IDESession.msgTypeMap.febeMode,
+          appid: this.appClients[i].appid,
+          enabled: true
+        });
     }
   }
 };
@@ -968,42 +1015,45 @@ Node.IDESession.prototype.createAppClient = function (req, res)
 
 /**
  * Delete an appClient
- * @param {appClient} appClient
+ * @param {AppClient} appClient
  */
 Node.IDESession.prototype.deleteAppClient = function (appClient)
 {
   // Delete the app client from the array
-  var idx = this.appClients.indexOf(appClient);
+  let idx = this.appClients.indexOf(appClient);
   this.appClients.splice(idx, 1);
   //
   // If the master client is deleted then we send a message to the child to delete the Session or the Offline Proxy
   if (this.masterAppClient === appClient) {
     this.log("DEBUG", "Terminated MASTER client from session (2)", "IDESession.deleteAppClient");
     //
-    this.sendToChild({type: Node.IDESession.msgTypeMap.deleteAppSession, sid: this.id, appid: appClient.appid});
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.deleteAppSession,
+      sid: this.id,
+      appid: appClient.appid
+    });
     //
     // Now this session has no master app client
     delete this.masterAppClient;
   }
   else
-    this.log("DEBUG", "Terminated SLAVE client " + idx + " from session (2)", "IDESession.deleteAppClient");
+    this.log("DEBUG", `Terminated SLAVE client ${idx} from session (2)`, "IDESession.deleteAppClient");
   //
   // Disable febe mode
-  this.sendToChild({type: Node.IDESession.msgTypeMap.febeMode, appid: appClient.appid});
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.febeMode,
+    appid: appClient.appid
+  });
 };
 
 
 /**
  * Search an app client by its ID
- * @param {string} id
+ * @param {String} id
  */
 Node.IDESession.prototype.getAppClientById = function (id)
 {
-  for (var i = 0; i < this.appClients.length; i++) {
-    var acli = this.appClients[i];
-    if (acli.id === id)
-      return acli;
-  }
+  return this.appClients.find(acli => acli.id === id);
 };
 
 
@@ -1022,14 +1072,18 @@ Node.IDESession.prototype.countClients = function ()
  */
 Node.IDESession.prototype.handleDeleteTutorialDBsMessage = function (dbNames)
 {
-  this.deleteTutorialDBsTimeout = setTimeout(function () {
-    for (var i = 0; i < dbNames.length; i++) {
-      this.project.user.deleteDatabase(dbNames[i], function () {
-        clearTimeout(this.deleteTutorialDBsTimeout);
-        delete this.deleteTutorialDBsTimeout;
-      }.bind(this));         // jshint ignore:line
+  this.deleteTutorialDBsTimeout = setTimeout(async () => {
+    delete this.deleteTutorialDBsTimeout;
+    for (let dbName of dbNames) {
+      try {
+        await this.project.user.deleteDatabase(dbName);
+      }
+      catch (e) {
+        // Log error but continue with other databases
+        this.log("WARN", `Error deleting database ${dbName}: ${e.message || e}`, "IDESession.handleDeleteTutorialDBsMessage");
+      }
     }
-  }.bind(this), this.config.timerSession);
+  }, this.config.timerSession);
 };
 
 
@@ -1037,40 +1091,56 @@ Node.IDESession.prototype.handleDeleteTutorialDBsMessage = function (dbNames)
  * Handles a remote query message
  * @param {Object} options
  */
-Node.IDESession.prototype.handleRemoteQueryMessage = function (options)
+Node.IDESession.prototype.handleRemoteQueryMessage = async function (options)
 {
   // If the server is this one execute a "local" query on a "local" database
-  if (options.server === "localhost") {
-    // Get the user
-    var user = this.config.getUser(options.user || "manager");
-    if (!user) {
-      this.log("WARN", "User not found", "IDESession.handleRemoteQueryMessage", options);
-      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, err: "User not found"});
-    }
-    var db = user.getDatabase(options.database);
-    if (!db) {
-      this.log("WARN", "Database not found", "IDESession.handleRemoteQueryMessage", options);
-      return this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, err: "Database not found"});
-    }
-    //
-    var params = {req: {query: {query: encodeURIComponent(options.sql)}}};
-    db.query(params, function (response) {
-      var result, err;
-      if (response.msg)
-        result = JSON.parse(response.msg);
-      else
-        err = response.err || response;
+  let result, err;
+  try {
+    if (options.server === "localhost") {
+      // Get the user
+      let user = this.config.getUser(options.user || "manager");
+      if (!user)
+        throw new Error("User not found");
       //
-      this.log("DEBUG", "Local query executed", "IDESession.handleRemoteQueryMessage", {result: result, err: err});
-      this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, result: result, err: err});
-    }.bind(this));
-    //
-    return;
+      let db = user.getDatabase(options.database);
+      if (!db)
+        throw new Error("Database not found");
+      //
+      let params = {
+        req: {
+          query: {
+            query: encodeURIComponent(options.sql)
+          }
+        }
+      };
+      //
+      try {
+        let response = await db.query(params);
+        result = JSON.parse(response.msg);
+      }
+      catch (e) {
+        err = e.message || e;
+        throw e;
+      }
+      finally {
+        this.log("DEBUG", "Local query executed", "IDESession.handleRemoteQueryMessage", {result, err});
+      }
+    }
+    else
+      result = await this.server.request.executeRemoteQuery(options);
+  }
+  catch (e) {
+    err = e.message || e;
+    this.log("WARN", e.message || e, "IDESession.handleRemoteQueryMessage", options);
   }
   //
-  this.server.request.executeRemoteQuery(options, function (result, err) {
-    this.sendToChild({type: Node.IDESession.msgTypeMap.remoteQueryResult, sid: this.id, qryid: options.qryid, result: result, err: err});
-  }.bind(this));
+  this.sendToChild({
+    type: Node.IDESession.msgTypeMap.remoteQueryResult,
+    sid: this.id,
+    qryid: options.qryid,
+    result,
+    err
+  });
 };
 
 /**
@@ -1081,10 +1151,17 @@ Node.IDESession.prototype.handleCopyPrjFile = function (options)
 {
   this.log("DEBUG", "Copy project file", "IDESession.handleCopyPrjFile", options);
   //
-  Node.fs.copyFile(this.config.directory + "/" + options.src, this.config.directory + "/" + options.dst, function (err) {
+  let src = Node.path.resolve(this.config.directory, options.src);
+  let dst = Node.path.resolve(this.config.directory, options.dst);
+  //
+  // Path traversal validation
+  if (!src.startsWith(this.config.directory) || !dst.startsWith(this.config.directory))
+    return this.log("WARN", "Path traversal detected", "IDESession.handleCopyPrjFile", options);
+  //
+  Node.fs.copyFile(src, dst, err => {
     if (err)
-      return this.log("WARN", "Can't copy file: " + err, "IDESession.handleCopyPrjFile", options);
-  }.bind(this));
+      return this.log("WARN", `Can't copy file: ${err}`, "IDESession.handleCopyPrjFile", options);
+  });
 };
 
 // Export module

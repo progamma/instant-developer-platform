@@ -3,14 +3,11 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
-
 var Node = Node || {};
 var InDe = InDe || {};
 
 // Import modules
 Node.querystring = require("querystring");
-Node.path = require("path");
 Node.zlib = require("zlib");
 
 // Import Classes
@@ -18,7 +15,7 @@ Node.Utils = require("./utils");
 
 
 /**
- * @Class represent an Instan Developer AppClient
+ * @class represent an Instan Developer AppClient
  * @param {Node.IDESession} par
  */
 Node.IDEAppClient = function (par)
@@ -61,10 +58,10 @@ Object.defineProperties(Node.IDEAppClient.prototype, {
 
 /**
  * Log a new message
- * @param {string} level - message level (DEBUG, INFO, WARN, ERROR)
- * @param {string} message - text message
- * @param {string} sender - function that generated the message
- * @param {object} data - optional data to log
+ * @param {String} level - message level (DEBUG, INFO, WARN, ERROR)
+ * @param {String} message - text message
+ * @param {String} sender - function that generated the message
+ * @param {Object} data - optional data to log
  */
 Node.IDEAppClient.prototype.log = function (level, message, sender, data)
 {
@@ -78,46 +75,42 @@ Node.IDEAppClient.prototype.log = function (level, message, sender, data)
 
 /**
  * Initiaziazlise the AppClient
- * @param {request} req
- * @param {response} res
+ * @param {Request} req
+ * @param {Response} res
  */
 Node.IDEAppClient.prototype.init = function (req, res)
 {
-  var pthis = this;
-  //
   // Get the appid from the url (if given)
-  this.appid = (req.params ? req.params.appid.replace(/-/g, "/") : undefined);
-  this.mode = (req.query ? req.query.mode : undefined);
+  this.appid = req.params?.appid.replace(/-/g, "/");
+  this.mode = req.query?.mode;
   //
   // Get the dark theme indicator from the query string that the preview page has passed.
   let dark = req.query?.previewDark === "true" && req.query?.forceuitheme === "true";
   //
   // Redirect to the main page
-  var qrys = Node.querystring.stringify({sid: this.session.id, acid: this.id, appid: this.appid});
+  let qrys = Node.querystring.stringify({sid: this.session.id, acid: this.id, appid: this.appid});
   //
   // Add dark theme request if needed
   if (dark)
     qrys += "&previewDark=true";
   //
-  res.redirect("/app/" + this.config.getAppMainFile(this.mode) + "?" + qrys);
+  res.redirect(`/app/${this.config.getAppMainFile(this.mode)}?${qrys}`);
   //
   // Create a timer. If an openConnection does not arrive within 20 seconds,
   // the app client is deleted
-  this.killClient = setTimeout(function () {
-    pthis.log("DEBUG", "Client did not confirm its connection within 20 sec -> deleted", "IDEAppClient.init");
-    pthis.session.deleteAppClient(pthis);
+  this.killClient = setTimeout(() => {
+    this.log("DEBUG", "Client did not confirm its connection within 20 sec -> deleted", "IDEAppClient.init");
+    this.session.deleteAppClient(this);
   }, 20000);
 };
 
 
 /**
  * OpenConnection of the appclient
- * @param {socket} socket
+ * @param {Socket} socket
  */
 Node.IDEAppClient.prototype.openConnection = function (socket)
 {
-  var pthis = this;
-  //
   this.socket = socket;
   //
   // Stop killClient timer (see IDEAppClient::init)
@@ -131,30 +124,40 @@ Node.IDEAppClient.prototype.openConnection = function (socket)
     this.session.masterAppClient = this;
   //
   // Listen for "appmsg" (sent by client app.js)
-  socket.on("appmsg", function (msg) {
+  socket.on("appmsg", msg => {
     // Route this message to the child
-    pthis.session.sendToChild({type: Node.IDEAppClient.msgTypeMap.appmsg2ide, cid: pthis.id, appid: msg.appid,
-      events: msg.events, request: pthis.session.request, cookies: pthis.session.cookies});
+    this.session.sendToChild({
+      type: Node.IDEAppClient.msgTypeMap.appmsg2ide,
+      cid: this.id,
+      appid: msg.appid,
+      events: msg.events,
+      request: this.session.request,
+      cookies: this.session.cookies
+    });
     //
     // Delete the content of the request after is sent
-    delete pthis.session.request;
-    delete pthis.session.cookies;
+    delete this.session.request;
+    delete this.session.cookies;
   });
   //
   // Listen for "offmsg" messages (sent by client app.js when the app is offline)
-  socket.on("offmsg", function (msg) {
+  socket.on("offmsg", msg => {
     // This is a message from an offline proxy app. Redirect to child
-    pthis.session.sendToChild({type: Node.IDEAppClient.msgTypeMap.offmsg2ide, cid: pthis.id,
-      appid: msg.appid, cnt: msg.content});
+    this.session.sendToChild({
+      type: Node.IDEAppClient.msgTypeMap.offmsg2ide,
+      cid: this.id,
+      appid: msg.appid,
+      cnt: msg.content
+    });
   });
   //
   // Listen for disconnect
-  socket.on("disconnect", function () {
+  socket.on("disconnect", () => {
     // Log disconnection
-    pthis.log("DEBUG", "Received disconnect from client socket (1)", "IDEAppClient.openConnection");
+    this.log("DEBUG", "Received disconnect from client socket (1)", "IDEAppClient.openConnection");
     //
     // Ask my parent to delete me
-    pthis.session.deleteAppClient(pthis);
+    this.session.deleteAppClient(this);
   });
 };
 
@@ -190,8 +193,7 @@ Node.IDEAppClient.prototype.sendOfflineMessage = function (msg)
  */
 Node.IDEAppClient.prototype.close = function ()
 {
-  if (this.socket)
-    this.socket.disconnect();
+  this.socket?.disconnect();
 };
 
 // Export module

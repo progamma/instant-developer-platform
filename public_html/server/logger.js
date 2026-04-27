@@ -3,8 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, process, module, __dirname, __filename */
-
 var Node = Node || {};
 
 // Import modules
@@ -36,7 +34,7 @@ Node.Logger.msgTypeMap = {
 // Define usefull properties for this object
 Object.defineProperties(Node.Logger.prototype, {
   config: {
-    get: function () {
+    get() {
       return this.parent.config;    // NOTE: only server and child have config
     }
   }
@@ -53,7 +51,7 @@ Node.Logger.prototype.init = function ()
     // If I need to log exceptions, add listener
     if (this.config.handleException) {
       let unhandledExceptionFnc = err => {
-        this.log("ERROR", "Uncaught server exception : " + (err.stack || err), "Logger.init");
+        this.log("ERROR", `Uncaught server exception : ${err.stack || err}`, "Logger.init");
         //
         let crashAll = true;
         if ((err.stack + "").includes("node_modules/gcloud"))
@@ -84,7 +82,7 @@ Node.Logger.prototype.init = function ()
  */
 Node.Logger.prototype.initLogFile = function ()
 {
-  var logPath = Node.path.resolve(__dirname + "/../log");
+  let logPath = Node.path.resolve(__dirname, "..", "log");
   //
   // If LOG directory does not exist, create it
   if (!Node.fs.existsSync(logPath))
@@ -93,9 +91,7 @@ Node.Logger.prototype.initLogFile = function ()
   // If I haven't done it yet
   if (!this.newLogTimer) {
     // Create a timer that will change LOG file each day
-    this.newLogTimer = setInterval(function () {
-      this.initLogFile();
-    }.bind(this), 60 * 1000);   // Check day change each minute
+    this.newLogTimer = setInterval(() => this.initLogFile(), 60 * 1000);   // Check day change each minute
   }
   //
   // If day has changed, create a new LOG
@@ -117,10 +113,10 @@ Node.Logger.prototype.initLogFile = function ()
   //
   // If needed, create a new file for the given date
   if (!this.stream) {
-    this.stream = Node.fs.createWriteStream(logPath + "/" + this.ISOdate + ".log", {"flags": "a", "mode": 0600});
+    this.stream = Node.fs.createWriteStream(Node.path.join(logPath, `${this.ISOdate}.log`), {"flags": "a", "mode": 0o600});
     //
     // Add first message
-    this.log("INFO", "******* New log for server " + this.config.name + " *******");
+    this.log("INFO", `******* New log for server ${this.config.name} *******`);
     //
     // A new LOG file has been created -> delete old logs if any
     this.deleteOldLogs();
@@ -131,32 +127,36 @@ Node.Logger.prototype.initLogFile = function ()
 /**
  * Delete old logs
  */
-Node.Logger.prototype.deleteOldLogs = function ()
+Node.Logger.prototype.deleteOldLogs = async function ()
 {
-  var logPath = Node.path.resolve(__dirname + "/../log");
+  let logPath = Node.path.resolve(__dirname, "..", "log");
   //
   // Delete logs that are older than 15 days
-  Node.fs.readdir(logPath, function (err, files) {
-    if (err)
-      return console.error("[Logger::deleteOldLogs] Error while reading LOG directory: " + err);
+  let files;
+  try {
+    files = await Node.fs.promises.readdir(logPath);
+  }
+  catch (err) {
+    console.error(`[Logger::deleteOldLogs] Error while reading LOG directory: ${err}`);
+    return;
+  }
+  //
+  for (let fn of files) {
+    // Skip files that are not in the form [year]-[month]-[day].log
+    if (!/^\d{4}-\d{2}-\d{2}\.log$/.test(fn))
+      continue;
     //
-    for (var i = 0; i < files.length; i++) {
-      var fn = files[i];
-      //
-      // Skip files that are not in the form [year]-[month]-[day].log
-      if (fn.split("-").length !== 3 || fn.indexOf(".") === -1 || fn.substring(fn.lastIndexOf(".")) !== ".log")
-        continue;
-      //
-      // Delete old logs (keep last 15 days logs)
-      var fdt = new Date(fn.substring(0, 10));
-      if ((new Date() - fdt) > 15 * 24 * 3600 * 1000) {
-        Node.fs.rm(logPath + "/" + fn, {force: true}, function (err) {
-          if (err)
-            console.log("[Logger::deleteOldLogs] Error deleting the file " + logPath + "/" + fn + ": " + err);
-        });   // jshint ignore:line
+    // Delete old logs (keep last 15 days logs)
+    let fdt = new Date(fn.substring(0, 10));
+    if ((new Date() - fdt) > 15 * 24 * 3600 * 1000) {
+      try {
+        await Node.fs.promises.rm(Node.path.join(logPath, fn), {force: true});
+      }
+      catch (err) {
+        console.log(`[Logger::deleteOldLogs] Error deleting the file ${Node.path.join(logPath, fn)}: ${err}`);
       }
     }
-  }.bind(this));
+  }
 };
 
 
@@ -175,7 +175,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   // Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
   //
   // Unfortunately we depend on more than 50 modules... and several have "new Buffer()" somewhere... We need to skip this message
-  if (message.indexOf("Buffer() is deprecated due to security and usability issues") !== -1)
+  if (message.includes("Buffer() is deprecated due to security and usability issues"))
     return;
   //
   // If log has stopped, do nothing
@@ -187,9 +187,9 @@ Node.Logger.prototype.log = function (level, message, sender, data)
     try {
       JSON.stringify(data);
     }
-    catch (ex) {
+    catch {
       data = undefined;
-      this.log("DEBUG", "Can't dump DATA for message " + message, sender);
+      this.log("DEBUG", `Can't dump DATA for message ${message}`, sender);
     }
   }
   //
@@ -206,13 +206,13 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   // - if level is ERROR -> write to console.error
   if (this.config && this.config.local && (level === "DEBUG" || level === "ERROR")) {
     // Compute text message
-    var s = new Date().toISOString() + " - " + level + " - " + message;
+    let s = `${new Date().toISOString()} - ${level} - ${message}`;
     if (sender || data) {
       s += " - (";
       if (sender)
-        s += "sender: " + sender;
+        s += `sender: ${sender}`;
       if (data)
-        s += (sender ? ", " : "") + "data: " + JSON.stringify(data);
+        s += (sender ? ", " : "") + `data: ${JSON.stringify(data)}`;
       s += ")";
     }
     //
@@ -234,7 +234,13 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   // If I'm not the SERVER, ask my owner if he can log this for me
   if (this.parentType !== "SERVER") {
     if (process.connected)
-      process.send({type: Node.Logger.msgTypeMap.log, level: level, message: message, sender: sender, data: data});
+      process.send({
+        type: Node.Logger.msgTypeMap.log,
+        level,
+        message,
+        sender,
+        data
+      });
     return;
   }
   //
@@ -242,7 +248,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
   this.initLogFile();
   //
   // Log message to physical file
-  var l = {dt: new Date().toISOString(), lev: level, msg: message.replace(/\n/g, ""), snd: sender, data: data};
+  let l = {dt: new Date().toISOString(), lev: level, msg: message.replace(/\n/g, ""), snd: sender, data};
   this.stream.write(JSON.stringify(l) + "\n");
 };
 
@@ -255,7 +261,7 @@ Node.Logger.prototype.log = function (level, message, sender, data)
 Node.Logger.prototype.startCheckTimer = function ()
 {
   // Start check timer
-  setInterval(function () {
+  setInterval(async () => {
     // If log has stopped due to file size, do nothing
     // (a new file will ha to be generated in order to check for something else)
     if (this.stopLogFileSize)
@@ -263,17 +269,17 @@ Node.Logger.prototype.startCheckTimer = function ()
     //
     // Check file size
     if (this.stream)
-      Node.fs.stat(this.stream.path, function (err, stats) {
+      Node.fs.stat(this.stream.path, (err, stats) => {
         if (err)
-          return this.log("ERROR", "Error getting the LOG size: " + err, "Logger.startCheckTimer");
+          return this.log("ERROR", `Error getting the LOG size: ${err}`, "Logger.startCheckTimer");
         //
         // LOG file is too big... stop writing to disk
         if (stats.size > 200 * 1024 * 1024) {
-          this.log("WARN", "LOG file is too big", "Logger.startCheckTimer", {size: stats.size, path: this.stream.path});
+          this.log("WARN", `LOG file is too big`, "Logger.startCheckTimer", {size: stats.size, path: this.stream.path});
           this.stopLogFileSize = true;
           return;
         }
-      }.bind(this));
+      });
     //
     // If there is no limit, do nothing
     if (!this.config.lowDiskThreshold) {
@@ -282,25 +288,27 @@ Node.Logger.prototype.startCheckTimer = function ()
     }
     //
     // Check disk size
-    Node.Utils.getFreeDiskSize(function (available, err) {
-      if (err)
-        return this.log("ERROR", "Can't get free disk space: " + err, "Logger.startCheckTimer");
-      //
-      // If disk left is less than "lowDiskThreshold" stop writing
-      if (available < this.config.lowDiskThreshold) {
-        // LOG file is too big... stop writing to disk
-        if (!this.stopLogDiskSize) {
-          this.log("WARN", "Disk space left on device is too low", "Logger.startCheckTimer", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
-          this.stopLogDiskSize = true;
-        }
+    let available;
+    try {
+      available = await Node.Utils.getFreeDiskSize();
+    } catch (err) {
+      return this.log("ERROR", `Can't get free disk space: ${err}`, "Logger.startCheckTimer");
+    }
+    //
+    // If disk left is less than "lowDiskThreshold" stop writing
+    if (available < this.config.lowDiskThreshold) {
+      // LOG file is too big... stop writing to disk
+      if (!this.stopLogDiskSize) {
+        this.log("WARN", `Disk space left on device is too low`, "Logger.startCheckTimer", {available, lowDiskThreshold: this.config.lowDiskThreshold});
+        this.stopLogDiskSize = true;
       }
-      else if (this.stopLogDiskSize) {
-        // LOG file was too big... now it's good... restart log writing
-        delete this.stopLogDiskSize;
-        this.log("WARN", "Disk space left on device is enough -> resume logging", "Logger.startCheckTimer", {available: available, lowDiskThreshold: this.config.lowDiskThreshold});
-      }
-    }.bind(this));
-  }.bind(this), 60 * 1000);    // Every minute
+    }
+    else if (this.stopLogDiskSize) {
+      // LOG file was too big... now it's good... restart log writing
+      delete this.stopLogDiskSize;
+      this.log("WARN", `Disk space left on device is enough -> resume logging`, "Logger.startCheckTimer", {available, lowDiskThreshold: this.config.lowDiskThreshold});
+    }
+  }, 60 * 1000);    // Every minute
 };
 
 

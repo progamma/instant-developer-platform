@@ -69,36 +69,35 @@ Node.Archiver.prototype.useGCloud = function ()
  */
 Node.Archiver.prototype.upload = async function (pathFile, pathCloud)
 {
-  // If the storage is gcloud
-  if (this.useGCloud()) {
-    let file = this.indertBucket.file(pathCloud);
-    let readStream = Node.fs.createReadStream(pathFile);
-    let writeStream = file.createWriteStream({resumable: false});
-    //
-    return new Promise((resolve, reject) => {
-      readStream.pipe(writeStream);
+  try {
+    // If the storage is gcloud
+    if (this.useGCloud()) {
+      let file = this.indertBucket.file(pathCloud);
+      let readStream = Node.fs.createReadStream(pathFile);
+      let writeStream = file.createWriteStream({resumable: false});
       //
-      readStream.on("error", err => {
-        this.logger.log("ERROR", `Error reading the file ${pathFile}: ${err}`, "Archiver.upload");
-        reject(new Error(`Error reading the file ${pathFile}: ${err}`));
+      await new Promise((resolve, reject) => {
+        readStream.pipe(writeStream);
+        //
+        readStream.on("error", err => reject(new Error(`Error reading the file ${pathFile}: ${err}`)));
+        writeStream.on("error", err => reject(new Error(`Error writing the file ${pathFile} to GCloud ${pathCloud}: ${err}`)));
+        writeStream.on("finish", () => resolve());
       });
-      writeStream.on("error", err => {
-        this.logger.log("ERROR", `Error writing the file ${pathFile} to GCloud ${pathCloud}: ${err}`, "Archiver.upload");
-        reject(new Error(`Error writing the file ${pathFile} to GCloud ${pathCloud}: ${err}`));
-      });
-      writeStream.on("finish", () => resolve());
-    });
+    }
+    else {
+      // Supponiamo che il file sia locale
+      let fs = require("fs-extra");
+      try {
+        await fs.copy(pathFile, pathCloud);
+      }
+      catch (err) {
+        throw new Error(`Error writing the file ${pathFile} to local file ${pathCloud}: ${err}`);
+      }
+    }
   }
-  else {
-    // Supponiamo che il file sia locale
-    let fs = require("fs-extra");
-    try {
-      await fs.copy(pathFile, pathCloud);
-    }
-    catch (err) {
-      this.logger.log("ERROR", `Error writing the file ${pathFile} to local file ${pathCloud}: ${err}`, "Archiver.upload");
-      throw new Error(`Error writing the file ${pathFile} to local file ${pathCloud}: ${err}`);
-    }
+  catch (err) {
+    this.logger.log("ERROR", err.message || err, "Archiver.upload");
+    throw err;
   }
 };
 
@@ -107,75 +106,75 @@ Node.Archiver.prototype.upload = async function (pathFile, pathCloud)
  * Download a file from the cloud
  * @param {string} pathCloud
  * @param {string} pathFile
- * @param {function} callback - function(err)
  */
-Node.Archiver.prototype.download = function (pathCloud, pathFile, callback)
+Node.Archiver.prototype.download = async function (pathCloud, pathFile)
 {
-  // Path cloud is needed!
-  if (!pathCloud) {
-    this.logger.log("WARN", "Missing file name", "Archiver.download");
-    return callback("Missing file name");
-  }
-  //
-  // First, if the pathCloud is an URL, download the file directly
-  if (pathCloud.toLowerCase().startsWith("http://") || pathCloud.toLowerCase().startsWith("https://")) {
-    // Handle only HTTP and HTTPS
-    let request = (pathCloud.toLowerCase().startsWith("http://") ? Node.http : Node.https).get(pathCloud, function (resp) {
-      resp.pipe(Node.fs.createWriteStream(pathFile));
-      resp.on("end", function () {
-        // Handle HTTP's STATUS CODE
-        if (resp.statusCode >= 400)
-          callback(`Wrong reply: ${resp.statusCode}`);
-        else
-          callback();
-      });
-    });
-    request.on("error", callback);
+  try {
+    // Path cloud is needed!
+    if (!pathCloud)
+      throw new Error("Missing file name");
     //
-    // Do nothing and wait for download to complete
-    return;
-  }
-  //
-  // If the storage is gcloud
-  if (this.useGCloud()) {
-    let file = this.indertBucket.file(pathCloud);
-    let readStream = file.createReadStream();
-    let writeStream = Node.fs.createWriteStream(pathFile);
-    readStream.pipe(writeStream);
-    //
-    // NOTE: if there are READ errors (i.e. the file is not there) the gcloud module notifies
-    // the "read.error" AND "finish" events!!!!
-    let readError;
-    readStream.on("error", err => {
-      readError = true;
-      this.logger.log("ERROR", `Error while reading the file ${pathCloud} from GCloud: ${err}`, "Archiver.download");
-      callback(err);
-      //
-      // In this particular case an empty file remains here. Delete it!
-      writeStream.end();
-      Node.fs.rm(pathFile, {force: true}, () => {
+    // First, if the pathCloud is an URL, download the file directly
+    if (pathCloud.toLowerCase().startsWith("http://") || pathCloud.toLowerCase().startsWith("https://")) {
+      return new Promise((resolve, reject) => {
+        // Handle only HTTP and HTTPS
+        let request = (pathCloud.toLowerCase().startsWith("http://") ? Node.http : Node.https).get(pathCloud, resp => {
+          // Check status code before piping
+          if (resp.statusCode >= 400) {
+            reject(new Error(`Wrong reply: ${resp.statusCode}`));
+            return;
+          }
+          //
+          let writeStream = Node.fs.createWriteStream(pathFile);
+          resp.pipe(writeStream);
+          //
+          // Listen to writeStream's finish event, not response's end event
+          // The "end" event on response only means data was received, not written to disk
+          writeStream.on("finish", resolve);
+          writeStream.on("error", reject);
+        });
+        request.on("error", reject);
       });
-    });
-    writeStream.on("error", err => {
-      this.logger.log("ERROR", `Error while writing the file ${pathFile}: ${err}`, "Archiver.download");
-      callback(err);
-    });
-    writeStream.on("finish", () => {
-      if (!readError)
-        callback();
-    });
-  }
-  else {
-    // Supponiamo che il file sia locale
-    let fs = require("fs-extra");
-    fs.copy(pathCloud, pathFile, err => {
-      if (err) {
-        this.logger.log("ERROR", `Error writing the file ${pathCloud} to local file ${pathFile}: ${err}`, "Archiver.download");
-        callback(`Error writing the file ${pathCloud} to local file ${pathFile}: ${err}`);
+    }
+    //
+    // If the storage is gcloud
+    if (this.useGCloud()) {
+      await new Promise((resolve, reject) => {
+        let file = this.indertBucket.file(pathCloud);
+        let readStream = file.createReadStream();
+        let writeStream = Node.fs.createWriteStream(pathFile);
+        let rejected = false;
+        readStream.pipe(writeStream);
+        //
+        // NOTE: if there are READ errors (i.e. the file is not there) the gcloud module notifies
+        // the "read.error" AND "finish" events!!!!
+        readStream.on("error", err => {
+          rejected = true;
+          // In this particular case an empty file remains here. Delete it!
+          writeStream.end();
+          Node.fs.rm(pathFile, {force: true}, () => reject(err));
+        });
+        writeStream.on("error", reject);
+        writeStream.on("finish", () => {
+          if (!rejected)
+            resolve();
+        });
+      });
+    }
+    else {
+      // Supponiamo che il file sia locale
+      let fs = require("fs-extra");
+      try {
+        await fs.copy(pathCloud, pathFile);
       }
-      else
-        callback();
-    });
+      catch (err) {
+        throw new Error(`Error writing the file ${pathCloud} to local file ${pathFile}: ${err}`);
+      }
+    }
+  }
+  catch (err) {
+    this.logger.log("ERROR", err.message || err, "Archiver.download");
+    throw err;
   }
 };
 
@@ -286,28 +285,14 @@ Node.Archiver.prototype.backupZip = async function (pathServer, pathCloud)
 Node.Archiver.prototype.restore = async function (pathServer, pathCloud)
 {
   let fileServer = `${pathServer}.tar.gz`;
-  let pathExists;
   //
   // Check if the pathServer exists
-  try {
-    await Node.fs.promises.access(pathServer);
-    pathExists = true;
-  }
-  catch {
-    pathExists = false;
-  }
+  let pathExists = await Node.fs.promises.access(pathServer).then(() => true, err => false);
   //
   try {
     // Download the file from the cloud
     try {
-      await new Promise((resolve, reject) => {
-        this.download(pathCloud, fileServer, err => {
-          if (err)
-            reject(err);
-          else
-            resolve();
-        });
-      });
+      await this.download(pathCloud, fileServer);
     }
     catch (err) {
       throw new Error(`Error downloading the file ${pathCloud} from the cloud: ${err}`);
@@ -319,7 +304,23 @@ Node.Archiver.prototype.restore = async function (pathServer, pathCloud)
         await Node.fs.promises.rename(pathServer, `${pathServer}.$$$`);
       }
       catch (err) {
-        if (err && err.code !== "ENOTEMPTY")
+        if (err?.code === "ENOTEMPTY") {
+          // Log the error and attempt cleanup
+          this.logger.log("WARN", `Directory ${pathServer}.$$$ not empty, attempting cleanup`, "Archiver.restore");
+          try {
+            // Try to remove the backup directory if it exists
+            await Node.fs.promises.rm(`${pathServer}.$$$`, {recursive: true, force: true});
+            //
+            // Retry the rename
+            await Node.fs.promises.rename(pathServer, `${pathServer}.$$$`);
+            this.logger.log("INFO", `Successfully cleaned up and renamed ${pathServer}`, "Archiver.restore");
+          }
+          catch (cleanupErr) {
+            this.logger.log("ERROR", `Failed to cleanup and rename: ${cleanupErr.message || cleanupErr}`, "Archiver.restore");
+            throw new Error(`Cannot prepare for restore - directory conflicts exist: ${cleanupErr.message || cleanupErr}`);
+          }
+        }
+        else
           throw new Error(`Error rename the path ${pathServer} to temporary: ${err}`);
       }
     }
@@ -397,21 +398,19 @@ Node.Archiver.prototype.restore = async function (pathServer, pathCloud)
 /**
  * Get list of files in path on gcloud bucket
  * @param {string} path
- * @param {function} callback - function(err, [files])
+ * @returns {Promise<string[]>} Array of file names
  */
-Node.Archiver.prototype.getFiles = function (path, callback)
+Node.Archiver.prototype.getFiles = async function (path)
 {
-  this.indertBucket.getFiles({prefix: path}, (err, files, nextQuery, apiResponse) => {
-    if (err) {
-      this.logger.log("ERROR", `Error while reading files list from GCloud: ${err}`, "Archiver.getFiles", {path});
-      return callback(`Error while reading files list from GCloud: ${err}`);
-    }
-    //
-    let result = [];
-    for (let i = 0; i < files.length; i++)
-      result.push(files[i].metadata.name);
-    //
-    callback(null, result);
+  return await new Promise((resolve, reject) => {
+    this.indertBucket.getFiles({prefix: path}, (err, files, nextQuery, apiResponse) => {
+      if (err) {
+        this.logger.log("ERROR", `Error while reading files list from GCloud: ${err}`, "Archiver.getFiles", {path});
+        return reject(new Error(`Error while reading files list from GCloud: ${err}`));
+      }
+      //
+      resolve(files.map(file => file.metadata.name));
+    });
   });
 };
 
@@ -419,18 +418,19 @@ Node.Archiver.prototype.getFiles = function (path, callback)
 /**
  * Delete file in path on gcloud bucket
  * @param {string} path
- * @param {function} callback - function(err)
  */
-Node.Archiver.prototype.deleteFile = function (path, callback)
+Node.Archiver.prototype.deleteFile = async function (path)
 {
   if (this.indertBucket) {
-    let file = this.indertBucket.file(path);
-    file.delete(callback);
+    await new Promise((resolve, reject) => {
+      let file = this.indertBucket.file(path);
+      file.delete(err => err ? reject(err) : resolve());
+    });
   }
   else {
     // Provo a cancellare il file in locale
     let fs = require("fs-extra");
-    fs.remove(path, callback);
+    await fs.remove(path);
   }
 };
 
@@ -439,31 +439,33 @@ Node.Archiver.prototype.deleteFile = function (path, callback)
  * Stores an object in the cloud
  * @param {string} pathCloud
  * @param {object} obj - object to store (as JSON string)
- * @param {function} callback - function(err)
  */
-Node.Archiver.prototype.saveObject = function (pathCloud, obj, callback)
+Node.Archiver.prototype.saveObject = async function (pathCloud, obj)
 {
   // If the storage se is gcloud
   if (this.useGCloud()) {
     let file = this.indertBucket.file(pathCloud);
     //
     // copy the file into the cloud
-    let wsFile = file.createWriteStream({resumable: false});
-    wsFile.on("finish", () => callback());
-    wsFile.on("error", err => {
-      callback(err);
-      this.logger.log("ERROR", `Error uploading the object in GCloud storage (${pathCloud}): ${err}`, "Archiver.saveObject");
+    await new Promise((resolve, reject) => {
+      let wsFile = file.createWriteStream({resumable: false});
+      wsFile.on("finish", resolve);
+      wsFile.on("error", err => {
+        this.logger.log("ERROR", `Error uploading the object in GCloud storage (${pathCloud}): ${err}`, "Archiver.saveObject");
+        reject(err);
+      });
+      //
+      if (typeof obj === "object")
+        wsFile.write(JSON.stringify(obj));
+      else
+        wsFile.write(obj);
+      //
+      wsFile.end();
     });
-    //
-    if (typeof obj === "object")
-      wsFile.write(JSON.stringify(obj));
-    else
-      wsFile.write(obj);
-    wsFile.end();
   }
   else {
     let fs = require("fs-extra");
-    fs.outputFile(pathCloud, typeof obj === "object" ? JSON.stringify(obj) : obj, callback);
+    await fs.outputFile(pathCloud, typeof obj === "object" ? JSON.stringify(obj) : obj);
   }
 };
 
@@ -471,49 +473,44 @@ Node.Archiver.prototype.saveObject = function (pathCloud, obj, callback)
 /**
  * Restore an object from the cloud
  * @param {string} pathCloud
- * @param {function} callback - function(obj, err)
+ * @returns {Promise<object>} The parsed object or throws an error
  */
-Node.Archiver.prototype.readObject = function (pathCloud, callback)
+Node.Archiver.prototype.readObject = async function (pathCloud)
 {
   // If the storage se is gcloud
+  let txt = "";
   if (this.useGCloud()) {
-    let file = this.indertBucket.file(pathCloud);
-    let rsFile = file.createReadStream();
-    rsFile.read();
-    //
-    let txt = "";
-    rsFile.on("data", chunk => txt += chunk);
-    rsFile.on("finish", () => {
-      if (txt !== null)   // ERROR (see error handler)
-        callback(txt ? JSON.parse(txt) : {});
-    });
-    rsFile.on("error", err => {
-      err = err.message || err;
-      txt = null;   // The FINISH event gets fired anyway (see previous handler)
+    await new Promise((resolve, reject) => {
+      let file = this.indertBucket.file(pathCloud);
+      let rsFile = file.createReadStream();
+      rsFile.read();
       //
-      this.logger.log("WARN", `Error reading the object from GCloud storage (${pathCloud}): ${err}`, "Archiver.readObject");
-      callback(null, err);
+      rsFile.on("data", chunk => txt += chunk);
+      rsFile.on("finish", resolve);
+      rsFile.on("error", err => {
+        this.logger.log("WARN", `Error reading the object from GCloud storage (${pathCloud}): ${err}`, "Archiver.readObject");
+        reject(new Error(`Error reading the object from GCloud storage (${pathCloud}): ${err}`));
+      });
     });
   }
   else {
     let fs = require("fs-extra");
-    fs.readFile(pathCloud, "utf8", (err, txt) => {
-      if (err)
-        callback(null, err);
-      else
-        callback(txt ? JSON.parse(txt) : {});
-    });
+    txt = await fs.readFile(pathCloud, "utf8");
   }
+  //
+  return txt ? JSON.parse(txt) : {};
 };
 
-Node.Archiver.prototype.zip = async function (fullPath, options) {
+
+Node.Archiver.prototype.zip = async function (fullPath, options)
+{
   let outputFile = `${fullPath}.zip`;
   //
   try {
     return new Promise((resolve, reject) => {
       let output = Node.fs.createWriteStream(outputFile);      
       let archive = Node.archiver.create("zip");
-      const baseName = Node.path.basename(fullPath);
+      let baseName = Node.path.basename(fullPath);
       //
       output.on("close", async () => {
         try {
@@ -529,12 +526,12 @@ Node.Archiver.prototype.zip = async function (fullPath, options) {
       //
       archive.pipe(output);
       //
-      const stats = Node.fs.statSync(fullPath);
-      const zipElementName = options?.suffix ? baseName + options.suffix : baseName;
+      let stats = Node.fs.statSync(fullPath);
+      let zipElementName = options?.suffix ? baseName + options.suffix : baseName;
       if (stats.isDirectory())
         archive.directory(fullPath, zipElementName);
       else
-        archive.file(fullPath, { name: zipElementName });
+        archive.file(fullPath, {name: zipElementName});
       archive.finalize();
     });
   }
@@ -544,53 +541,54 @@ Node.Archiver.prototype.zip = async function (fullPath, options) {
   }
 }
 
-Node.Archiver.prototype.unzip = async function (sourceZipPath, destinationDirPath) {
-  const fs = Node.fs;
-  const path = Node.path;
-  const yauzl = require("yauzl");
 
+/**
+ * Extracts a ZIP file to a specified directory
+ * @param {string} sourceZipPath - Path to the ZIP file to extract
+ * @param {string} destinationDirPath - Directory where the ZIP contents will be extracted
+ * @returns {boolean} true if extraction succeeds, false otherwise
+ */
+Node.Archiver.prototype.unzip = async function (sourceZipPath, destinationDirPath)
+{
+  let fs = Node.fs;
+  let path = Node.path;
+  let yauzl = require("yauzl");
+  //
   try {
-    // Assicurati che la directory di destinazione esista
+    // Ensure the destination directory exists
     await fs.promises.mkdir(destinationDirPath, {recursive: true});
-
-    // Apri il file ZIP
-    const openZip = (filePath, options) => {
+    //
+    // Open the ZIP file
+    let openZip = (filePath, options) => {
       return new Promise((resolve, reject) => {
-        yauzl.open(filePath, options, (err, zipFile) => {
-          if (err)
-            return reject(err);
-          resolve(zipFile);
-        });
+        yauzl.open(filePath, options, (err, zipFile) => err ? reject(err) : resolve(zipFile));
       });
     };
-
-    const zipFile = await openZip(sourceZipPath, {lazyEntries: true});
-
-    const processEntry = async (entry) => {
-      const entryPath = path.join(destinationDirPath, entry.fileName);
-
-      // Normalizza il percorso per evitare percorsi relativi malevoli
-      const normalizedPath = path.normalize(entryPath);
-
-      if (!normalizedPath.startsWith(destinationDirPath)) {
-        throw new Error(`Tentativo di estrazione al di fuori della directory: ${normalizedPath}`);
-      }
-
-      if (/\/$/.test(entry.fileName)) {
-        // Entry è una directory
+    //
+    let zipFile = await openZip(sourceZipPath, {lazyEntries: true});
+    let processEntry = async (entry) => {
+      let entryPath = path.join(destinationDirPath, entry.fileName);
+      //
+      // Normalize the path to prevent malicious relative paths
+      let normalizedPath = path.normalize(entryPath);
+      if (!normalizedPath.startsWith(destinationDirPath))
+        throw new Error(`Attempted extraction outside of directory: ${normalizedPath}`);
+      //
+      if (Node.Utils.isZipEntryDirectory(entry)) {
+        // Entry is a directory
         await fs.promises.mkdir(normalizedPath, {recursive: true});
       }
       else {
-        // Entry è un file
-        await fs.promises.mkdir(path.dirname(normalizedPath), {recursive: true}); // Crea la directory genitore
+        // Entry is a file
+        await fs.promises.mkdir(path.dirname(normalizedPath), {recursive: true}); // Create parent directory
         return new Promise((resolve, reject) => {
           zipFile.openReadStream(entry, (err, readStream) => {
             if (err)
               return reject(err);
-
-            const writeStream = fs.createWriteStream(normalizedPath);
+            //
+            let writeStream = fs.createWriteStream(normalizedPath);
             readStream.pipe(writeStream);
-
+            //
             readStream.on("end", () => resolve());
             readStream.on("error", (err) => reject(err));
             writeStream.on("error", (err) => reject(err));
@@ -598,33 +596,32 @@ Node.Archiver.prototype.unzip = async function (sourceZipPath, destinationDirPat
         });
       }
     };
-
-    // Itera attraverso le entry
-    const readEntries = () => {
+    //
+    // Iterate through entries
+    let readEntries = () => {
       return new Promise((resolve, reject) => {
         zipFile.readEntry();
         zipFile.on("entry", async (entry) => {
           try {
             await processEntry(entry);
-            zipFile.readEntry(); // Leggi la prossima entry
+            zipFile.readEntry(); // Read next entry
           }
           catch (err) {
             reject(err);
           }
         });
-        zipFile.on("end", resolve); // Completamento
-        zipFile.on("error", reject); // Errori
+        zipFile.on("end", resolve); // Completion
+        zipFile.on("error", reject); // Errors
       });
     };
-
+    //
     await readEntries();
     zipFile.close();
-
+    //
     return true;
   }
-  catch (e) {
-    console.error("Errore durante l'unzip:", e);
-    this.lastError = e.message;
+  catch (err) {
+    this.logger.log("ERROR", err.message || err, "Archiver.unzip");
     return false;
   }
 };

@@ -29,22 +29,22 @@ Node.Database = function (par)
 // Define usefull properties for this object
 Object.defineProperties(Node.Database.prototype, {
   user: {
-    get: function () {
+    get() {
       return this.parent;
     }
   },
   server: {
-    get: function () {
+    get() {
       return this.parent.parent.parent;
     }
   },
   config: {
-    get: function () {
+    get() {
       return this.parent.parent;
     }
   },
   logger: {
-    get: function () {
+    get() {
       return this.server.logger;
     }
   }
@@ -73,8 +73,11 @@ Node.Database.prototype.log = function (level, message, sender, data)
  */
 Node.Database.prototype.save = function ()
 {
-  var r = {cl: "Node.Database", name: this.name, remoteUrl: this.remoteUrl};
-  return r;
+  return {
+    cl: "Node.Database",
+    name: this.name,
+    remoteUrl: this.remoteUrl
+  };
 };
 
 
@@ -95,7 +98,7 @@ Node.Database.prototype.load = function (v)
  */
 Node.Database.prototype.saveProperties = function ()
 {
-  var r = this.save();
+  let r = this.save();
   //
   // Delete children
   delete r.cl;
@@ -117,157 +120,141 @@ Node.Database.prototype.setParent = function (par)
 /**
  * Initialize database enviroment
  * @param {string} dbName
- * @param {function} callback - function(err)
  */
-Node.Database.prototype.init = function (dbName, callback)
+Node.Database.prototype.init = async function (dbName)
 {
-  var pthis = this;
   this.name = dbName;
   //
   // Initialize environment
-  Node.Database.initDbEnv(this.user, function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Create the physical database
-    pthis.createDb(callback);
-  });
+  await Node.Database.initDbEnv(this.user);
+  //
+  // Create the physical database
+  await this.createDb();
 };
 
 
 /**
  * Initialize the database enviroment (create tablespace, role)
  * @param {user} user
- * @param {function} callback - function(err)
  */
-Node.Database.initDbEnv = function (user, callback)
+Node.Database.initDbEnv = async function (user)
 {
-  // Create a new client to communicate with the db
-  var conString = "postgres://" + user.config.dbUser + ":" + user.config.dbPassword + "@" +
-          user.config.dbAddress + ":" + user.config.dbPort;
-  var client = new Node.pg.Client(conString);
-  //
   // Path where the tablespace will be stored
-  var dbPath;
+  let dbPath;
   if (user.userName === "manager")
-    dbPath = user.config.appDirectory + "/db";
+    dbPath = Node.path.join(user.config.appDirectory, "db");
   else
-    dbPath = user.config.directory + "/" + user.userName + "/db";
+    dbPath = Node.path.join(user.config.directory, user.userName, "db");
   //
-  // Open the DB connection
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      user.log("ERROR", "Error connecting to the database: " + err, "Database.initDbEnv", {conString: conString});
-      return callback("Error connecting to the database: " + err);
+  // Create a new client to communicate with the db
+  let client, logData;
+  try {
+    try {
+      client = await Node.Database.openConnection(user.config);
+    }
+    catch (err) {
+      logData = {conString: Node.Database.getURL(user.config)};
+      throw new Error(`Error connecting to the database: ${err}`);
     }
     //
-    // Crate the role
-    var query;
-    if (user.userName === "manager")
-      query = "CREATE ROLE inde CREATEDB LOGIN PASSWORD '" + user.dbPassword + "' NOINHERIT VALID UNTIL 'infinity';";
-    else
-      query = "CREATE ROLE \"" + user.userName + "\" CREATEDB LOGIN PASSWORD '" + user.dbPassword + "' NOINHERIT VALID UNTIL 'infinity';";
-
-    client.query(query, function (err) {
-      if (err && err.code !== "42710" && err.code !== "23505") { // 42710: role already exists, 23505: duplicate key value violates unique constraint
-        client.end();
-        //
-        user.log("ERROR", "Error while creating ROLE: " + err, "Database.initDbEnv", {query: query});
-        return callback("Error while creating ROLE: " + err);
+    // Create the role
+    let query = `CREATE ROLE "${user.getDbRole()}" CREATEDB LOGIN PASSWORD '${user.dbPassword}' NOINHERIT VALID UNTIL 'infinity';`;
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      if (err.code !== "42710" && err.code !== "23505") { // 42710: role already exists, 23505: duplicate key value violates unique constraint
+        logData = {query};
+        throw new Error(`Error while creating ROLE: ${err}`);
       }
-      //
-      // Create a tablespace
-      if (user.userName === "manager")
-        query = "CREATE TABLESPACE indets OWNER inde LOCATION " + "'" + dbPath + "';";
-      else
-        query = "CREATE TABLESPACE \"" + user.userName + "\" OWNER \"" + user.userName +
-                "\" LOCATION " + "'" + dbPath + "';";
-      client.query(query, function (err) {
-        if (err && err.code !== "42710" && err.code !== "23505") {    // 42710/23505: tablespace already exists
-          client.end();
-          //
-          user.log("ERROR", "Error while creating TABLESPACE: " + err, "Node.initDbEnv", {query: query});
-          return callback("Error while creating TABLESPACE: " + err);
-        }
-        //
-        if (user.userName === "manager")
-          query = "SET default_tablespace = indets;";
-        else
-          query = "SET default_tablespace = \"" + user.userName + "\";";
-        client.query(query, function (err) {
-          if (err && err.code !== "42710") {    // 42710: default tablespace already set
-            client.end();
-            //
-            user.log("ERROR", "Error while setting default tablespace for user: " + err, "Database.initDbEnv", {query: query});
-            return callback("Error while setting default tablespace for user: " + err);
-          }
-          //
-          client.end();
-          //
-          // Done
-          callback();
-        });
-      });
-    });
-  });
+    }
+    //
+    // Create a tablespace
+    let owner = user.getDbOwner();
+    let tableSpace = user.getDbTableSpace();
+    query = `CREATE TABLESPACE "${tableSpace}" OWNER "${owner}" LOCATION '${dbPath}';`;
+    //
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      if (err.code !== "42710" && err.code !== "23505") {    // 42710/23505: tablespace already exists
+        logData = {query};
+        throw new Error(`Error while creating TABLESPACE: ${err}`);
+      }
+    }
+    //
+    query = `SET default_tablespace = "${tableSpace}";`;
+    //
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      if (err.code !== "42710") {    // 42710: default tablespace already set
+        logData = {query};
+        throw new Error(`Error while setting default tablespace for user: ${err}`);
+      }
+    }
+  }
+  catch (err) {
+    user.log("ERROR", err.message || err, "Database.initDbEnv", logData);
+    throw err;
+  }
+  finally {
+    client?.end();
+  }
 };
 
 
 /**
  * Clean the database enviroment (remove tablespace, role)
  * @param {user} user
- * @param {function} callback - function (err)
  */
-Node.Database.cleanDbEnv = function (user, callback)
+Node.Database.cleanDbEnv = async function (user)
 {
-  // MANAGER user can't clean up DB environment!
-  if (user.userName === "manager") {
-    user.log("ERROR", "Can't clean DB environment for MANAGER user", "Database.cleanDbEnv");
-    return callback("Can't clean DB environment for MANAGER user");
-  }
-  //
-  // Create a new client to communicate with the db
-  var conString = "postgres://" + user.config.dbUser + ":" + user.config.dbPassword + "@" +
-          user.config.dbAddress + ":" + user.config.dbPort;
-  var client = new Node.pg.Client(conString);
-  //
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      user.log("ERROR", "Error connecting to the database: " + err, "Database.cleanDbEnv", {conString: conString});
-      return callback("Error connecting to the database: " + err);
+  let client, logData;
+  try {
+    // MANAGER user can't clean up DB environment!
+    if (user.userName === "manager")
+      throw new Error("Can't clean DB environment for MANAGER user");
+    //
+    // Create a new client to communicate with the db
+    try {
+      client = await Node.Database.openConnection(user.config);
+    }
+    catch (err) {
+      logData = {conString: Node.Database.getURL(user.config)};
+      throw new Error(`Error connecting to the database: ${err}`);
+
     }
     //
     // Drop the table space
-    var query = "DROP TABLESPACE IF EXISTS \"" + user.userName + "\";";
-    client.query(query, function (err) {
-      if (err) {
-        client.end();
-        //
-        user.log("ERROR", "Error while dropping TABLESPACE: " + err, "Database.cleanDbEnv", {query: query});
-        return callback("Error while dropping TABLESPACE: " + err);
-      }
-      //
-      // Drop the role
-      query = "DROP ROLE IF EXISTS \"" + user.userName + "\";";
-      client.query(query, function (err) {
-        if (err) {
-          client.end();
-          //
-          user.log("ERROR", "Error while dropping ROLE: " + err, "Database.cleanDbEnv", {query: query});
-          return callback("Error while dropping ROLE: " + err);
-        }
-        //
-        client.end();
-        //
-        // Done
-        callback();
-      });
-    });
-  });
+    let query = `DROP TABLESPACE IF EXISTS "${user.getDbTableSpace()}";`;
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      logData = {query};
+      throw new Error(`Error while dropping TABLESPACE: ${err}`);
+    }
+    //
+    // Drop the role
+    query = `DROP ROLE IF EXISTS "${user.userName}";`;
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      logData = {query};
+      throw new Error(`Error while dropping ROLE: ${err}`);
+    }
+  }
+  catch (err) {
+    user.log("ERROR", err.message || err, "Database.cleanDbEnv", logData);
+    throw err;
+  }
+  finally {
+    client?.end();
+  }
 };
 
 
@@ -276,150 +263,180 @@ Node.Database.cleanDbEnv = function (user, callback)
  */
 Node.Database.prototype.getURL = function ()
 {
-  var dbname;
-  if (this.user.userName === "manager")
-    dbname = this.name;
-  else
-    dbname = this.user.userName + "-" + this.name;
-  return "postgresql://" + this.config.dbUser + ":" + this.config.dbPassword + "@" + this.config.dbAddress + ":" + this.config.dbPort + "/" + dbname;
+  return Node.Database.getURL(this.config, this.user.getDbName(this.name));
+};
+
+
+/**
+  * Get the database's URL (needed for direct connection via command line)
+  * @param {object} config
+  * @return {string} dnmane - if provided the database name is added to the URL
+  */
+Node.Database.getURL = function (config, dbname)
+{
+  let conString = `postgres://${config.dbUser}:${config.dbPassword}@${config.dbAddress}:${config.dbPort}`;
+  if (dbname)
+    conString += `/${dbname}`;
+  return conString;
+};
+
+
+/**
+ * Open a new connection to the database
+ * @param {Object|String} config - configuration object or connection string
+ * @param {String} dbname - if provided the database name is added to the URL (ignored if config is a string)
+ * @return {Promise<Object>} pg.Client
+ */
+Node.Database.openConnection = async function (config, dbname)
+{
+  let conString;
+  //
+  // If config is already a connection string (remoteUrl), use it directly
+  if (typeof config === "string")
+    conString = config;
+  else // Otherwise build the connection string from the config object
+    conString = Node.Database.getURL(config, dbname);
+  //
+  let client = new Node.pg.Client(conString);
+  await client.connect();
+  return client;
 };
 
 
 /**
  * Get the status of the database
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.sendStatus = function (params, callback)
+Node.Database.prototype.sendStatus = async function (params)
 {
-  var status = {name: this.name, remoteUrl: this.remoteUrl};
+  let status = {
+    name: this.name,
+    remoteUrl: this.remoteUrl
+  };
   //
   // If local -> can't compute DB size
-  if (this.config.local)
-    return callback({msg: JSON.stringify(status)});
-  //
-  // Get the size of the db
-  var sqlcmd;
-  if (this.user.userName === "manager")
-    sqlcmd = "select pg_database_size('" + this.name + "')";
-  else
-    sqlcmd = "select pg_database_size('" + this.user.userName + "-" + this.name + "')";
-  Node.child.execFile("/usr/local/bin/psql", ["--dbname=" + this.getURL(), "-t", "-c", sqlcmd], function (err, stdout, stderr) {   // jshint ignore:line
-    if (err) {
-      this.log("ERROR", "Error getting the size of user's DB: " + err, "Database.sendStatus", {sqlcmd: sqlcmd});
-      return callback("Error getting the size of user's DB folder: " + err);
-    }
+  if (!this.config.local) {
+    // Get the size of the db
+    let dbName = this.user.getDbName(this.name);
+    let sqlcmd = `select pg_database_size('${dbName}')`;
     //
-    status.diskSize = stdout.trim();
-    callback({msg: JSON.stringify(status)});
-  }.bind(this));
+    try {
+      let stdout = await new Promise((resolve, reject) => {
+        Node.child.execFile("/usr/local/bin/psql", [`--dbname=${this.getURL()}`, "-t", "-c", sqlcmd], (err, stdout, stderr) => err ? reject(err) : resolve(stdout));
+      });
+      //
+      status.diskSize = stdout.trim();
+    }
+    catch (err) {
+      this.log("ERROR", `Error getting the size of user's DB: ${err}`, "Database.sendStatus", {sqlcmd});
+      throw new Error(`Error getting the size of user's DB folder: ${err}`);
+    }
+  }
+  //
+  return {msg: JSON.stringify(status)};
 };
 
 
 /**
  * Create a new database
- * @param {function} callback - function(err)
  */
-Node.Database.prototype.createDb = function (callback)
+Node.Database.prototype.createDb = async function ()
 {
-  var pthis = this;
-  //
   // Create a new client to communicate with the db
-  var conString = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
-          this.config.dbAddress + ":" + this.config.dbPort;
-  var client = new Node.pg.Client(conString);
-  //
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      pthis.log("ERROR", "Error connecting to the database: " + err, "Database.createDb", {conString: conString});
-      return callback("Error connecting to the database: " + err);
+  let client, logData;
+  try {
+    try {
+      client = await Node.Database.openConnection(this.config);
+    }
+    catch (err) {
+      logData = {conString: this.getURL()};
+      throw new Error(`Error connecting to the database: ${err}`);
     }
     //
     // Create the database in the right tablespace
-    var query;
-    if (pthis.user.userName === "manager")
-      query = "CREATE DATABASE " + "\"" + pthis.name + "\"" +
-              " WITH ENCODING='UTF8' OWNER=inde TABLESPACE=indets;";
-    else
-      query = "CREATE DATABASE " + "\"" + pthis.user.userName + "-" + pthis.name + "\"" +
-              " WITH ENCODING='UTF8' OWNER=\"" + pthis.user.userName + "\" TABLESPACE=\"" + pthis.user.userName + "\";";
-    client.query(query, function (err) {
-      if (err && err.code !== "42P04") {    // 42P04 -> database already exists
-        client.end();
-        //
-        pthis.log("ERROR", "Error while creating database: " + err, "Database.createDb", {query: query});
-        return callback("Error while creating database: " + err);
+    let dbName = this.user.getDbName(this.name);
+    let dbOwner = this.user.getDbOwner();
+    let dbTableSpace = this.user.getDbTableSpace();
+    let query = `CREATE DATABASE "${dbName}" WITH ENCODING='UTF8' OWNER="${dbOwner}" TABLESPACE="${dbTableSpace}";`;
+    //
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      if (err.code !== "42P04") {    // 42P04 -> database already exists
+        logData = {query};
+        throw new Error(`Error while creating database: ${err}`);
       }
-      //
-      // Create vector extension (for app.ai)
-      client.query("CREATE EXTENSION IF NOT EXISTS vector;", function (err) {
-        if (err) {
-          pthis.log("ERROR", "Error while creating vector extension on database: " + err, "Database.createDb", {query: query});  
-          return callback("Error while creating vector extension on database: " + err);
-        }
-        //
-        client.end();
-        //
-        // Done
-        callback();
-      });
-    });
-  });
+    }
+    // Create vector extension (for app.ai features) if not on Windows (not supported)
+    // Must connect to the newly created database, as extensions are per-database
+    if (!process.platform.startsWith("win")) {
+      let dbClient;
+      try {
+        dbClient = await Node.Database.openConnection(this.config, dbName);
+        await dbClient.query("CREATE EXTENSION IF NOT EXISTS vector;");
+      }
+      catch (err) {
+        logData = {query: "CREATE EXTENSION IF NOT EXISTS vector;"};
+        throw new Error(`Error while creating vector extension on database: ${err}`);
+      }
+      finally {
+        dbClient?.end();
+      }
+    }
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "Database.createDb", logData);
+    throw err;
+  }
+  finally {
+    client?.end();
+  }
 };
 
 
 /**
  * Delete the database
- * @param {function} callback - function(err)
  */
-Node.Database.prototype.dropDb = function (callback)
+Node.Database.prototype.dropDb = async function ()
 {
-  var pthis = this;
-  //
   // Create a new client to communicate with the db
-  var conString = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
-          this.config.dbAddress + ":" + this.config.dbPort;
-  var client = new Node.pg.Client(conString);
-  //
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      pthis.log("ERROR", "Error connecting to the database: " + err, "Database.dropDb", {conString: conString});
-      return callback("Error connecting to the database: " + err);
+  let client, logData;
+  try {
+    try {
+      client = await Node.Database.openConnection(this.config);
+    }
+    catch (err) {
+      logData = {conString: this.getURL()};
+      throw new Error(`Error connecting to the database: ${err}`);
     }
     //
     // Drop the database
-    var query;
-    if (pthis.user.userName === "manager")
-      query = "DROP DATABASE IF EXISTS" + "\"" + pthis.name + "\";";
-    else
-      query = "DROP DATABASE IF EXISTS" + "\"" + pthis.user.userName + "-" + pthis.name + "\";";
-    client.query(query, function (err) {
-      if (err) {
-        client.end();
-        //
-        pthis.log("ERROR", "Error while dropping the database: " + err, "Database.dropDb", {query: query});
-        return callback("Error while dropping the database: " + err);
-      }
-      //
-      client.end();
-      //
-      // Done
-      callback();
-    });
-  });
+    let query = `DROP DATABASE IF EXISTS "${this.user.getDbName(this.name)}";`;
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      logData = {query};
+      throw new Error(`Error while dropping the database: ${err}`);
+    }
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "Database.dropDb", logData);
+    throw err;
+  }
+  finally {
+    client?.end();
+  }
 };
 
 
 /**
  * Execute a query in the database
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
+ * @return {Promise<{msg: string}>}
  */
-Node.Database.prototype.query = function (params, callback)
+Node.Database.prototype.query = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -428,16 +445,15 @@ Node.Database.prototype.query = function (params, callback)
 /**
  * Change the app configuration via web commands
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.configure = function (params, callback)
+Node.Database.prototype.configure = async function (params)
 {
   // Compute the array of properties provided via url
-  var query = params.req.query;
-  var queryProps = Object.getOwnPropertyNames(query);
+  let query = params.req.query;
+  let queryProps = Object.getOwnPropertyNames(query);
   if (queryProps.length === 0) {
     this.log("WARN", "No property specified", "Database.configure");
-    return callback("No property specified");
+    throw new Error("No property specified");
   }
   //
   if (query.remoteUrl !== undefined)
@@ -448,86 +464,76 @@ Node.Database.prototype.configure = function (params, callback)
   //
   // Log the operation
   this.log("DEBUG", "Updated database configuration", "Database.configure", {config: query});
-  //
-  callback();
 };
 
 
 /**
  * Rename an existing database
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.renameDb = function (params, callback)
+Node.Database.prototype.renameDb = async function (params)
 {
-  var pthis = this;
-  //
   // Command is in the form
   // (http://servername/username/db/dbname/rename?newName=newName)
-  var newName = params.req.query.newName;
-  var oldName = this.name;
+  let newName = params.req.query.newName;
+  let oldName = this.name;
+  let client, logData;
+  let warning = false;
   //
-  // If a new name was not provided or it's the same as the old one
-  if (!newName) {
-    this.log("WARN", "Can't rename database: new name not specified", "Database.renameDb");
-    return callback("Can't rename database: new name not specified");
-  }
-  if (newName === oldName) {
-    this.log("WARN", "Can't rename database: new name and old name are the same", "Database.renameDb");
-    return callback("Can't rename database: new name and old name are the same");
-  }
-  //
-  // Create a new client to communicate with the db
-  var conString = "postgres://" + this.config.dbUser + ":" + this.config.dbPassword + "@" +
-          this.config.dbAddress + ":" + this.config.dbPort;
-  var client = new Node.pg.Client(conString);
-  //
-  client.connect(function (err) {
-    if (err) {
-      client.end();
-      //
-      pthis.log("ERROR", "Error connecting to the database: " + err, "Database.renameDb", {conString: conString});
-      return callback("Error connecting to the database: " + err);
+  try {
+    // If a new name was not provided or it's the same as the old one
+    if (!newName) {
+      warning = true;
+      throw new Error("Can't rename database: new name not specified");
+    }
+    if (newName === oldName) {
+      warning = true;
+      throw new Error("Can't rename database: new name and old name are the same");
+    }
+    //
+    // Create a new client to communicate with the db
+    try {
+      client = await Node.Database.openConnection(this.config);
+    }
+    catch (err) {
+      logData = {conString: Node.Database.getURL(this.config)};
+      throw new Error(`Error connecting to the database: ${err}`);
     }
     //
     // Change the db name
-    var query;
-    if (pthis.user.userName === "manager")
-      query = "ALTER DATABASE " + "\"" + pthis.name +
-              "\"" + " RENAME TO " + "\"" + newName + "\"" + ";";
-    else
-      query = "ALTER DATABASE " + "\"" + pthis.user.userName + "-" + pthis.name +
-              "\"" + " RENAME TO " + "\"" + pthis.user.userName + "-" + newName + "\"" + ";";
-    client.query(query, function (err) {
-      if (err) {
-        client.end();
-        //
-        pthis.log("ERROR", "Error while renaming the database: " + err, "Database.renameDb", {query: query});
-        return callback("Error while renaming the database: " + err);
-      }
-      //
-      client.end();
-      //
-      // Update the DB name
-      pthis.name = newName;
-      pthis.config.saveConfig();
-      //
-      // Log the rename operation
-      pthis.log("INFO", "Database renamed", "Database.renameDb", {old: oldName, new : newName});
-      //
-      // Done
-      callback();
-    });
-  });
+    let oldDbName = this.user.getDbName(this.name);
+    let newDbName = this.user.getDbName(newName);
+    let query = `ALTER DATABASE "${oldDbName}" RENAME TO "${newDbName}";`;
+    try {
+      await client.query(query);
+    }
+    catch (err) {
+      logData = {query};
+      throw new Error(`Error while renaming the database: ${err}`);
+    }
+    //
+    // Update the DB name
+    this.name = newName;
+    this.config.saveConfig();
+    //
+    // Log the rename operation
+    this.log("INFO", "Database renamed", "Database.renameDb", {old: oldName, new: newName});
+  }
+  catch (err) {
+    this.log(warning ? "WARN" : "ERROR", err.message || err, "Database.renameDb", logData);
+    throw err;
+  }
+  finally {
+    client?.end();
+  }
 };
 
 
 /**
  * Backup Db and gives a .gz file
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.backup = function (params, callback)
+Node.Database.prototype.backup = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -536,9 +542,8 @@ Node.Database.prototype.backup = function (params, callback)
 /**
  * Restore a db from a cloud backup
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.restore = function (params, callback)
+Node.Database.prototype.restore = async function (params)
 {
   console.error("NOT SUPPORTED FOR SELF");
 };
@@ -547,52 +552,49 @@ Node.Database.prototype.restore = function (params, callback)
 /**
  * Call the execution of the commands related to a database
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.processCommand = function (params, callback)
+Node.Database.prototype.processCommand = async function (params)
 {
-  this.execCommand(params, callback);
+  return await this.execCommand(params);
 };
 
 
 /**
  * Execute command for the database
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.Database.prototype.execCommand = function (params, callback)
+Node.Database.prototype.execCommand = async function (params)
 {
-  var command = params.tokens[0];
+  let command = params.tokens[0];
   //
   // If the authorization key is enabled and the given one does not match -> error
   if (this.config.auth && params.req.query.autk !== this.config.autk) {
     this.log("WARN", "Unauthorized", "Database.execCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
+    throw {err: "Unauthorized", code: 401};
   }
   //
   switch (command) {
     case "status":
-      this.sendStatus(params, callback);
-      break;
+      return await this.sendStatus(params);
+
     case "query":
-      this.query(params, callback);
-      break;
+      return await this.query(params);
+
     case "config":
-      this.configure(params, callback);
-      break;
+      return await this.configure(params);
+
     case "backup":
-      this.backup(params, callback);
-      break;
+      return await this.backup(params);
+
     case "restore":
-      this.restore(params, callback);
-      break;
+      return await this.restore(params);
+
     case "rename":
-      this.renameDb(params, callback);
-      break;
+      return await this.renameDb(params);
+      
     default:
       this.log("WARN", "Invalid Command", "Database.execCommand", {cmd: command, url: params.req.originalUrl});
-      callback("Invalid Command");
-      break;
+      throw new Error("Invalid Command");
   }
 };
 

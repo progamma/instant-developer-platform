@@ -57,17 +57,17 @@ Node.User.msgTypeMap = {
 // Define usefull properties for this object
 Object.defineProperties(Node.User.prototype, {
   server: {
-    get: function () {
+    get() {
       return this.parent.parent;
     }
   },
   config: {
-    get: function () {
+    get() {
       return this.parent;
     }
   },
   logger: {
-    get: function () {
+    get() {
       return this.server.logger;
     }
   }
@@ -109,7 +109,8 @@ Node.User.prototype.save = function ()
     IID: this.IID,
     uid: this.uid,
     gid: this.gid,
-    idfdata: this.idfdata
+    idfdata: this.idfdata,
+    devAgentOptions: this.devAgentOptions
   };
 };
 
@@ -133,6 +134,8 @@ Node.User.prototype.load = function (v)
   this.IID = v.IID;
   if (v.idfdata)
     this.idfdata = v.idfdata;
+  if (v.devAgentOptions)
+    this.devAgentOptions = v.devAgentOptions;
   //
   // TODO: eliminare prima o poi... i vecchi utenti avevano questa password hard-coded
   if (!this.dbPassword)
@@ -145,7 +148,7 @@ Node.User.prototype.load = function (v)
  */
 Node.User.prototype.saveProperties = function ()
 {
-  var r = this.save();
+  let r = this.save();
   //
   // Delete children
   delete r.cl;
@@ -165,18 +168,9 @@ Node.User.prototype.setParent = function (par)
 {
   this.parent = par;
   //
-  var i;
-  if (this.projects)
-    for (i = 0; i < this.projects.length; i++)
-      this.projects[i].setParent(this);
-  //
-  if (this.databases)
-    for (i = 0; i < this.databases.length; i++)
-      this.databases[i].setParent(this);
-  //
-  if (this.apps)
-    for (i = 0; i < this.apps.length; i++)
-      this.apps[i].setParent(this);
+  this.projects?.forEach(project => project.setParent(this));
+  this.databases?.forEach(database => database.setParent(this));
+  this.apps?.forEach(app => app.setParent(this));
 };
 
 
@@ -185,7 +179,7 @@ Node.User.prototype.setParent = function (par)
  */
 Node.User.prototype.saveUser = function ()
 {
-  return JSON.stringify(this, function (k, v) {
+  return JSON.stringify(this, (k, v) => {
     if (v instanceof Node.User || v instanceof Node.Project || v instanceof Node.Database || v instanceof Node.App)
       return v.save();
     else
@@ -200,8 +194,6 @@ Node.User.prototype.saveUser = function ()
  */
 Node.User.prototype.loadUser = function (s)
 {
-  var pthis = this;
-  //
   // I'm loading the user from the JSON file. This method is used inside the RESTORE method.
   // Here I have to be careful: the OSUser, UID, GID, and apps array that are inside the JSON
   // are, probably, wrong. They could come from a different server (if the RESTORE is a cross-server operation)
@@ -210,26 +202,26 @@ Node.User.prototype.loadUser = function (s)
   // been calculated when this user has been created.
   //
   // Save "system" data
-  var old_OSUser = this.OSUser;
-  var old_uid = this.uid;
-  var old_gid = this.gid;
+  let old_OSUser = this.OSUser;
+  let old_uid = this.uid;
+  let old_gid = this.gid;
   //
-  JSON.parse(s, function (k, v) {
+  JSON.parse(s, (k, v) => {
     if (v instanceof Object && v.cl !== undefined) {
-      var obj;
+      let obj;
       if (v.cl === "Node.User")
-        obj = pthis;
+        obj = this;
       if (v.cl === "Node.Database") {
-        obj = new Node.Database(pthis);
-        pthis.databases.push(obj);
+        obj = new Node.Database(this);
+        this.databases.push(obj);
       }
       if (v.cl === "Node.Project") {
-        obj = new Node.Project(pthis);
-        pthis.projects.push(obj);
+        obj = new Node.Project(this);
+        this.projects.push(obj);
       }
       if (v.cl === "Node.App") {
-        obj = new Node.App(pthis);
-        pthis.apps.push(obj);
+        obj = new Node.App(this);
+        this.apps.push(obj);
       }
       //
       obj.load(v);
@@ -255,11 +247,9 @@ Node.User.prototype.loadUser = function (s)
 /**
  * Initialise the user
  * @param {string} userName
- * @param {function} callback - function(err)
  */
-Node.User.prototype.init = function (userName, callback)
+Node.User.prototype.init = async function (userName)
 {
-  var pthis = this;
   this.userName = userName;
   //
   // Create a new random-dbPassword
@@ -267,15 +257,11 @@ Node.User.prototype.init = function (userName, callback)
   //
   // If I'm the manager user, I don't need anything more
   if (this.userName === "manager")
-    return callback();
+    return;
   //
   // Assign an OS user and create the user folder
-  this.assignOsUser(function (err) {
-    if (err)
-      return callback(err);
-    //
-    pthis.createUserFolder(callback);
-  });
+  await this.assignOsUser();
+  await this.createUserFolder();
 };
 
 
@@ -285,121 +271,133 @@ Node.User.prototype.init = function (userName, callback)
 Node.User.prototype.startServerSessions = function ()
 {
   // Notify event to my apps
-  for (var i = 0; this.apps && i < this.apps.length; i++)
-    this.apps[i].startDefaultServerSession();
+  if (this.apps)
+    for (let app of this.apps)
+      app.startDefaultServerSession();
 };
 
 
 /**
  * Assign a system user to the user
- * @param {Function} callback - function(err)
  */
-Node.User.prototype.assignOsUser = function (callback)
+Node.User.prototype.assignOsUser = async function ()
 {
-  var pthis = this;
-  //
   // If LOCAL do nothing
   if (this.config.local)
-    return callback();
+    return;
   //
-  // If this user has not yet been coupled with an OS system user
-  if (!this.OSUser) {
-    // Find a "free" OS user
-    var i, array = [];
-    for (i = 0; i < 300; i++)
-      array[i] = true;
-    //
-    for (i = 0; i < this.config.users.length; i++) {
-      var OsU = this.config.users[i].OSUser;
-      if (OsU) {
-        var uidx = OsU.split("-")[OsU.split("-").length - 1];
-        array[uidx] = false;
-      }
-    }
-    //
-    // Now get the first free user
-    for (i = 0; i < 300 && !this.OSUser; i++)
-      if (array[i])
-        this.OSUser = (process.platform === "freebsd" ? "indeuser-" : "user-") + i;
-    //
-    // If not found...
+  let logData;
+  try {
+    // If this user has not yet been coupled with an OS system user
     if (!this.OSUser) {
-      pthis.log("ERROR", "No available OS users", "User.assignOsUser");
-      return callback("No available OS users");
-    }
-  }
-  //
-  // Now ask the system the UID and GID of the given OS user
-  Node.child.execFile("/usr/bin/id", ["-u", this.OSUser], function (err, stdout, stderr) {    // jshint ignore:line
-    if (err) {
-      pthis.log("ERROR", "Error getting UID: " + err, "User.assignOsUser", {osUser: pthis.OSUser});
-      return callback("Error getting UID: " + err);
-    }
-    pthis.uid = stdout;
-    //
-    Node.child.execFile("/usr/bin/id", ["-g", pthis.OSUser], function (err, stdout, stderr) {   // jshint ignore:line
-      if (err) {
-        pthis.log("ERROR", "Error getting GID: " + err, "User.assignOsUser", {osUser: pthis.OSUser});
-        return callback("Error getting GID: " + err);
-      }
-      pthis.gid = stdout;
+      // Find a "free" OS user
+      let array = [];
+      for (let i = 0; i < 300; i++)
+        array[i] = true;
       //
-      // Done
-      callback();
+      for (let i = 0; i < this.config.users.length; i++) {
+        let OsU = this.config.users[i].OSUser;
+        if (OsU) {
+          let uidx = OsU.split("-")[OsU.split("-").length - 1];
+          array[uidx] = false;
+        }
+      }
+      //
+      // Now get the first free user
+      for (let i = 0; i < 300 && !this.OSUser; i++)
+        if (array[i])
+          this.OSUser = (process.platform === "freebsd" ? "indeuser-" : "user-") + i;
+      //
+      // If not found...
+      if (!this.OSUser)
+        throw new Error("No available OS users");
+    }
+    //
+    // Now ask the system the UID and GID of the given OS user
+    await new Promise((resolve, reject) => {
+      Node.child.execFile("/usr/bin/id", ["-u", this.OSUser], (err, stdout, stderr) => {
+        if (err) {
+          logData = {osUser: this.OSUser};
+          reject(new Error(`Error getting UID: ${err}`));
+        }
+        else {
+          this.uid = stdout;
+          resolve();
+        }
+      });
     });
-  });
+    //
+    await new Promise((resolve, reject) => {
+      Node.child.execFile("/usr/bin/id", ["-g", this.OSUser], (err, stdout, stderr) => {
+        if (err) {
+          logData = {osUser: this.OSUser};
+          reject(new Error(`Error getting GID: ${err}`));
+        }
+        else {
+          this.gid = stdout;
+          resolve();
+        }
+      });
+    });
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.assignOsUser", logData);
+    throw err;
+  }
 };
 
 
 /**
  * Create the User folder if does not exist
- * @param {function} callback - function(err)
  */
-Node.User.prototype.createUserFolder = function (callback)
+Node.User.prototype.createUserFolder = async function ()
 {
-  var pthis = this;
-  var path = this.config.directory + "/" + this.userName;
+  let path = Node.path.join(this.config.directory, this.userName);
+  let logData;
   //
-  // Create user folder
-  Node.fs.mkdir(path, function (err) {
-    if (err && err.code !== "EEXIST") {
-      pthis.log("ERROR", "Error creating the user folder " + path + ": " + err, "User.createUserFolder");
-      return callback("Error creating the user folder " + path + ": " + err);
+  try {
+    // Create user folder
+    try {
+      await Node.fs.promises.mkdir(path);
+    }
+    catch (err) {
+      if (err.code !== "EEXIST")
+        throw new Error(`Error creating the user folder ${path}: ${err}`);
     }
     //
     // Create DB directory
-    Node.fs.mkdir(path + "/db", function (err) {
-      if (err && err.code !== "EEXIST") {
-        pthis.log("ERROR", "Error creating the user folder " + path + "/db" + ": " + err, "User.createUserFolder");
-        return callback("Error creating the db folder " + path + "/db" + ": " + err);
+    try {
+      await Node.fs.promises.mkdir(Node.path.join(path, "db"));
+    }
+    catch (err) {
+      if (err.code !== "EEXIST")
+        throw new Error(`Error creating the db folder ${path}/db: ${err}`);
+    }
+    //
+    // If not local
+    if (!this.config.local) {
+      // Set ownership of all files and directories
+      try {
+        await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+      }
+      catch (err) {
+        logData = {OSUser: this.OSUser, path};
+        throw new Error(`Error changing user folder permissions: ${err}`);
       }
       //
-      // If not local
-      if (!pthis.config.local) {
-        // Set ownership of all files and directories
-        pthis.server.execFileAsRoot("ChownChmod", [pthis.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
-          if (err) {
-            pthis.log("ERROR", "Error changing user folder permissions: " + (stderr || err), "User.createUserFolder",
-                    {OSUser: pthis.OSUser, path: path});
-            return callback("Error changing user folder permissions: " + (stderr || err));
-          }
-          //
-          pthis.server.execFileAsRoot("ChownDBFolder", [path + "/db"], function (err, stdout, stderr) {   // jshint ignore:line
-            if (err) {
-              pthis.log("ERROR", "Error changing the database folder permissions: " + (stderr || err), "User.createUserFolder",
-                      {path: path + "/db"});
-              return callback("Error changing the database folder permissions: " + (stderr || err));
-            }
-            //
-            // Done
-            callback();
-          });
-        });
+      try {
+        await this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")]);
       }
-      else
-        callback();
-    });
-  });
+      catch (err) {
+        logData = {path: Node.path.join(path, "db")};
+        throw new Error(`Error changing the database folder permissions: ${err}`);
+      }
+    }
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.createUserFolder", logData);
+    throw err;
+  }
 };
 
 
@@ -410,80 +408,63 @@ Node.User.prototype.createUserFolder = function (callback)
  */
 Node.User.prototype.getProject = function (name)
 {
-  for (var i = 0; i < this.projects.length; i++) {
-    if (this.projects[i].name === name || this.projects[i].id === name)
-      return this.projects[i];
-  }
+  return this.projects.find(prj => prj.name === name || prj.id === name);
 };
 
 
 /**
  * Create a new project
  * @param {string} projectName
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.createProject = function (projectName, callback)
+Node.User.prototype.createProject = async function (projectName)
 {
-  var pthis = this;
-  //
   // Check if the prj already exists
   if (this.getProject(projectName)) {
     this.log("WARN", "Project already exists", "User.createProject", {project: projectName});
-    return callback("Project already exists");
+    throw new Error("Project already exists");
   }
   //
   // Create and initialize a new project
-  var project = new Node.Project(this);
-  project.init(projectName, function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Add the project to the array and save the configuration
-    pthis.projects.push(project);
-    pthis.config.saveConfig();
-    //
-    // Log the project creation
-    pthis.log("INFO", "Project created", "User.createProject", {project: projectName});
-    //
-    // Done
-    callback();
-  });
+  let project = new Node.Project(this);
+  await project.init(projectName);
+  //
+  // Add the project to the array and save the configuration
+  this.projects.push(project);
+  this.config.saveConfig();
+  //
+  // Log the project creation
+  this.log("INFO", "Project created", "User.createProject", {project: projectName});
 };
 
 
 /**
  * Delete an existing project
  * @param {string} projectName
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.deleteProject = function (projectName, callback)
+Node.User.prototype.deleteProject = async function (projectName)
 {
-  var pthis = this;
-  //
-  var project = this.getProject(projectName);
+  let project = this.getProject(projectName);
   if (!project) {
     this.log("WARN", "Project not found", "User.deleteProject", {project: projectName});
-    return callback({code: 404, err: "Project not found"});
+    throw {err: "Project not found", code: 404};
   }
   //
+  // If there is an open session I can't delete the project!
+  if (this.server.getOpenSession(project))
+    throw {err: "Can't delete the project: open IDE session", code: 409};
+  //
   // Delete the project folder
-  project.deleteProjectFolder(function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Delete the project from the projects array
-    var index = pthis.projects.indexOf(project);
-    pthis.projects.splice(index, 1);
-    //
-    // Save the new configuration
-    pthis.config.saveConfig();
-    //
-    // Log the project deletion
-    pthis.log("INFO", "Project removed", "User.deleteProject", {project: projectName});
-    //
-    // Done
-    callback();
-  });
+  await project.deleteProjectFolder();
+  //
+  // Delete the project from the projects array
+  let index = this.projects.indexOf(project);
+  this.projects.splice(index, 1);
+  //
+  // Save the new configuration
+  this.config.saveConfig();
+  //
+  // Log the project deletion
+  this.log("INFO", "Project removed", "User.deleteProject", {project: projectName});
 };
 
 
@@ -493,170 +474,126 @@ Node.User.prototype.deleteProject = function (projectName, callback)
  */
 Node.User.prototype.getDatabase = function (name)
 {
-  for (var i = 0; i < this.databases.length; i++) {
-    if (this.databases[i].name === name)
-      return this.databases[i];
-  }
+  return this.databases.find(db => db.name === name);
 };
 
 
 /**
  * Create a new database object
  * @param {string} dbName
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.createDatabase = function (dbName, callback)
+Node.User.prototype.createDatabase = async function (dbName)
 {
-  var pthis = this;
-  //
   // Check if the database already exists
   if (this.getDatabase(dbName)) {
     this.log("WARN", "Database already exists", "User.createDatabase", {database: dbName});
-    return callback("Database already exists");
+    throw new Error("Database already exists");
   }
   //
   // Create and initialize a new database
-  var database = new Node.Database(this);
-  database.init(dbName, function (err) {
-    if (err)
-      return callback(err);
-    //
-    // Add the database to the array and save the configuration
-    pthis.databases.push(database);
-    pthis.config.saveConfig();
-    //
-    // Log the database creation
-    pthis.log("INFO", "Database created", "User.createDatabase", {database: dbName});
-    //
-    // Done
-    callback();
-  });
+  let database = new Node.Database(this);
+  await database.init(dbName);
+  //
+  // Add the database to the array and save the configuration
+  this.databases.push(database);
+  this.config.saveConfig();
+  //
+  // Log the database creation
+  this.log("INFO", "Database created", "User.createDatabase", {database: dbName});
 };
 
 
 /**
  * Delete an existing database
  * @param {string} dbName
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.deleteDatabase = function (dbName, callback)
+Node.User.prototype.deleteDatabase = async function (dbName)
 {
-  var pthis = this;
-  //
-  var database = this.getDatabase(dbName);
+  let database = this.getDatabase(dbName);
   if (!database) {
     this.log("WARN", "Database not found", "User.deleteDatabase", {database: dbName});
-    return callback({code: 404, msg: "Database not found"});
+    throw {err: "Database not found", code: 404};
   }
   //
-  database.dropDb(function (err) {
-    if (err)
-      return callback(err);
-    //
-    var index = pthis.databases.indexOf(database);
-    pthis.databases.splice(index, 1);
-    //
-    // Save the new configuration
-    pthis.config.saveConfig();
-    //
-    // Log the db deletion
-    pthis.log("INFO", "Database removed", "User.deleteDatabase", {database: dbName});
-    //
-    // Done
-    callback();
-  });
+  await database.dropDb();
+  //
+  let index = this.databases.indexOf(database);
+  this.databases.splice(index, 1);
+  //
+  // Save the new configuration
+  this.config.saveConfig();
+  //
+  // Log the db deletion
+  this.log("INFO", "Database removed", "User.deleteDatabase", {database: dbName});
 };
 
 
 /**
  * Delete all User databases
- * @param {function} callback - function(err)
  */
-Node.User.prototype.deleteAllDatabases = function (callback)
+Node.User.prototype.deleteAllDatabases = async function ()
 {
-  var pthis = this;
+  // Drop all databases
+  while (this.databases.length > 0) {
+    let db = this.databases[0];
+    await db.dropDb();
+    this.databases.splice(0, 1);
+  }
   //
-  // Define function that removes the first database
-  var dropFirstDB = function () {
-    // If there are no more database
-    if (pthis.databases.length === 0) {
-      // Remove user's DB environment
-      Node.Database.cleanDbEnv(pthis, function (err) {
-        callback(err);
-      });
-      return;
-    }
-    //
-    // There are database to remove. Drop the first db in the list
-    var db = pthis.databases[0];
-    db.dropDb(function (err) {
-      if (err)
-        return callback(err);
-      //
-      // This has been removed, continue with next one
-      pthis.databases.splice(0, 1);
-      dropFirstDB();
-    });
-  };
-  //
-  // Drop first DB (if present)
-  dropFirstDB();
+  // Remove user's DB environment
+  await Node.Database.cleanDbEnv(this);
 };
 
 
 /**
  * Delete the user folder (tablespace included)
- * @param {function} callback - function(err)
  */
-Node.User.prototype.deleteUserFolder = function (callback)
+Node.User.prototype.deleteUserFolder = async function ()
 {
-  var pthis = this;
-  var path = this.config.directory + "/" + this.userName;
+  let path = Node.path.join(this.config.directory, this.userName);
+  let logData;
   //
-  var delUserDir = function () {
-    Node.fs.rm(path, {recursive: true, force: true}, function (err) {
-      if (err) {
-        pthis.log("ERROR", "Error deleting the user folder " + path + " :" + err, "User.deleteUserFolder");
-        return callback("Error deleting the user folder " + path + " :" + err);
+  try {
+    // If we are in a true environment I need to launch a specific script to delete the tablespace
+    if (!this.config.local) {
+      try {
+        await this.server.execFileAsRoot("/bin/rm", ["-rf", Node.path.join(path, "db")]);
       }
-      //
-      // Done
-      callback();
-    });
-  };
-  //
-  // If we are in a true environment I need to launch a specific script to delete the tablespace
-  if (!this.config.local) {
-    this.server.execFileAsRoot("/bin/rm", ["-rf", path + "/db"], function (err, stdout, stderr) {   // jshint ignore:line
-      if (err) {
-        pthis.log("ERROR", "Error deleting the tablespace: " + (stderr || err), "User.deleteUserFolder",
-                {OSUser: pthis.OSUser, path: path + "/db"});
-        return callback("Error deleting the tablespace: " + (stderr || err));
+      catch (err) {
+        logData = {OSUser: this.OSUser, path: Node.path.join(path, "db")};
+        throw new Error(`Error deleting the tablespace: ${err}`);
       }
       //
       // Before deleting the user folder I want to be sure I'm able to do it -> fix permissions
-      pthis.server.execFileAsRoot("ChownChmod", [pthis.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
-        if (err) {
-          pthis.log("ERROR", "Error changing user folder permissions: " + (stderr || err), "User.deleteUserFolder",
-                  {OSUser: pthis.OSUser, path: path});
-          return callback("Error changing user folder permissions: " + (stderr || err));
-        }
-        //
-        delUserDir();
-      });
-    });
+      try {
+        await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+      }
+      catch (err) {
+        logData = {OSUser: this.OSUser, path};
+        throw new Error(`Error changing user folder permissions: ${err}`);
+      }
+    }
+    //
+    // Delete the user directory
+    try {
+      await Node.fs.promises.rm(path, {recursive: true, force: true});
+    }
+    catch (err) {
+      throw new Error(`Error deleting the user folder ${path}: ${err}`);
+    }
   }
-  else
-    delUserDir();
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.deleteUserFolder", logData);
+    throw err;
+  }
 };
 
 
 /**
  * Backup the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.backup = function (params, callback)
+Node.User.prototype.backup = async function (params)
 {
   let path = Node.path.join(this.config.directory, this.userName);
   let tempPath = Node.path.join(this.config.directory, "tmp");
@@ -664,262 +601,239 @@ Node.User.prototype.backup = function (params, callback)
   //
   this.log("DEBUG", "User backup", "User.backup", {pathCloud});
   //
-  // Error function: report error and clean up temp directory
-  let errorFnc = msg => {
-    this.log("ERROR", msg, "User.backup");
-    callback(msg);
-    //
-    Node.fs.rm(Node.path.join(this.config.directory, "tmp"), {recursive: true, force: true}, err => {
-      if (err)
-        this.log("ERROR", `Error deleting the temporary folder ${this.config.directory}/tmp: ${err}`, "User.backup");
-    });
-  };
-  //
-  // Create a temporary (work) directory
-  Node.fs.mkdir(tempPath, err => {
-    if (err && err.code !== "EEXIST")
-      return errorFnc(`Error creating the folder ${this.config.directory}/tmp: ${err}`);
-    //
-    let backupDir = () => {
+  let logData;
+  try {
+    let err;
+    try {
+      // Create a temporary (work) directory
+      try {
+        await Node.fs.promises.mkdir(tempPath);
+      }
+      catch (err) {
+        if (err.code !== "EEXIST")
+          throw new Error(`Error creating the folder ${this.config.directory}/tmp: ${err}`);
+      }
+      //
+      // Fix permissions if needed before backing up the user
+      if (!this.config.local) {
+        try {
+          await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+        }
+        catch (err) {
+          logData = {OSUser: this.OSUser, path};
+          throw new Error(`Error changing user folder permissions: ${err}`);
+        }
+        //
+        try {
+          await this.server.execFileAsRoot("ChownDBFolder", [`${path}/db`]);
+        }
+        catch (err) {
+          logData = {path: `${path}/db`};
+          throw new Error(`Error changing database folder permissions: ${err}`);
+        }
+      }
+      //
       // Copy all the user folder except the db directory into the tmp folder
       let skipdb = item => item !== `${path}/db`;
-      Node.ncp(path, Node.path.join(tempPath, this.userName), {filter: skipdb}, err => {
-        if (err)
-          return errorFnc(`Error copying the user folder ${path}: ${err}`);
-        //
-        // Write user's info into an index.json file
+      await new Promise((resolve, reject) => {
+        Node.ncp(path, Node.path.join(tempPath, this.userName), {filter: skipdb}, err => {
+          if (err)
+            reject(new Error(`Error copying the user folder ${path}: ${err}`));
+          else
+            resolve();
+        });
+      });
+      //
+      // Write user's info into an index.json file
+      await new Promise((resolve, reject) => {
         let ws = Node.fs.createWriteStream(Node.path.join(tempPath, this.userName, "index.json"), {encoding: "utf8"});
         ws.write(this.saveUser());
         ws.end();
         //
-        ws.on("error", err => errorFnc(`Error writing the file ${Node.path.join(tempPath, this.userName, "index.json")}: ${err}`));
-        //
-        ws.on("finish", () => {
-          // Backup the tmp folder int the cloud
-          let archiver = new Node.Archiver(this.server);
-          archiver.backup(Node.path.join(tempPath, this.userName), pathCloud).then(() => {
-            // Delete the tmp folder
-            Node.fs.rm(tempPath, {recursive: true, force: true}, err => {
-              if (err) {
-                this.log("ERROR", `Error deleting the TEMP folder ${this.config.directory}/tmp (2): ${err}`, "User.backup");
-                return callback(`Error deleting the temporary folder ${this.config.directory}/tmp: ${err}`);
-              }
-              //
-              // Last, backup all user's databases
-              this.backupDatabases(err => {
-                if (err)
-                  return callback(`Error backing up databases: ${err}`);
-                //
-                // Log the user backup
-                this.log("INFO", "User backed up", "User.backup");
-                //
-                // Done!
-                callback();
-              });
-            });
-          }, err => errorFnc(`Error backing up the files: ${err}`));
-        });
+        ws.on("error", err => reject(new Error(`Error writing the file ${Node.path.join(tempPath, this.userName, "index.json")}: ${err}`)));
+        ws.on("finish", () => resolve());
       });
-    };
-    //
-    // Fix permissions if needed before backing up the user
-    if (!this.config.local) {
-      this.server.execFileAsRoot("ChownChmod", [this.OSUser, path], (err, stdout, stderr) => {
-        if (err) {
-          this.log("ERROR", `Error changing user folder permissions: ${stderr || err}`, "User.backup", {OSUser: this.OSUser, path});
-          return callback(`Error changing user folder permissions: ${stderr || err}`);
-        }
-        //
-        this.server.execFileAsRoot("ChownDBFolder", [`${path}/db`], (err, stdout, stderr) => {
-          if (err) {
-            this.log("ERROR", `Error changing database folder permissions: ${stderr || err}`, "User.backup", {path: `${path}/db`});
-            return callback(`Error changing database folder permissions: ${stderr || err}`);
-          }
-          //
-          backupDir();
-        });
-      });
+      //
+      // Backup the tmp folder int the cloud
+      let archiver = new Node.Archiver(this.server);
+      try {
+        await archiver.backup(Node.path.join(tempPath, this.userName), pathCloud);
+      }
+      catch (err) {
+        throw new Error(`Error backing up the files: ${err}`);
+      }
+      //
+      // Last, backup all user's databases
+      try {
+        await this.backupDatabases();
+      }
+      catch (err) {
+        throw new Error(`Error backing up databases: ${err}`);
+      }
+      //
+      // Log the user backup
+      this.log("INFO", "User backed up", "User.backup");
     }
-    else
-      backupDir();
-  });
+    catch (e) {
+      err = e;
+      throw e;
+    }
+    finally {
+      // Delete the tmp folder
+      try {
+        await Node.fs.promises.rm(tempPath, {recursive: true, force: true});
+      }
+      catch (e) {
+        if (!err)
+          err = new Error(`Error deleting the temporary folder ${this.config.directory}/tmp: ${e}`);
+      }
+    }
+    //
+    if (err)
+      throw err;
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.backup", logData);
+    throw err;
+  }
+
 };
 
 
 /**
  * Backup the user's database
- * @param {function} callback (err)
  */
-Node.User.prototype.backupDatabases = function (callback)
+Node.User.prototype.backupDatabases = async function ()
 {
-  var dbToBackup = this.databases.slice(0);
-  //
-  var backupDB = function () {
-    if (dbToBackup.length === 0)     // No (more) DB -> done
-      return callback();
-    //
-    // Backup first DB
-    var db = dbToBackup[0];
-    db.backup({}, function (err) {
-      if (err)
-        return callback(err);
-      //
-      // This has been backupped... continue with the next one
-      dbToBackup.splice(0, 1);
-      backupDB();
-    });
-  };
-  //
-  // Start with the first one
-  backupDB();
+  for (let db of this.databases)
+    await db.backup();
 };
 
 
 /**
  * Restore the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.restore = function (params, callback)
+Node.User.prototype.restore = async function (params)
 {
   let path = Node.path.join(this.config.directory, this.userName);
   let pathCloud = `users/${this.config.serverType}/${this.userName}/backups/${this.userName}.tar.gz`;
+  let logData;
   //
   this.log("DEBUG", "User restore", "User.restore", {pathCloud});
   //
   // Restore backup from the cloud
   let archiver = new Node.Archiver(this.server);
-  archiver.restore(path, pathCloud).then(() => {
-    let restoreDir = () => {
-      let pathJSON = Node.path.join(this.config.directory, this.userName, "index.json");
-      Node.fs.readFile(pathJSON, {encoding: "utf8"}, (err, file) => {
-        if (err) {
-          this.log("ERROR", `Error reading the file ${pathJSON}: ${err}`, "User.restore");
-          return callback(`Error reading the file ${pathJSON}: ${err}`);
-        }
-        //
-        // Load the user from the JSON file and save the current configuration
-        this.loadUser(file);
-        this.config.saveConfig();
-        //
-        // Delete the JSON file
-        Node.fs.rm(pathJSON, {force: true}, err => {
-          if (err) {
-            this.log("ERROR", `Error deleting the file ${pathJSON}: ${err}`, "User.restore");
-            return callback(`Error deleting the file ${pathJSON}: ${err}`);
-          }
-          //
-          // Restore all user's DBs
-          this.restoreDatabases(err => {
-            if (err)
-              return callback(`Error restoring databases: ${err}`);
-            //
-            // Log the user restore
-            this.log("INFO", "Restore of user succeeded", "User.restore");
-            //
-            // Done
-            callback();
-          });
-        });
-      });
-    };
-    //
+  await archiver.restore(path, pathCloud);
+  //
+  try {
     // Create DB directory
-    Node.fs.mkdir(Node.path.join(path, "db"), err => {
-      if (err && err.code !== "EEXIST") {
-        this.log("ERROR", `Error creating the user folder ${path}/db: ${err}`, "User.restore");
-        return callback(`Error creating the user folder ${path}/db: ${err}`);
+    try {
+      await Node.fs.promises.mkdir(Node.path.join(path, "db"));
+    }
+    catch (err) {
+      if (err.code !== "EEXIST")
+        throw new Error(`Error creating the user folder ${path}/db: ${err}`);
+    }
+    //
+    // Fix permissions if needed then restore user directory
+    if (!this.config.local) {
+      try {
+        await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+      }
+      catch (err) {
+        logData = {OSUser: this.OSUser, path};
+        throw new Error(`Error changing the user folder permissions: ${err}`);
       }
       //
-      // Fix permissions if needed then restore user directory
-      if (!this.config.local) {
-        this.server.execFileAsRoot("ChownChmod", [this.OSUser, path], (err, stdout, stderr) => {
-          if (err) {
-            this.log("ERROR", `Error changing the user folder permissions: ${stderr || err}`, "User.restore", {OSUser: this.OSUser, path});
-            return callback(`Error changing the user folder permissions: ${stderr || err}`);
-          }
-          //
-          this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")], (err, stdout, stderr) => {
-            if (err) {
-              this.log("ERROR", `Error changing the database folder permissions: ${stderr || err}`, "User.restore", {path: Node.path.join(path, "db")});
-              return callback(`Error changing the database folder permissions: ${stderr || err}`);
-            }
-            //
-            restoreDir();
-          });
-        });
+      try {
+        await this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")]);
       }
-      else
-        restoreDir();
-    });
-  }, err => callback(err));
+      catch (err) {
+        logData = {path: Node.path.join(path, "db")};
+        throw new Error(`Error changing the database folder permissions: ${err}`);
+      }
+    }
+    //
+    // Read and load user data from JSON file
+    let pathJSON = Node.path.join(this.config.directory, this.userName, "index.json");
+    let file;
+    try {
+      file = await Node.fs.promises.readFile(pathJSON, {encoding: "utf8"});
+    }
+    catch (err) {
+      throw new Error(`Error reading the file ${pathJSON}: ${err}`);
+    }
+    //
+    // Load the user from the JSON file and save the current configuration
+    this.loadUser(file);
+    this.config.saveConfig();
+    //
+    // Delete the JSON file
+    try {
+      await Node.fs.promises.rm(pathJSON, {force: true});
+    }
+    catch (err) {
+      throw new Error(`Error deleting the file ${pathJSON}: ${err}`);
+    }
+    //
+    // Restore all user's DBs
+    try {
+      await this.restoreDatabases();
+    }
+    catch (err) {
+      throw new Error(`Error restoring databases: ${err}`);
+    }
+    //
+    // Log the user restore
+    this.log("INFO", "Restore of user succeeded", "User.restore");
+  }
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.restore", logData);
+    throw err;
+  }
 };
 
 
 /**
  * Restore all user's databases
- * @param {function} callback - function(err)
  */
-Node.User.prototype.restoreDatabases = function (callback)
+Node.User.prototype.restoreDatabases = async function ()
 {
-  var dbToRestore = this.databases.slice(0);
-  //
-  var restoreDB = function () {
-    if (dbToRestore.length === 0)     // No (more) DB -> done
-      return callback();
-    //
-    // Restore first DB
-    var db = dbToRestore[0];
-    db.init(db.name, function (err) {
-      if (err)
-        return callback(err);
-      //
-      db.restore({}, function (err) {
-        if (err)
-          return callback(err);
-        //
-        // This has been restored... continue with the next one
-        dbToRestore.splice(0, 1);
-        restoreDB();
-      });
-    });
-  };
-  //
-  // Start with the first one
-  restoreDB();
+  for (let db of this.databases) {
+    await db.init(db.name);
+    await db.restore();
+  }
 };
 
 
 /**
  * Check user configuration
- * @param {function} callback - function(err)
  */
-Node.User.prototype.check = function (callback)
+Node.User.prototype.check = async function ()
 {
-  var pthis = this;
-  //
   // If I'm the manager user, I'm fine
   if (this.userName === "manager")
-    return callback();
+    return;
   //
   // Couple the user with a system user (if needed)
-  this.assignOsUser(function (err) {
-    if (err)
-      return callback(err);
-    //
+  await this.assignOsUser();
+  //
+  try {
     // Create the user folder
-    pthis.createUserFolder(function (err) {
-      callback(err);
-      //
-      // Do this asynchronously... I don't care that much about the result
-      for (var i = 0; i < pthis.projects.length; i++) {
-        var prj = pthis.projects[i];
-        prj.check(function (err) {
-          pthis.log("ERROR", "Error while checking the project folder " + prj.name + ": " + err, "User.check", {project: prj.name});
-        }); // jshint ignore:line
+    await this.createUserFolder();
+  }
+  finally {
+    // Do this asynchronously... I don't care that much about the result
+    for (let prj of this.projects) {
+      try {
+        await prj.check();
       }
-    });
-  });
+      catch(err) {
+        this.log("ERROR", `Error while checking the project folder ${prj.name}: ${err}`, "User.check", {project: prj.name});
+      }
+    }
+  }
 };
 
 
@@ -930,7 +844,7 @@ Node.User.prototype.check = function (callback)
  */
 Node.User.prototype.createApp = function (appName)
 {
-  var app = new Node.App(this);
+  let app = new Node.App(this);
   this.apps.push(app);
   //
   // Init the app
@@ -949,7 +863,7 @@ Node.User.prototype.createApp = function (appName)
  */
 Node.User.prototype.deleteApp = function (app)
 {
-  var idx = this.apps.indexOf(app);
+  let idx = this.apps.indexOf(app);
   if (idx === -1)
     return this.log("WARN", "App not found", "User.deleteApp", {app: app.name});
   //
@@ -966,215 +880,206 @@ Node.User.prototype.deleteApp = function (app)
  */
 Node.User.prototype.getApp = function (name)
 {
-  var lname = name.toLowerCase();
-  for (var i = 0; i < this.apps.length; i++) {
-    if (this.apps[i].name.toLowerCase() === lname)
-      return this.apps[i];
-  }
+  let lname = name.toLowerCase();
+  return this.apps.find(app => app.name.toLowerCase() === lname);
 };
 
 
 /**
  * Get the status of the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendStatus = function (params, callback)
+Node.User.prototype.sendStatus = async function (params)
 {
-  var pthis = this;
-  //
   // If local -> can't compute user dir size
   if (this.config.local)
-    return callback({msg: "OK"});
+    return {msg: "OK"};
   //
   // Get the size of the user directory
-  var path = this.config.directory + "/" + this.userName;
-  this.server.execFileAsRoot("/usr/bin/du", ["-sh", path], function (err, stdout, stderr) {   // jshint ignore:line
-    if (err) {
-      pthis.log("ERROR", "Error getting the size of user folder: " + (stderr || err), "User.sendStatus", {path: path});
-      return callback("Error getting the size of user folder: " + (stderr || err));
-    }
-    //
-    var size = stdout.split("\t")[0];
+  let path = Node.path.join(this.config.directory, this.userName);
+  try {
+    let stdout = await this.server.execFileAsRoot("/usr/bin/du", ["-sh", path]);
+    let size = stdout.split("\t")[0];
     switch (size.slice(-1)) {
       case "K":
         size = Math.ceil(parseFloat(size) * 1024);
         break;
+
       case "M":
         size = Math.ceil(parseFloat(size) * 1024 * 1024);
         break;
+
       case "G":
         size = Math.ceil(parseFloat(size) * 1024 * 1024 * 1024);
         break;
     }
     //
-    var status = {diskSize: size};
-    callback({msg: JSON.stringify(status)});
-  });
+    return {msg: JSON.stringify({diskSize: size})};
+  }
+  catch (err) {
+    this.log("ERROR", `Error getting the size of user folder: ${err}`, "User.sendStatus", {path});
+    throw new Error(`Error getting the size of user folder: ${err}`);
+  }
 };
 
 
 /**
  * List databases for the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendDatabasesList = function (params, callback)
+Node.User.prototype.sendDatabasesList = async function (params)
 {
-  if (!this.databases.length)
-    return callback({msg: JSON.stringify([])});
+  let databases = [];
+  for (let db of this.databases) {
+    let res = await db.sendStatus(params);
+    databases = databases.concat(JSON.parse(res.msg));
+  }
   //
-  var databases = [];
-  this.databases.forEach(function (db) {
-    db.sendStatus(params, function (res) {   // For each database: database status
-      if (typeof res === "string")
-        return callback(res);
-      //
-      databases = databases.concat(JSON.parse(res.msg));
-      if (databases.length === this.databases.length)
-        return callback({msg: JSON.stringify(databases)});
-    }.bind(this));
-  }.bind(this));
+  return {msg: JSON.stringify(databases)};
 };
 
 
 /*
  * List all the apps for the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendAppsList = function (params, callback)
+Node.User.prototype.sendAppsList = async function (params)
 {
-  if (!this.apps.length)
-    return callback({msg: JSON.stringify([])});
+  let apps = [];
+  for (let app of this.apps) {
+    let res = await app.sendStatus(params);
+    apps.push(JSON.parse(res.msg));
+  }
   //
-  var apps = [];
-  this.apps.forEach(function (app) {
-    app.sendStatus(params, function (res) {   // For each app: status
-      if (typeof res === "string")
-        return callback(res);
-      //
-      apps = apps.concat(JSON.parse(res.msg));
-      if (apps.length === this.apps.length)
-        return callback({msg: JSON.stringify(apps)});
-    }.bind(this));
-  }.bind(this));
+  return {msg: JSON.stringify(apps)};
 };
 
 
 /*
  * Send the projects list
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendProjectsList = function (params, callback)
+Node.User.prototype.sendProjectsList = function (params)
 {
-  var projects = [];
-  for (var i = 0; i < this.projects.length; i++)
-    projects.push(this.projects[i].name);
-  //
-  callback({msg: JSON.stringify(projects)});
+  let projects = this.projects.map(prj => prj.name);
+  return {msg: JSON.stringify(projects)};
 };
 
 
 /*
  * Send the projects list in JSON format
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendProjectsListJson = function (params, callback)
+Node.User.prototype.sendProjectsListJson = async function (params)
 {
-  var projects = [];
+  let projects = [];
   for (let prj of this.projects) {
-    let prjData = {name: prj.name, lastSave: prj.lastSave, path: this.config.directory + "/" + this.userName};
+    let prjData = {
+      name: prj.name,
+      lastSave: prj.lastSave,
+      path: Node.path.join(this.config.directory, this.userName)
+    };
     //
-    let goodName = this.config.directory + "/" + this.userName + "/" + prj.name + "/project.json.good";
-    if (Node.fs.existsSync(goodName)) 
-      prjData.restoreDT = Node.fs.statSync(goodName).mtime.toISOString();
+    let goodName = Node.path.join(this.config.directory, this.userName, prj.name, "project.json.good");
+    if (Node.fs.existsSync(goodName))
+      prjData.restoreDT = (await Node.fs.promises.stat(goodName)).mtime.toISOString();
     //
     projects.push(prjData);
   }
   //
-  callback({msg: JSON.stringify(projects)});
+  return {msg: JSON.stringify(projects)};
 };
 
 
 /*
  * Import a new IDF Project (local)
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.importPrj = function (params, callback)
+Node.User.prototype.importPrj = async function (params)
 {
-  const path = require("path");
-  var pthis = this;
+  // Get the file path from query parameters
+  let filePath = params.req.query.path;
   //
   try {
-    let filePath = params.req.query.path;
-    // extract the file name from the path
-    let fileName = path.basename(filePath, path.extname(filePath));
-    // call cleanName function
-    let prjName = params.req.query.prjname || fileName;
-    // Define target directory (user's directory)
-    const targetDir = path.join(this.config.directory, this.userName);
     //
-    const archiver = new Node.Archiver(this.server);
-    archiver.unzip(filePath, targetDir).then((ris) => {
-      if (ris) {
-        let oldPath = path.join(targetDir, fileName + ".prj");
-        if (!Node.fs.existsSync(oldPath))
-          oldPath = path.join(targetDir, fileName + ".idm");
-        if (!Node.fs.existsSync(oldPath))
-          oldPath = path.join(targetDir, fileName + ".idp");
-        const newPath = path.join(targetDir, prjName);
-        setTimeout(() => {
-          Node.fs.promises.rename(oldPath, newPath).then(() => {
-            pthis.createProject(prjName, (ris) => {
-              let p = pthis.getProject(prjName);
-              p.lastSave = new Date();
-              pthis.config.saveConfig();
-              callback(ris);
-            });
-          });
-        }, 1000);
-      }
-      else
-        callback({msg: `Can't unzip file ${filePath}`});
-    });
+    // Extract the file name from the path
+    let fileName = Node.path.basename(filePath, Node.path.extname(filePath));
+    //
+    // Get the project name from query or filename
+    let prjName = params.req.query.prjname || fileName;
+    //
+    // Define target directory (user's directory)
+    let targetDir = Node.path.join(this.config.directory, this.userName);
+    //
+    // Unzip the project file to the target directory
+    let archiver = new Node.Archiver(this.server);
+    let ris = await archiver.unzip(filePath, targetDir);
+    if (!ris)
+      throw new Error(`Unable to unzip file ${filePath}`);
+    //
+    // Wait for file system to settle after unzip
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    //
+    // Find the extracted folder — try known extensions with the zip filename first,
+    // then look for any newly created folder with a project extension
+    let oldPath = Node.path.join(targetDir, `${fileName}.prj`);
+    if (!Node.fs.existsSync(oldPath))
+      oldPath = Node.path.join(targetDir, `${fileName}.idm`);
+    if (!Node.fs.existsSync(oldPath))
+      oldPath = Node.path.join(targetDir, `${fileName}.idp`);
+    if (!Node.fs.existsSync(oldPath))
+      oldPath = Node.path.join(targetDir, fileName);
+    if (!Node.fs.existsSync(oldPath)) {
+      // The zip contained a folder with a different name — scan for it
+      let entries = await Node.fs.promises.readdir(targetDir, {withFileTypes: true});
+      let found = entries.find(e => e.isDirectory() && (e.name.endsWith(".prj") || e.name.endsWith(".idm") || e.name.endsWith(".idp")) &&
+              !this.getProject(Node.path.basename(e.name, Node.path.extname(e.name))));
+      if (found)
+        oldPath = Node.path.join(targetDir, found.name);
+    }
+    //
+    let newPath = Node.path.join(targetDir, prjName);
+    //
+    // Rename the unzipped folder to the project name
+    await Node.fs.promises.rename(oldPath, newPath);
+    //
+    // Create the project in the user's project list
+    await this.createProject(prjName);
+    //
+    // Update project's last save timestamp and save configuration
+    this.getProject(prjName).lastSave = new Date();
+    //
+    this.config.saveConfig();
   }
-  catch (e) {
-    callback({msg: `Error while unzipping file ${filePath}: ${e}`});
+  catch (err) {
+    throw new Error(`Error while unzipping file ${filePath}: ${err}`);
   }
 };
-
 
 
 /*
  * Esport a project in zip format.
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.exportPrj = function (params, callback)
+Node.User.prototype.exportPrj = async function (params)
 {
-  const fullPath = params.req.query.path;
-  const archiver = new Node.Archiver(this.server);
-  archiver.zip(fullPath, {suffix: ".prj"})
-  .then((result) => {
-    console.log("User.exportPrj", result);
-    callback({msg: result});
-  })
-  .catch((e) => {
-    callback({error: `Error while exporting project ${fullPath}; ${e}`});
-  })
+  let fullPath = params.req.query.path;
+  let archiver = new Node.Archiver(this.server);
+  try {
+    let result = await archiver.zip(fullPath, {suffix: ".prj"});
+    return {msg: result};
+  }
+  catch (err) {
+    throw new Error(`Error while exporting project ${fullPath}; ${err}`);
+  }
 };
 
 
 /*
  * Send the list of sessions for all user's apps
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.sendAppSessions = function (params, callback)
+Node.User.prototype.sendAppSessions = async function (params)
 {
   // Reply:
   //  sessions: {total number of sessions for all apps}
@@ -1186,123 +1091,115 @@ Node.User.prototype.sendAppSessions = function (params, callback)
   //    sessions: {total number of sessions for the app2}
   //    workers: [{app2.worker 1 details}, {app2.worker 2 details}, ...]}  (see worker::getStatus)
   //  }, ...
-  var appsess = {sessions: 0};
-  //
-  // If there are no apps I've done
-  if (this.apps.length === 0)
-    return callback({msg: JSON.stringify(appsess)});
+  let appsess = {sessions: 0};
   //
   // Add app's details
-  var napp = 0;
-  for (var i = 0; i < this.apps.length; i++) {
-    var app = this.apps[i];
-    //
-    app.sendSessions(params, function (app, result) {
-      // Add app's sessions
-      var appdata = JSON.parse(result.msg);
-      appsess[app.name] = appdata;
-      appsess.sessions += appdata.sessions;
-      //
-      // If that's the last one, I can reply
-      if (++napp === this.apps.length)
-        callback({msg: JSON.stringify(appsess)});
-    }.bind(this, app));    // jshint ignore:line
+  for (let app of this.apps) {
+    let result = await app.sendSessions(params);
+    // Add app's sessions
+    let appdata = JSON.parse(result.msg);
+    appsess[app.name] = appdata;
+    appsess.sessions += appdata.sessions;
   }
+  //
+  return {msg: JSON.stringify(appsess)};
 };
 
 
 /**
  * Set/update the user's profile
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.profileUser = function (params, callback)
+Node.User.prototype.profileUser = async function (params)
 {
-  var pthis = this;
+  let form = new Node.multiparty.Form({uploadDir: Node.path.join(this.config.directory, this.userName)});
   //
-  var form = new Node.multiparty.Form({uploadDir: this.config.directory + "/" + this.userName});
-  form.parse(params.req, function (err, fields, files) {
-    if (err) {
-      pthis.log("ERROR", "Error while parsing request data: " + err, "User.profileUser");
-      return callback("Error while parsing request data: " + err);
-    }
-    //
-    if (fields.name)
-      pthis.name = fields.name[0];
-    if (fields.surname)
-      pthis.surname = fields.surname[0];
-    //
-    // Handle image
-    if (fields.file) {    // "file" string parameter -> delete previous image
-      Node.fs.rm(pthis.config.directory + "/" + pthis.userName + "/" + pthis.IID, {force: true}, function (err) {
-        if (err)
-          pthis.log("ERROR", "Unable to remove previous image: " + err, "User.profileUser");
-      });
-      //
-      delete pthis.IID;
-    }
-    else if (files.file && files.file.length) {   // "file" multi-part object -> add/replace image
-      var oldIID = pthis.IID;
-      //
-      // Generate a new IID
-      pthis.IID = Node.Utils.generateUID36();
-      //
-      // Move the file from the temporary path to the "final" destination
-      var path = pthis.config.directory + "/" + pthis.userName + "/" + pthis.IID;
-      Node.fs.rename(files.file[0].path, path, function (err) {
-        if (err)
-          return callback(err);
-        //
-        // Fix permissions
-        pthis.server.execFileAsRoot("ChownChmod", [pthis.OSUser, path], function (err, stdout, stderr) {   // jshint ignore:line
-          if (err) {
-            pthis.log("ERROR", "Error changing user picture permissions: " + (stderr || err), "User.profileUser",
-                    {OSUser: pthis.OSUser, path: path});
-            return callback("Error changing user picture permissions: " + (stderr || err));
-          }
-          //
-          // If there was an old image, remove the old one
-          if (oldIID)
-            Node.fs.rm(pthis.config.directory + "/" + pthis.userName + "/" + oldIID, {force: true}, function (err) {
-              if (err)
-                pthis.log("ERROR", "Unable to remove previous image: " + err, "User.profileUser");
-            });
-        });
-      });
-    }
-    //
-    pthis.config.saveConfig();
-    callback();
+  // Parse the multipart form data
+  let {fields, files} = await new Promise((resolve, reject) => {
+    form.parse(params.req, (err, fields, files) => {
+      if (err) {
+        this.log("ERROR", `Error while parsing request data: ${err}`, "User.profileUser");
+        reject(new Error(`Error while parsing request data: ${err}`));
+      }
+      else
+        resolve({fields, files});
+    });
   });
+  //
+  if (fields.name)
+    this.name = fields.name[0];
+  if (fields.surname)
+    this.surname = fields.surname[0];
+  //
+  // Handle image
+  if (fields.file) {    // "file" string parameter -> delete previous image
+    try {
+      await Node.fs.promises.rm(Node.path.join(this.config.directory, this.userName, this.IID), {force: true});
+    }
+    catch (err) {
+      this.log("ERROR", `Unable to remove previous image: ${err}`, "User.profileUser");
+    }
+    //
+    delete this.IID;
+  }
+  else if (files.file?.length) {   // "file" multi-part object -> add/replace image
+    let oldIID = this.IID;
+    //
+    // Generate a new IID
+    this.IID = Node.Utils.generateUID36();
+    //
+    // Move the file from the temporary path to the "final" destination
+    let path = Node.path.join(this.config.directory, this.userName, this.IID);
+    await Node.fs.promises.rename(files.file[0].path, path);
+    //
+    // Fix permissions
+    try {
+      await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+    }
+    catch (err) {
+      this.log("ERROR", `Error changing user picture permissions: ${err}`, "User.profileUser",
+              {OSUser: this.OSUser, path});
+      throw new Error(`Error changing user picture permissions: ${err}`);
+    }
+    //
+    // If there was an old image, remove the old one
+    if (oldIID) {
+      try {
+        await Node.fs.promises.rm(Node.path.join(this.config.directory, this.userName, oldIID), {force: true});
+      }
+      catch (err) {
+        this.log("ERROR", `Unable to remove previous image: ${err}`, "User.profileUser");
+      }
+    }
+  }
+  //
+  this.config.saveConfig();
 };
 
 
 /**
  * Download a file from the client to the project folder
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.downloadProfilePic = function (params, callback)
+Node.User.prototype.downloadProfilePic = async function (params)
 {
-  var pthis = this;
-  //
   // If the user has no IID, do nothing
   if (!this.IID) {
     params.res.end();
-    return callback({skipReply: true});
+    return {skipReply: true};
   }
   //
   // Path where the profile img is located
-  var path = this.config.directory + "/" + this.userName + "/" + this.IID;
-  Node.fs.readFile(path, function (err, data) {
-    if (err) {
-      pthis.log("ERROR", "Error reading the file " + path + ": " + err, "User.downloadProfilePic");
-      return callback("Error reading the profile pic: " + err);
-    }
-    //
+  let path = Node.path.join(this.config.directory, this.userName, this.IID);
+  try {
+    let data = await Node.fs.promises.readFile(path);
     params.res.end(data);
-    callback({skipReply: true});
-  });
+    return {skipReply: true};
+  }
+  catch (err) {
+    this.log("ERROR", `Error reading the file ${path}: ${err}`, "User.downloadProfilePic");
+    throw new Error(`Error reading the profile pic: ${err}`);
+  }
 };
 
 
@@ -1313,10 +1210,8 @@ Node.User.prototype.downloadProfilePic = function (params, callback)
  */
 Node.User.prototype.addDevice = function (socket, data)
 {
-  var pthis = this;
-  //
   // If this device is already present and I'm not waiting for a remove confermation (see later) -> error
-  var device = this.getDeviceByUuid(data.deviceUuid);
+  let device = this.getDeviceByUuid(data.deviceUuid);
   if (device && !device.removeTimerID) {
     this.log("WARN", "Device already connected", "User.addDevice", {device: data});
     socket.disconnect();
@@ -1324,25 +1219,25 @@ Node.User.prototype.addDevice = function (socket, data)
   }
   //
   // Fix the device name if a "similar one" is already connected for this user
-  var deviceName = data.deviceName;
-  var deviceNameSuffix = 1;
+  let deviceName = data.deviceName;
+  let deviceNameSuffix = 1;
   while (this.getDeviceByName(deviceName))
-    deviceName = data.deviceName + " " + deviceNameSuffix++;
+    deviceName = `${data.deviceName} ${deviceNameSuffix++}`;
   //
   // Listen for socket disconnect
-  socket.on("disconnect", function () {
+  socket.on("disconnect", () => {
     // Socket disconnected. Don't remove now the device...
     // Procrastinate device removal and if the device comes back reuse it without saying anything to anyone
-    device.removeTimerID = setTimeout(function () {
-      pthis.log("DEBUG", "Device removed", "User.addDevice", {device: data});
-      pthis.removeDevice(device);
+    device.removeTimerID = setTimeout(() => {
+      this.log("DEBUG", "Device removed", "User.addDevice", {device: data});
+      this.removeDevice(device);
     }, 3000);
     //
     // The device can't use this socket anymore... it has been disconnected!
     // It must reconnect or be removed
     delete device.socket;
     //
-    pthis.log("DEBUG", "Device disconnected. Wait 3 sec for remove:", "User.addDevice", {device: data});
+    this.log("DEBUG", "Device disconnected. Wait 3 sec for remove:", "User.addDevice", {device: data});
   });
   //
   // If I'm here with a valid device it means that a device has been disconnected less than 5 seconds ago
@@ -1359,7 +1254,13 @@ Node.User.prototype.addDevice = function (socket, data)
   else {
     // Add a new device
     device = new Node.Device(socket);
-    device.init({userName: this.userName, deviceName: deviceName, deviceUuid: data.deviceUuid, deviceType: data.deviceType, deviceSID: data.sid});
+    device.init({
+      userName: this.userName,
+      deviceName,
+      deviceUuid: data.deviceUuid,
+      deviceType: data.deviceType,
+      deviceSID: data.sid
+    });
     this.devices.push(device);
     //
     this.updateAvailableDevicesList("connected");
@@ -1375,7 +1276,7 @@ Node.User.prototype.addDevice = function (socket, data)
  */
 Node.User.prototype.removeDevice = function (device)
 {
-  var idx = this.devices.indexOf(device);
+  let idx = this.devices.indexOf(device);
   if (idx !== -1) {
     this.devices.splice(idx, 1);
     //
@@ -1391,15 +1292,18 @@ Node.User.prototype.removeDevice = function (device)
 Node.User.prototype.updateAvailableDevicesList = function (event)
 {
   // Update all live session's device list
-  var sessionList = this.server.getSessionListByUser(this.userName);
-  var msg = {type: Node.User.msgTypeMap.deviceMsg, cnt: {type: "deviceList", event: event}};
+  let sessionList = this.server.getSessionListByUser(this.userName);
   //
-  for (var i = 0; i < sessionList.length; i++) {
-    var ses = sessionList[i];
-    //
+  for (let ses of sessionList) {
     // Compute device list for this session and send the message
-    msg.cnt.data = this.getUiDeviceList(ses);
-    ses.sendToChild(msg);
+    ses.sendToChild({
+      type: Node.User.msgTypeMap.deviceMsg,
+       cnt: {
+        type: "deviceList",
+        event,
+        data: this.getUiDeviceList(ses)
+      }
+    });
   }
 };
 
@@ -1411,10 +1315,8 @@ Node.User.prototype.updateAvailableDevicesList = function (event)
  */
 Node.User.prototype.getUiDeviceList = function (ses)
 {
-  var uiDeviceList = [];
-  for (var i = 0; i < this.devices.length; i++) {
-    var device = this.devices[i];
-    //
+  let uiDeviceList = [];
+  for (let device of this.devices) {
     // If the device is valid only for a specific session and the session is not the right one, skip the device
     // If the device is not valid for a specific session add the device only if the session is a "true" (not readonly) IDE session
     if (device.deviceSID && ses.id !== device.deviceSID)
@@ -1440,10 +1342,7 @@ Node.User.prototype.getUiDeviceList = function (ses)
  */
 Node.User.prototype.getDeviceByUuid = function (uuid)
 {
-  for (var i = 0; i < this.devices.length; i++) {
-    if (this.devices[i].deviceUuid === uuid)
-      return this.devices[i];
-  }
+  return this.devices.find(device => device.deviceUuid === uuid);
 };
 
 
@@ -1454,10 +1353,7 @@ Node.User.prototype.getDeviceByUuid = function (uuid)
  */
 Node.User.prototype.getDeviceByName = function (deviceName)
 {
-  for (var i = 0; i < this.devices.length; i++) {
-    if (this.devices[i].deviceName === deviceName)
-      return this.devices[i];
-  }
+  return this.devices.find(device => device.deviceName === deviceName);
 };
 
 
@@ -1496,7 +1392,7 @@ Node.User.prototype.addCloudConnector = function (socket, data)
     // Create a new cloudConnector instance
     connector = {
       socket,
-      callbacks: []
+      pendingCallers: []
     };
     //
     // Add the cloudConnector to the owner's list
@@ -1524,10 +1420,10 @@ Node.User.prototype.removeCloudConnector = function (socket)
   if (socket.old)
     return;
   //
-  for (let i = 0; i < this.cloudConnectors.length; i++) {
-    if (this.cloudConnectors[i].socket === socket) {
-      let cname = this.cloudConnectors[i].name;
-      this.cloudConnectors.splice(i, 1);
+  for (let cc of this.cloudConnectors) {
+    if (cc.socket === socket) {
+      let cname = cc.name;
+      this.cloudConnectors.splice(this.cloudConnectors.indexOf(cc), 1);
       //
       clearInterval(socket.watchDog);
       //
@@ -1537,8 +1433,8 @@ Node.User.prototype.removeCloudConnector = function (socket)
       let sessionList = this.server.getSessionListByUser(this.userName);
       let msg = {type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: {type: "disconnect", data: {name: cname}}};
       //
-      for (let j = 0; j < sessionList.length; j++)
-        sessionList[j].sendToChild(msg);
+      for (let sess of sessionList)
+        sess.sendToChild(msg);
       //
       if (this.userName === "manager")
         Object.values(this.server.appSessions).forEach(s => s.sendToChild(msg));
@@ -1555,11 +1451,18 @@ Node.User.prototype.removeCloudConnector = function (socket)
 Node.User.prototype.updateAvailableCloudConnectorsList = function (event)
 {
   // Search for all the sessions involving the user and talk to them
-  var sessionList = this.server.getSessionListByUser(this.userName);
-  var msg = {type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: {type: "connectorList", event: event, data: this.getUiCloudConnectorsList()}};
+  let sessionList = this.server.getSessionListByUser(this.userName);
+  let msg = {
+    type: Node.User.msgTypeMap.cloudConnectorMsg,
+    cnt: {
+      type: "connectorList",
+      event,
+      data: this.getUiCloudConnectorsList()
+    }
+  };
   //
-  for (var i = 0; i < sessionList.length; i++)
-    sessionList[i].sendToChild(msg);
+  for (let sess of sessionList)
+    sess.sendToChild(msg);
 };
 
 
@@ -1569,10 +1472,15 @@ Node.User.prototype.updateAvailableCloudConnectorsList = function (event)
  */
 Node.User.prototype.getUiCloudConnectorsList = function ()
 {
-  var list = [];
-  for (var i = 0; i < this.cloudConnectors.length; i++)
-    list.push({name: this.cloudConnectors[i].name, dmlist: this.cloudConnectors[i].dmlist});
-  return list;
+  return this.cloudConnectors.map(cc => {
+    return {
+      name: cc.name,
+      version: cc.version,
+      nodeVersion: cc.nodeVersion,
+      hostname: cc.hostname,
+      dmlist: cc.dmlist
+    };
+  });
 };
 
 
@@ -1583,8 +1491,7 @@ Node.User.prototype.getUiCloudConnectorsList = function ()
  */
 Node.User.prototype.getCloudConnector = function (msg)
 {
-  for (let i = 0; i < this.cloudConnectors.length; i++) {
-    let cc = this.cloudConnectors[i];
+  for (let cc of this.cloudConnectors) {
     if (cc.name === msg.conn) {
       let list = [];
       let key = msg.key;
@@ -1632,7 +1539,7 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       });
       break;
 
-    case "remoteCmd":
+    case "remoteCmd": {
       if (msg.data.cmd === "listCC") {
         let m = {};
         m.type = Node.User.msgTypeMap.cloudConnectorMsg;
@@ -1656,10 +1563,10 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
         return sender.sendToChild(m);
       }
       //
-      let conn = this.getCloudConnector(msg);
+      let cc = this.getCloudConnector(msg);
       //
-      // Connector not found -> invoke callback with error
-      if (!conn) {
+      // Connector not found -> reply to caller with error
+      if (!cc) {
         if (msg.data.cbid) {
           let m = {};
           m.type = Node.User.msgTypeMap.cloudConnectorMsg;
@@ -1686,7 +1593,7 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       //
       // New command for remote configuration cause old cloud connectors to restart
       // It's better to protect
-      if (msg.data.app && !conn.nodeVersion) {
+      if (msg.data.app && !cc.nodeVersion) {
         if (msg.data.cbid) {
           let m = {};
           m.type = Node.User.msgTypeMap.cloudConnectorMsg;
@@ -1714,18 +1621,18 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
       }
       //
       // Send message to connector
-      conn.socket.emit("cloudServerMsg", msg.data);
+      cc.socket.emit("cloudServerMsg", msg.data);
       //
-      // Store callback function for invoke it when response comes
+      // Store caller for respond it when response comes
       if (msg.data.cbid)
-        conn.callbacks[msg.data.cbid] = sender;
+        cc.pendingCallers[msg.data.cbid] = sender;
       break;
+    }
 
     case "response":
-      for (let i = 0; i < this.cloudConnectors.length; i++) {
-        let cc = this.cloudConnectors[i];
+      for (let cc of this.cloudConnectors) {
         if (cc.socket === sender) {
-          let recipient = cc.callbacks[msg.cbid];
+          let recipient = cc.pendingCallers[msg.cbid];
           if (!recipient)
             return false;
           //
@@ -1735,8 +1642,11 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
           if (msg.data.result?.body instanceof Buffer)
             msg.data.result.body = {_t: "buffer", data: Node.Utils.bufferToBase64(msg.data.result.body)};
           //
-          recipient.sendToChild({type: Node.User.msgTypeMap.cloudConnectorMsg, cnt: msg});
-          delete cc.callbacks[msg.cbid];
+          recipient.sendToChild({
+            type: Node.User.msgTypeMap.cloudConnectorMsg,
+            cnt: msg
+          });
+          delete cc.pendingCallers[msg.cbid];
           return true;
         }
       }
@@ -1748,24 +1658,21 @@ Node.User.prototype.handleCloudConnectorMessage = function (msg, sender)
 /**
  * Process the commands related to a project and call the execution of those related to the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.processCommand = function (params, callback)
+Node.User.prototype.processCommand = async function (params)
 {
-  var pthis = this;
-  //
   // If there is no project nor DB token, handle "basic" user commands
   // (http://servername/username/command)
   if (params.tokens.length === 1)
-    return this.execCommand(params, callback);
+    return await this.execCommand(params);
   //
   // Project or DB or APP is there... handle project/db/app commands
   // (http://servername/username/projectname/command)
   // (http://servername/username/db/dbname/command)
   // (http://servername/username/app/appname/command)
   // (http://servername/manager/appname/command)    (if user is manager, "/app/" is not needed)
-  var isDB = false;
-  var isAPP = false;
+  let isDB = false;
+  let isAPP = false;
   if (params.tokens[0] === "db") {
     isDB = true;
     //
@@ -1782,151 +1689,149 @@ Node.User.prototype.processCommand = function (params, callback)
     isAPP = true;
   //
   // Databases' name is not filtered by console -> trust callee
-  var objName = (isDB ? params.tokens[0] : Node.Utils.clearName(params.tokens[0]));
-  var command = params.tokens[1];
+  let objName = (isDB ? params.tokens[0] : Node.Utils.clearName(params.tokens[0]));
+  let command = params.tokens[1];
   //
   // Remove objName from the list
   params.tokens.splice(0, 1);
   //
   // If the authorization key is enabled and the given one does not match -> error
   // (do it only for "CREATE", "RESTORE" and "DELETE" commands 'cause other commands will handle it where it's needed)
-  if (this.auth && params.req.query.autk !== this.autk && ["create", "restore", "delete"].indexOf(command) !== -1) {
+  if (this.auth && params.req.query.autk !== this.autk && ["create", "restore", "delete"].includes(command)) {
     this.logger.log("WARN", "Unauthorized", "User.processCommand", {url: params.req.originalUrl});
-    return callback({err: "Unauthorized", code: 401});
+    throw {err: "Unauthorized", code: 401};
   }
   //
   // MANAGER user can't CREATE, DELETE or RESTORE projects... Only "true" users can do that
-  if (this.userName === "manager" && ["create", "restore", "delete"].indexOf(command) !== -1 && !isDB && !isAPP) {
+  if (this.userName === "manager" && ["create", "restore", "delete"].includes(command) && !isDB && !isAPP) {
     this.logger.log("WARN", "Command can't be executed on the MANAGER user", "User.processCommand", {url: params.req.originalUrl});
-    return callback("Command can't be executed on the MANAGER user");
+    throw new Error("Command can't be executed on the MANAGER user");
   }
   //
-  var project, database, app;
   switch (command) {
     case "create":
       if (isDB)
-        this.createDatabase(objName, callback);
+        return await this.createDatabase(objName);
       else if (isAPP)
-        callback("Not supported");
+        throw new Error("Not supported");
       else
-        this.createProject(objName, callback);
-      break;
+        return await this.createProject(objName);
 
     case "restore":
       if (isDB) {
-        database = pthis.getDatabase(objName);
+        let isNew = false;
+        let database = this.getDatabase(objName);
         if (!database) {
           // If the database does not exist, create a new one
-          this.createDatabase(objName, function (err) {
-            if (err)
-              return callback(err);
-            //
-            database = pthis.getDatabase(objName);
-            database.processCommand(params, function (err) {
-              // If error -> delete database
-              callback(err);
-              if (err)
-                pthis.deleteDatabase(objName, function () {
-                });
-            });
-          });
+          await this.createDatabase(objName);
+          database = this.getDatabase(objName);
+          isNew = true;
         }
-        else // The database exists -> restore (i.e. overwrite) it
-          database.processCommand(params, callback);
+        //
+        try {
+          await database.processCommand(params);
+        }
+        catch (err) {
+          // If error -> delete database
+          if (isNew)
+            await this.deleteDatabase(objName).catch(() => {});
+          throw err;
+        }
       }
       else if (isAPP) {
-        app = this.getApp(objName);
+        let isNew;
+        let app = this.getApp(objName);
         if (!app) {
           // If the app does not exist, create a new one
           app = this.createApp(objName);
-          app.processCommand(params, function (err) {
-            // If error -> delete app
-            callback(err);
-            if (err)
-              pthis.deleteApp(objName, function () {
-              });
-          });
+          isNew = true;
         }
-        else // The app exists -> restore (i.e. overwrite) it
-          app.processCommand(params, callback);
+        //
+        try {
+          await app.processCommand(params);
+        }
+        catch (err) {
+          if (isNew)
+            this.deleteApp(objName);
+          throw err;
+        }
       }
       else {
-        this.createProject(objName, function (err) {
-          if (err)
-            return callback(err);
-          //
-          project = pthis.getProject(objName);
-          project.processCommand(params, function (err) {
-            // If error -> delete project
-            callback(err);
-            if (err)
-              pthis.deleteProject(objName, function () {
-              });
-          });
-        });
+        await this.createProject(objName);
+        let project = this.getProject(objName);
+        try {
+          await project.processCommand(params);
+        }
+        catch (err) {
+          // If error -> delete project
+          await this.deleteProject(objName).catch(() => {});
+          throw err;
+        }
       }
       break;
 
     case "delete":
       if (isDB)
-        this.deleteDatabase(objName, callback);
+        return await this.deleteDatabase(objName);
       else if (isAPP)
-        callback("Not supported");
+        throw new Error("Not supported");
       else
-        this.deleteProject(objName, callback);
-      break;
+        return await this.deleteProject(objName);
 
     case "install":
       if (isAPP) {
         // If the app does not exists, create one
-        var appCreated;
-        app = this.getApp(objName);
+        let isNew;
+        let app = this.getApp(objName);
         if (!app) {
           app = this.createApp(objName);
-          appCreated = true;  // Remember that I've created a new app
+          isNew = true;  // Remember that I've created a new app
         }
-        app.processCommand(params, function (err) {
-          if (err && appCreated)
-            pthis.deleteApp(app);    // There is a problem and I've created the app  -> delete it
-          callback(err);
-        });
+        //
+        try {
+          await app.processCommand(params);
+        }
+        catch (err) {
+          if (isNew)
+            this.deleteApp(app);    // There is a problem and I've created the app  -> delete it
+          throw err;
+        }
       }
       else
-        callback("Not supported");
+        throw new Error("Not supported");
       break;
 
     default:
       if (isDB) {
-        database = this.getDatabase(objName);
+        let database = this.getDatabase(objName);
         if (!database) {
           this.log("WARN", "Database not found", "User.processCommand",
                   {cmd: command, database: objName, url: params.req.originalUrl});
-          return callback({code: 404, err: "Database not found"});
+          throw {err: "Database not found", code: 404};
         }
         //
-        database.processCommand(params, callback);
+        return await database.processCommand(params);
       }
       else if (isAPP) {
-        app = this.getApp(objName);
+        let app = this.getApp(objName);
         if (!app) {
           this.log("WARN", "App not found", "User.processCommand",
                   {cmd: command, app: objName, url: params.req.originalUrl});
-          return callback({code: 404, err: "App not found"});
+          throw {err: "App not found", code: 404};
         }
         //
-        app.processCommand(params, callback);
+        return await app.processCommand(params);
       }
       else {
-        project = this.getProject(objName);
+        let project = this.getProject(objName);
         if (!project) {
           this.log("WARN", "Project not found", "User.processCommand",
                   {cmd: command, project: objName, url: params.req.originalUrl});
-          return callback({code: 404, err: "Project not found"});
+          throw {err: "Project not found", code: 404};
         }
         //
-        project.processCommand(params, callback);
+        return await project.processCommand(params);
       }
-      break;
   }
 };
 
@@ -1934,7 +1839,7 @@ Node.User.prototype.processCommand = function (params, callback)
 /*
  * Get IDF data
  */
-Node.User.prototype.getData = function (params, callback)
+Node.User.prototype.getData = function (params)
 {
   let version = this.parent.getIndeVersion(); // ad es 25.5.9620
   version += " r1"; // versione EXE
@@ -1946,18 +1851,21 @@ Node.User.prototype.getData = function (params, callback)
   let data = Object.assign({
     name: this.name,
     surname: this.surname,
-    version: version
+    version
   }, this.idfdata);
   delete data.password;
-  callback({msg: JSON.stringify(data)});
+  return {msg: JSON.stringify(data)};
 };
 
 
 /*
  * Set IDF data and save user
  */
-Node.User.prototype.setData = function (params, callback)
+Node.User.prototype.setData = async function (params)
 {
+  let oldIdfdata = this.idfdata;
+  let oldName = this.name;
+  let oldSurname = this.surname;
   try {
     let data = JSON.parse(params.req.query.data);
     this.name = data.name;
@@ -1966,17 +1874,24 @@ Node.User.prototype.setData = function (params, callback)
     delete data.surname;
     //
     // Get the new password or the decrypted password (we need it to call this.config.licSrvUpdateUser )
-    data.password = data.password || this.decryptUserPassword(this.idfdata.password);  
+    data.password = data.password || this.decryptUserPassword(this.idfdata.password);
+    //
     this.idfdata = data;
-    this.config.licSrvUpdateUser(this).then(ris => {
-      // Restore the encrypted password after the call
-      this.idfdata.password = this.encryptUserPassword(this.idfdata.password);
-      this.config.saveConfig();
-      callback({msg: ris});
-    });
+    //
+    let ris = await this.config.licSrvUpdateUser(this);
+    //
+    // Restore the encrypted password after the call
+    this.idfdata.password = this.encryptUserPassword(this.idfdata.password);
+    this.config.saveConfig();
+    return {msg: ris};
   }
   catch (ex) {
-    callback({msg: `ERROR ${ex}`});
+    // Restore previous state so that a later saveConfig() won't save partial/plaintext data
+    this.idfdata = oldIdfdata;
+    this.name = oldName;
+    this.surname = oldSurname;
+    //
+    return {msg: `ERROR ${ex}`};
   }
 };
 
@@ -1984,150 +1899,178 @@ Node.User.prototype.setData = function (params, callback)
 /**
  * Execute command for the user
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.execCommand = function (params, callback)
+Node.User.prototype.execCommand = async function (params)
 {
-  var command = params.tokens[0];
+  let command = params.tokens[0];
   //
   // MANAGER user handles only APPS, DATABASES and SESSIONS commands
-  if (this.userName === "manager" && ["apps", "databases", "appsessions"].indexOf(command) === -1) {
+  if (this.userName === "manager" && !["apps", "databases", "appsessions"].includes(command)) {
     this.log("WARN", "Invalid command for MANAGER", "User.execCommand", {url: params.req.originalUrl});
-    return callback("Invalid command");
+    throw new Error("Invalid command");
   }
   //
   // Handle commands
+  if (command === "picture")
+    return await this.downloadProfilePic(params);
+  //
+  // If the authorization key is enabled and the given one does not match -> error
+  if (this.config.auth && params.req.query.autk !== this.config.autk) {
+    this.log("WARN", "Unauthorized", "User.execCommand", {url: params.req.originalUrl});
+    throw {err: "Unauthorized", code: 401};
+  }
+  //
+  // Valid AUTK (or AUTK not enabled)
   switch (command) {
-    case "picture":
-      this.downloadProfilePic(params, callback);
-      break;
+    case "status":
+      return await this.sendStatus(params);
+
+    case "apps":
+      return await this.sendAppsList(params);
+
+    case "databases":
+      return await this.sendDatabasesList(params);
+
+    case "projects":
+      return this.sendProjectsList(params);
+
+    case "projects2":
+      return await this.sendProjectsListJson(params);
+
+    case "importPrj":
+      return await this.importPrj(params);
+
+    case "exportPrj":
+      return await this.exportPrj(params);
+
+    case "appsessions":
+      return await this.sendAppSessions(params);
+
+    case "profile":
+      return await this.profileUser(params);
+
+    case "backup":
+      return await this.backup(params);
+
+    case "restore":
+      return await this.restore(params);
+
+    case "getdata":
+      return this.getData(params);
+
+    case "setdata":
+      return await this.setData(params);
+
+    case "twListPrjs":
+      return await this.listTeamWorksProjects(params);
+
+    case "twForkPrj":
+      return await this.forkProjectFromTeamWorks(params);
 
     default:
-      // If the authorization key is enabled and the given one does not match -> error
-      if (this.config.auth && params.req.query.autk !== this.config.autk) {
-        this.log("WARN", "Unauthorized", "User.execCommand", {url: params.req.originalUrl});
-        return callback({err: "Unauthorized", code: 401});
-      }
-      //
-      // Valid AUTK (or AUTK not enabled)
-      switch (command) {
-        case "status":
-          this.sendStatus(params, callback);
-          break;
-        case "apps":
-          this.sendAppsList(params, callback);
-          break;
-        case "databases":
-          this.sendDatabasesList(params, callback);
-          break;
-        case "projects":
-          this.sendProjectsList(params, callback);
-          break;
-        case "projects2":
-          this.sendProjectsListJson(params, callback);
-          break;
-        case "importPrj":
-          this.importPrj(params, callback);
-          break;
-        case "exportPrj":
-          this.exportPrj(params, callback);
-          break;
-        case "appsessions":
-          this.sendAppSessions(params, callback);
-          break;
-        case "profile":
-          this.profileUser(params, callback);
-          break;
-        case "backup":
-          this.backup(params, callback);
-          break;
-        case "restore":
-          this.restore(params, callback);
-          break;
-        case "getdata":
-          this.getData(params, callback);
-          break;
-        case "setdata":
-          this.setData(params, callback);
-          break;
-        case "twListPrjs":
-          this.listTeamWorksProjects(params, callback);
-          break;
-        case "twForkPrj":
-          this.forkProjectFromTeamWorks(params, callback);
-          break;
-        default:
-          this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
-          callback("Invalid Command");
-          break;
-      }
+      this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
+      throw new Error("Invalid Command");
   }
 };
 
 // Funzioni di cifratura reversibile per la password utente
-const PASSWORD_KEY = Buffer.from('8NnZG70yHNRCfJzGqK7i0zyHCN7zMV1o', 'utf8'); // 32 bytes (256 bit)
-const PASSWORD_IV = Buffer.from('TMSsPvq1a3bFQRH6', 'utf8'); // 16 bytes (128 bit)
+const PASSWORD_KEY = Buffer.from("8NnZG70yHNRCfJzGqK7i0zyHCN7zMV1o", "utf8"); // 32 bytes (256 bit)
+const PASSWORD_IV = Buffer.from("TMSsPvq1a3bFQRH6", "utf8"); // 16 bytes (128 bit)
 
-Node.User.prototype.encryptUserPassword = function(password) {
-  let cipher = Node.crypto.createCipheriv('aes-256-cbc', PASSWORD_KEY, PASSWORD_IV);
-  let encrypted = cipher.update(password, 'utf8', 'base64');
-  encrypted += cipher.final('base64');
+Node.User.prototype.encryptUserPassword = function (password)
+{
+  let cipher = Node.crypto.createCipheriv("aes-256-cbc", PASSWORD_KEY, PASSWORD_IV);
+  let encrypted = cipher.update(password, "utf8", "base64");
+  encrypted += cipher.final("base64");
   return encrypted;
 };
 
-Node.User.prototype.decryptUserPassword = function(encrypted) {
-  let decipher = Node.crypto.createDecipheriv('aes-256-cbc', PASSWORD_KEY, PASSWORD_IV);
-  let decrypted = decipher.update(encrypted, 'base64', 'utf8');
-  decrypted += decipher.final('utf8');
+Node.User.prototype.decryptUserPassword = function (encrypted)
+{
+  let decipher = Node.crypto.createDecipheriv("aes-256-cbc", PASSWORD_KEY, PASSWORD_IV);
+  let decrypted = decipher.update(encrypted, "base64", "utf8");
+  decrypted += decipher.final("utf8");
   return decrypted;
+};
+
+
+/**
+ * Get the database name based on the user
+ * @param {string} name - Optional database name
+ * @return {string} database name
+ */
+Node.User.prototype.getDbName = function (name)
+{
+  return this.userName === "manager" ? name : `${this.userName}-${name}`;
+};
+
+
+/**
+ * Returns the tablespace name for the user
+ * @returns {string} The tablespace name
+ */
+Node.User.prototype.getDbTableSpace = function ()
+{
+  return this.userName === "manager" ? "indets" : this.userName;
+};
+
+
+/**
+ * Returns the database owner name for the user
+ * @returns {string} The database owner name
+ */
+Node.User.prototype.getDbOwner = function ()
+{
+  return this.userName === "manager" ? "inde" : this.userName;
+};
+
+
+/**
+ * Returns the database role name for the user
+ * @returns {string} The database role name
+ */
+Node.User.prototype.getDbRole = function ()
+{
+  return this.userName === "manager" ? "inde" : this.userName;
 };
 
 
 /**
  * List TeamWorks projects available for this organization
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.listTeamWorksProjects = function (params, callback)
+Node.User.prototype.listTeamWorksProjects = async function (params)
 {
-  // Check if TeamWorks module is active
-  if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW)) {
-    this.log("WARN", "TeamWorks module is not active", "User.listTeamWorksProjects");
-    return callback("TeamWorks module is not active");
-  }
-  //
-  // Check if user has organization info
-  if (!this.idfdata?.groupGuid || !this.idfdata?.group){
-    this.log("WARN", "User has no organization info", "User.listTeamWorksProjects");
-    return callback("User has no organization info");
-  }
-  //
   try {
-    // Import TwGCloudDriver
-    let TwGCloudDriver = require("../TW/TwGCloudDriver");
+    // Check if TeamWorks module is active
+    if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW))
+      throw new Error("TeamWorks module is not active");
     //
-    // Create a minimal driver instance for listing projects
-    let driver = new TwGCloudDriver({
-      child: {
-        config: this.config,
-        project: {
-          user: this
+    try {
+      // Import TwGCloudDriver
+      let TwGCloudDriver = require("../TW/TwGCloudDriver");
+      //
+      // Create a minimal driver instance for listing projects
+      let driver = new TwGCloudDriver({
+        child: {
+          config: this.config,
+          project: {
+            user: this
+          }
         }
-      }
-    });
-    //
-    // List projects (listProjects is async)
-    driver.listProjects().then(
-      projects => callback({msg: JSON.stringify(projects || [])}),
-      err => {
-        this.log("ERROR", "Error listing TeamWorks projects: " + err.message, "User.listTeamWorksProjects");
-        callback("Error listing TeamWorks projects: " + err.message);
-      }
-    );
+      });
+      //
+      // List projects (listProjects is async)
+      let projects = await driver.listProjects();
+      return {msg: JSON.stringify(projects || [])};
+    }
+    catch (ex) {
+      throw new Error(`Error listing TeamWorks projects: ${ex.message}`);
+    }
   }
-  catch (ex) {
-    this.log("ERROR", "Error creating TeamWorks driver: " + ex.message, "User.listTeamWorksProjects");
-    callback("ERROR", "Error creating TeamWorks driver: " + ex.message);
+  catch (err) {
+    this.log("ERROR", err.message || err, "User.listTeamWorksProjects");
+    throw err;
   }
 };
 
@@ -2135,90 +2078,87 @@ Node.User.prototype.listTeamWorksProjects = function (params, callback)
 /**
  * Fork project from TeamWorks
  * @param {object} params
- * @param {function} callback (err or {err, msg, code})
  */
-Node.User.prototype.forkProjectFromTeamWorks = function (params, callback)
+Node.User.prototype.forkProjectFromTeamWorks = async function (params)
 {
-  // Check if TeamWorks module is active
-  if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW)) {
-    this.log("WARN", "TeamWorks module is not active", "User.forkProjectFromTeamWorks");
-    return callback("TeamWorks module is not active");
-  }
-  //
-  let projectId = params.req.query.projectId;
-  let projectName = params.req.query.projectName;
-  //
-  if (!projectId || !projectName){
-    this.log("WARN", "Missing projectId or projectName", "User.forkProjectFromTeamWorks");
-    return callback("Project to fork not found");
-  }
-  //
-  // Check if user has organization info
-  if (!this.idfdata?.groupGuid || !this.idfdata?.group) {
-    this.log("WARN", "User has no organization info", "User.forkProjectFromTeamWorks");
-    return callback("User has no organization");
-  }
-  //
-  // Generate fork name: projectName-fork, projectName-fork1, projectName-fork2, etc.
-  let baseName = projectName + "-fork";
-  let finalProjectName = baseName;
-  let counter = 0;
-
-  // Check for existing forks and find available name
-  while (this.getProject(finalProjectName)) {
-    counter++;
-    finalProjectName = baseName + counter;
-  }
-  //
-  // Local path for the project (use the final fork name)
-  let localPath = this.config.directory + "/" + this.userName + "/" + finalProjectName;
-  //
+  let warning = false;
   try {
-    // Import TwGCloudDriver
-    let TwGCloudDriver = require("../TW/TwGCloudDriver");
+    // Check if TeamWorks module is active
+    if (!this.config.isProductActive(Node.Utils.IdfModules.MOD_TW)) {
+      warning = true;
+      throw new Error("TeamWorks module is not active");
+    }
     //
-    // Create a minimal driver instance for downloading projects
-    let driver = new TwGCloudDriver({
-      child: {
-        config: this.config,
-        project: {
-          user: this
+    let projectId = params.req.query.projectId;
+    let projectName = params.req.query.projectName;
+    //
+    if (!projectId || !projectName) {
+      warning = true;
+      throw "Project to fork not found";
+    }
+    //
+    // Generate fork name: projectName-fork, projectName-fork1, projectName-fork2, etc.
+    let baseName = `${projectName}-fork`;
+    let finalProjectName = baseName;
+    let counter = 0;
+    //
+    // Check for existing forks and find available name
+    while (this.getProject(finalProjectName)) {
+      counter++;
+      finalProjectName = baseName + counter;
+    }
+    //
+    // Local path for the project (use the final fork name)
+    let localPath = Node.path.join(this.config.directory, this.userName, finalProjectName);
+    //
+    try {
+      // Import TwGCloudDriver
+      let TwGCloudDriver = require("../TW/TwGCloudDriver");
+      //
+      // Create a minimal driver instance for downloading projects
+      let driver = new TwGCloudDriver({
+        child: {
+          config: this.config,
+          project: {
+            user: this
+          }
         }
+      });
+      //
+      // Download project from TeamWorks (downloadProject is async)
+      try {
+        await driver.downloadProject(projectName, localPath);
       }
-    });
-    //
-    // Download project from TeamWorks (downloadProject is async)
-    driver.downloadProject(projectName, localPath)
-      .then(
-        () =>
-        {
-          // Create the project with the fork name
-          this.createProject(finalProjectName, err =>
-          {
-            if (err) {
-              this.log("ERROR", "Error creating fork: " + err, "User.forkProjectFromTeamWorks");
-              return callback("Error creating fork");
-            }
-            //
-            // Get the created project
-            let newProject = this.getProject(finalProjectName);
-            //
-            // Set the project ID and TeamWorks properties
-            newProject.updateInfo({twFork: true, lastSave: new Date()});
-            //
-            this.log("INFO", "Project forked from TeamWorks successfully", "User.forkProjectFromTeamWorks",
-            {projectId: projectId, projectName: projectName, forkName: finalProjectName});
-            callback({msg: "OK"});
-          });
-        },
-        err => {
-          this.log("ERROR", "Error downloading project from TeamWorks: " + err, "User.forkProjectFromTeamWorks");
-          callback("Error downloading project");
-        });
+      catch (err) {
+        throw new Error(`Error creating fork: ${err}`);
+      }
+      //
+      // Create the project with the fork name
+      try {
+        await this.createProject(finalProjectName);
+      }
+      catch (err) {
+        throw new Error(`Error creating fork: ${err}`);
+      }
+      //
+      // Get the created project
+      let newProject = this.getProject(finalProjectName);
+      //
+      // Set the project ID and TeamWorks properties
+      newProject.updateInfo({twFork: true, lastSave: new Date()});
+      //
+      this.log("INFO", "Project forked from TeamWorks successfully", "User.forkProjectFromTeamWorks",
+              {projectId, projectName, forkName: finalProjectName});
+      //
+      return {msg: "OK"};
+    }
+    catch (err) {
+      throw new Error(`Error creating TeamWorks driver: ${err.message}`);
+    }
   }
-  catch (ex) {
-    this.log("ERROR", "Error creating TeamWorks driver: " + ex.message, "User.forkProjectFromTeamWorks");
-    callback("Error accessing TeamWorks");
+  catch (err) {
+    this.log(warning ? "WARN" : "ERROR", err.message || err, "User.forkProjectFromTeamWorks");
+    throw err;
   }
 };
 

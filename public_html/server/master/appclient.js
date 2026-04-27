@@ -3,8 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
-
 var Node = Node || {};
 
 // Import modules
@@ -36,22 +34,22 @@ Node.AppClient.msgTypeMap = {
 // Define usefull properties for this object
 Object.defineProperties(Node.AppClient.prototype, {
   session: {
-    get: function () {
+    get() {
       return this.parent;
     }
   },
   app: {
-    get: function () {
+    get() {
       return this.session.app;
     }
   },
   config: {
-    get: function () {
+    get() {
       return this.session.config;
     }
   },
   logger: {
-    get: function () {
+    get() {
       return this.session.logger;
     }
   }
@@ -89,7 +87,7 @@ Node.AppClient.prototype.init = function (req, res)
   // If requested, send SID and CID via query string
   let qrys = "";
   if (req.query.addsid !== undefined) {
-    qrys = "?" + Node.querystring.stringify({sid: this.session.id, cid: this.id});
+    qrys = `?${Node.querystring.stringify({sid: this.session.id, cid: this.id})}`;
     //
     // Remember that a new client has been started "unsecured"
     this.startUnsecured = true;
@@ -99,7 +97,7 @@ Node.AppClient.prototype.init = function (req, res)
   let qryKeys = JSON.parse(JSON.stringify(req.query));
   delete qryKeys.addsid;
   if (Object.keys(qryKeys).length)
-    qrys += (qrys ? "&" : "?") + Node.querystring.stringify(qryKeys);
+    qrys += `${qrys ? "&" : "?"}${Node.querystring.stringify(qryKeys)}`;
   //
   // If the app has been started in OFFLINE mode and the app CAN'T be started in offline mode
   let mode = req.query.mode;
@@ -110,7 +108,7 @@ Node.AppClient.prototype.init = function (req, res)
   //
   // Redirect to the main app page
   let appPage = this.app.params?.startPage || this.config.getAppMainFile(mode);
-  res.redirect("/" + this.app.name + "/" + appPage + qrys);
+  res.redirect(`/${this.app.name}/${appPage}${qrys}`);
   //
   // Create a timer. If an openConnection does not arrive within 10 seconds,
   // the app client is deleted
@@ -148,7 +146,7 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
     // If the SID is invalid
     if (this.session.invalidSID(socket, this)) {
       let exitUrl = this.config.saveProperties().exitUrl;
-      this.log("WARN", "Invalid SID -> redirect to " + exitUrl, "AppClient.openConnection");
+      this.log("WARN", `Invalid SID -> redirect to ${exitUrl}`, "AppClient.openConnection");
       socket.emit(Node.AppClient.msgTypeMap.redirect, exitUrl);
       return;
     }
@@ -209,13 +207,12 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
   // Listen for disconnect
   socket.on("disconnect", () => {
     // Log disconnection
-    this.log("DEBUG", "Received disconnect from " +
-            (this.session.masterAppClient === this ? "MASTER" : "SLAVE") + " client socket", "AppClient.openConnection");
+    this.log("DEBUG", `Received disconnect from ${this.session.masterAppClient === this ? "MASTER" : "SLAVE"} client socket`, "AppClient.openConnection");
     //
     // Socket is not connected anymore
     delete this.socket;
     //
-    var testAuto = this.app.getTestById(this.session.testAutoId);
+    let testAuto = this.app.getTestById(this.session.testAutoId);
     testAuto?.onDisconnectClient();
     //
     // If the disconnected client was the session master, the session looses the master
@@ -233,7 +230,7 @@ Node.AppClient.prototype.openConnection = function (socket, lastMsg)
     // So that if the client has been disconnected and comes back I'm here waiting for him
     let sessTimeout = 15000; // 15 sec for REFRESH handling
     this.killClient = setTimeout(() => {
-      this.log("DEBUG", "Client did not return within " + (sessTimeout / 1000) + " sec -> deleted", "AppClient.openConnection");
+      this.log("DEBUG", `Client did not return within ${sessTimeout / 1000} sec -> deleted`, "AppClient.openConnection");
       this.session.deleteAppClient(this);
     }, sessTimeout);
   });
@@ -273,6 +270,11 @@ Node.AppClient.prototype.sendAppMessage = function (msg)
   //
   // Remember the messages that have been sent to client
   this.sentMsgs = this.sentMsgs || [];
+  //
+  // Cap the list to avoid unbounded growth if callbacks are never called
+  if (this.sentMsgs.length > 1000)
+    this.sentMsgs.splice(0, this.sentMsgs.length - 500);
+  //
   this.sentMsgs.push(msg);
   //
   this.socket.emit("appmsg", msg, () => {

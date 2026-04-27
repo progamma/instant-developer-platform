@@ -3,8 +3,6 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global module */
-
 var Node = Node || {};
 
 /**
@@ -43,8 +41,7 @@ Node.Device.prototype.init = function (data)
  */
 Node.Device.prototype.sendCommand = function (cnt)
 {
-  if (this.socket)
-    this.socket.emit(cnt.command, cnt.url);
+  this.socket?.emit(cnt.command, cnt.url);
 };
 
 

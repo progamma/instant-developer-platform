@@ -3,14 +3,13 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module */
-
 var Node = Node || {};
 
 // Import modules
 Node.zlib = require("zlib");
 Node.cookie = require("cookie");
 Node.fs = require("fs");
+Node.path = require("path");
 
 // Import Classes
 Node.AppClient = require("./appclient");
@@ -94,9 +93,9 @@ Node.AppSession.prototype.sendToChild = function (msg)
   this.worker.sendToChild(msg);
   //
   // Sniff messages from client
-  var testAuto = this.app.getTestById(this.testAutoId);
+  let  testAuto = this.app.getTestById(this.testAutoId);
   if (testAuto && msg.content) {
-    var child = testAuto.getChildBySID(this.id);
+    let  child = testAuto.getChildBySID(this.id);
     testAuto = child || testAuto;
     testAuto.sniff(msg.content, true);
   }
@@ -109,14 +108,20 @@ Node.AppSession.prototype.sendToChild = function (msg)
  * @param {socket} socket
  * @param {Object} msg
  */
-Node.AppSession.prototype.openSyncConnection = function (socket, msg)     // jshint ignore:line
+Node.AppSession.prototype.openSyncConnection = function (socket, msg)
 {
-  var pthis = this;
-  //
   this.syncSocket = socket;
-  socket.on("disconnect", function () {
-    pthis.sendToChild({type: "sync", sid: {sidsrv: pthis.id}, cnt: {id: "disconnect"}});
-    delete pthis.syncSocket;
+  socket.on("disconnect", () => {
+    this.sendToChild({
+      type: "sync",
+      sid: {
+        sidsrv: this.id
+      },
+      cnt: {
+        id: "disconnect"
+      }
+    });
+    delete this.syncSocket;
   });
 };
 
@@ -127,10 +132,10 @@ Node.AppSession.prototype.openSyncConnection = function (socket, msg)     // jsh
  */
 Node.AppSession.prototype.sendMessageToClientApp = function (msg)
 {
-  for (var i = 0; i < this.appClients.length; i++) {
-    var acli = this.appClients[i];
+  for (let i = 0; i < this.appClients.length; i++) {
+    let acli = this.appClients[i];
     //
-    var send;
+    let send;
     if (!msg.cidr)
       send = true;      // No CIDR -> send message to every app client
     else {
@@ -145,9 +150,9 @@ Node.AppSession.prototype.sendMessageToClientApp = function (msg)
   }
   //
   // Sniff messages to client
-  var testAuto = this.app.getTestById(this.testAutoId);
+  let testAuto = this.app.getTestById(this.testAutoId);
   if (testAuto && msg.content) {
-    var child = testAuto.getChildBySID(this.id);
+    let child = testAuto.getChildBySID(this.id);
     testAuto = child || testAuto;
     testAuto.sniff(msg.content, false);
   }
@@ -186,7 +191,7 @@ Node.AppSession.prototype.startRest = function (req, res)
 Node.AppSession.prototype.createAppClient = function (req, res)
 {
   // Create a new app client
-  var appClient = new Node.AppClient(this);
+  let appClient = new Node.AppClient(this);
   //
   // If the CID of the new client has been already computed, use it here (see Config::processRun)
   if (this.newCid) {
@@ -215,7 +220,7 @@ Node.AppSession.prototype.createAppClient = function (req, res)
 Node.AppSession.prototype.deleteAppClient = function (appClient, neverAck)
 {
   // Delete the app client from the array
-  var idx = this.appClients.indexOf(appClient);
+  let idx = this.appClients.indexOf(appClient);
   this.appClients.splice(idx, 1);
   //
   // If this session has no master client or the master client has been deleted -> ask the worker to delete the session
@@ -227,25 +232,25 @@ Node.AppSession.prototype.deleteAppClient = function (appClient, neverAck)
     // Disconnect all other clients (if any)
     this.log("DEBUG", "Terminate all remaining app clients for this session", "AppSession.deleteAppClient");
     //
-    for (var i = 0; i < this.appClients.length; i++)
+    for (let i = 0; i < this.appClients.length; i++)
       this.appClients[i].close();
     //
     // Ask the worker to terminate this session
     this.worker.deleteSession(this);
   }
   else
-    this.log("DEBUG", "Terminated SLAVE client " + idx + " from session", "AppSession.deleteAppClient");
+    this.log("DEBUG", `Terminated SLAVE client ${idx} from session`, "AppSession.deleteAppClient");
   //
   // If the client never acknowleged and there are uploaded files -> delete them
   // (app never responded and I don't want those files to sit on my HD forever)
   if (neverAck && this.request.files) {
-    this.request.files.forEach(function (f) {
-      var fp = this.config.appDirectory + "/apps/" + this.app.name + "/files/" + f.path;
-      Node.fs.rm(fp, {force: true}, function (err) {
+    this.request.files.forEach(f => {
+      let fp = Node.path.join(this.config.appDirectory, "apps", this.app.name, "files", f.path);
+      Node.fs.rm(fp, {force: true}, err => {
         if (err)
-          this.log("WARN", "Can't delete file " + fp + ": " + err, "AppSession.deleteAppClient");
-      }.bind(this));
-    }.bind(this));
+          this.log("WARN", `Can't delete file ${fp}: ${err}`, "AppSession.deleteAppClient");
+      });
+    });
   }
 };
 
@@ -276,7 +281,7 @@ Node.AppSession.prototype.terminate = function ()
   // This session has clients -> close them
   this.log("DEBUG", "Terminate all app clients", "AppSession.terminate");
   //
-  for (var i = 0; i < this.appClients.length; i++)
+  for (let i = 0; i < this.appClients.length; i++)
     this.appClients[i].close();
 };
 
@@ -291,31 +296,31 @@ Node.AppSession.prototype.protectSID = function (req, res)
 {
   // Add another HTTP-only cookie that will "protect" the SID/CID cookie
   this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
-  var cookieOpt = {path: "/", httpOnly: true};
+  let cookieOpt = {path: "/", httpOnly: true};
   //
   // If I'm working "securely"
-  var secure = (!this.config.local && this.config.protocol === "https");
+  let secure = (!this.config.local && this.config.protocol === "https");
   if (secure) {
     cookieOpt.secure = true;
     cookieOpt.sameSite = "none";  // Allow embedding the app in an IFRAME
   }
-  res.cookie(this.id + "_secureSID", this.secureSID, cookieOpt);
+  res.cookie(`${this.id}_secureSID`, this.secureSID, cookieOpt);
   //
   // Remove old _secureSID cookies
   // (for every cookie there have to be a valid IDE/APP session...
   // if such session is not there the corresponding cookie is old and useles)
-  var cookies = Node.cookie.parse(req.headers.cookie || "{}");
-  Object.keys(cookies).forEach(function (key) {
+  let cookies = Node.cookie.parse(req.headers.cookie || "{}");
+  Object.keys(cookies).forEach(key => {
     if (!key.endsWith("_secureSID"))
       return;
     //
-    var sid = key.substring(0, key.length - "_secureSID".length);
-    var session = (this.config.server.IDESessions[sid] || this.config.server.appSessions[sid]);
+    let sid = key.substring(0, key.length - "_secureSID".length);
+    let session = (this.config.server.IDESessions[sid] || this.config.server.appSessions[sid]);
     if (!session) {
-      this.log("DEBUG", "Remove OLD cookie " + key, "AppSession.protectSID");
+      this.log("DEBUG", `Remove OLD cookie ${key}`, "AppSession.protectSID");
       res.clearCookie(key);
     }
-  }.bind(this));
+  });
 };
 
 
@@ -332,10 +337,10 @@ Node.AppSession.prototype.invalidSID = function (socket, client)
     return false;
   }
   //
-  var secureSID = Node.cookie.parse(socket.request.headers.cookie || "{}")[this.id + "_secureSID"];
+  let secureSID = Node.cookie.parse(socket.request.headers.cookie || "{}")[`${this.id}_secureSID`];
   if (secureSID !== this.secureSID) {
     this.log("WARN", "Secure SID does not match", "AppSession.invalidSID",
-            {expectedSecureSID: this.secureSID, secureSID: secureSID});
+            {expectedSecureSID: this.secureSID, secureSID});
     return true;
   }
 };
@@ -346,8 +351,6 @@ Node.AppSession.prototype.invalidSID = function (socket, client)
  */
 Node.AppSession.prototype.scheduleRESTDeath = function ()
 {
-  var pthis = this;
-  //
   // If this session has a valid MASTER client it means that this is not a "pure" REST
   // but it a "true" session that received a "REST" command (like an image upload for instance)
   // In this case do nothing... session will die when the client disconnects (see appclient::init)
@@ -360,15 +363,15 @@ Node.AppSession.prototype.scheduleRESTDeath = function ()
     clearTimeout(this.killClient);
   //
   // Compute new timeout
-  var sessTimeout = this.sessionTimeout || 60000;
-  this.killClient = setTimeout(function () {
-    pthis.log("DEBUG", "REST session did not send a reply within " + (sessTimeout / 1000) + " sec -> deleted", "AppSession.scheduleRESTDeath");
+  let sessTimeout = this.sessionTimeout || 60000;
+  this.killClient = setTimeout(() => {
+    this.log("DEBUG", `REST session did not send a reply within ${sessTimeout / 1000} sec -> deleted`, "AppSession.scheduleRESTDeath");
     //
     // Timer expired
-    delete pthis.killClient;
+    delete this.killClient;
     //
     // Ask the worker to terminate this session
-    pthis.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: pthis.id});
+    this.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: this.id});
   }, sessTimeout);
 };
 
@@ -400,7 +403,7 @@ Node.AppSession.prototype.handleSessionParams = function (params)
  */
 Node.AppSession.prototype.handleCTokenOpMsg = function (msg)
 {
-  var ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
+  let ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
   if (msg.cnt.op === "add" && ctidx === -1)
     this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
   else if (msg.cnt.op === "del" && ctidx !== -1)
@@ -410,13 +413,75 @@ Node.AppSession.prototype.handleCTokenOpMsg = function (msg)
 
 /**
  * Handles a send response message
- * @param {object} msg
+ * Supports both batch and streaming responses
+ * @param {object} msg - {code, text, options}
  */
 Node.AppSession.prototype.handleSendResponseMsg = function (msg)
 {
   if (!this.restRes)
     return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)",
             "AppSession.handleSendResponseMsg", msg);
+  //
+  // STREAMING MODE - START
+  if (msg.options.stream === "start") {
+    try {
+      // Prepare headers
+      let headers = Object.assign({
+        "Content-Type": "text/plain; charset=utf-8",
+        "Transfer-Encoding": "chunked",
+        "Cache-Control": "no-cache",
+        "Connection": "keep-alive"
+      }, msg.options.headers || {});
+      //
+      // Start streaming
+      this.restRes.writeHead(msg.code, headers);
+      //
+      // Reset REST death timer - if streaming blocks, session will be cleaned after 60s
+      this.scheduleRESTDeath();
+    }
+    catch (ex) {
+      this.log("WARN", "Can't start streaming: " + ex, "AppSession.handleSendResponseMsg", msg);
+    }
+    return;
+  }
+  //
+  // STREAMING MODE - CHUNK
+  if (msg.options.stream === "chunk") {
+    try {
+      let chunk = msg.text;
+      //
+      // Handle buffer chunks
+      if (msg.options.type === "buffer")
+        chunk = Buffer.from(chunk, "base64");
+      else if (typeof chunk !== "string")
+        chunk = JSON.stringify(chunk);
+      //
+      this.restRes.write(chunk);
+      //
+      // Reset REST death timer on every chunk - keeps session alive while chunks arrive
+      this.scheduleRESTDeath();
+    }
+    catch (ex) {
+      this.log("WARN", "Can't send chunk: " + ex, "AppSession.handleSendResponseMsg", msg);
+    }
+    return;
+  }
+  //
+  // STREAMING MODE - END
+  if (msg.options.stream === "end") {
+    try {
+      this.restRes.end();
+    }
+    catch (ex) {
+      this.log("WARN", "Can't end stream: " + ex, "AppSession.handleSendResponseMsg", msg);
+    }
+    //
+    // Session termination will happen in child process (app.js) after sendResponse with stream:"end"
+    // REST death timer will be automatically canceled during termination
+    return;
+  }
+  //
+  // BATCH MODE (existing code)
   //
   this.log("DEBUG", "Send REST response", "AppSession.handleSendResponseMsg", msg);
   //
@@ -443,9 +508,9 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
   try {
     // Send headers
     if (msg.options.headers && typeof msg.options.headers === "object") {
-      Object.keys(msg.options.headers).forEach(function (header) {
+      Object.keys(msg.options.headers).forEach(header => {
         this.restRes.setHeader(header, msg.options.headers[header]);
-      }.bind(this));
+      });
     }
     //
     // Send code
@@ -460,7 +525,7 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
       this.restRes.end(typeof msg.text !== "string" ? JSON.stringify(msg.text) : msg.text);
   }
   catch (ex) {
-    this.log("WARN", "Can't send REST response: " + ex, "AppSession.handleSendResponseMsg", msg);
+    this.log("WARN", `Can't send REST response: ${ex}`, "AppSession.handleSendResponseMsg", msg);
   }
 };
 
@@ -471,11 +536,11 @@ Node.AppSession.prototype.handleSendResponseMsg = function (msg)
  * @param {socket} socket
  * @param {Object} msg
  */
-Node.AppSession.prototype.openDttConnection = function (socket, msg)     // jshint ignore:line
+Node.AppSession.prototype.openDttConnection = function (socket, msg)
 {
   this.dttSocket = socket;
   //
-  socket.on("disconnect", function () {
+  socket.on("disconnect", () => {
     this.log("DEBUG", "DTT socket disconnected", "AppSession.openDttConnection");
     //
     // Forget about the DTT socket
@@ -483,16 +548,16 @@ Node.AppSession.prototype.openDttConnection = function (socket, msg)     // jshi
     //
     // Disable DTT for all sessions
     this.app.handleChangedAppParamMsg({par: "enableDtt"}, true);
-  }.bind(this));
+  });
   //
   // Enable DTT for this session (and disable DTT for every other session)
   this.app.handleChangedAppParamMsg({par: "enableDtt", new : msg.sid}, true);
   //
   // If I already have cached one or more DTT messages it's the right time to send them (now that I've the socket)
   if (this.dttCachedMessages) {
-    this.dttCachedMessages.forEach(function (m) {
+    this.dttCachedMessages.forEach(m => {
       this.dttSocket.emit("dtt", m.content);
-    }.bind(this));
+    });
     //
     delete this.dttCachedMessages;
   }
@@ -522,11 +587,7 @@ Node.AppSession.prototype.sendDttMessage = function (msg)
  */
 Node.AppSession.prototype.getAppClientById = function (id)
 {
-  for (var i = 0; i < this.appClients.length; i++) {
-    var acli = this.appClients[i];
-    if (acli.id === id)
-      return acli;
-  }
+  return this.appClients.find(acli => acli.id === id);
 };
 
 

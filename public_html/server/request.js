@@ -3,14 +3,11 @@
  * Copyright Pro Gamma Spa 2000-2021
  * All rights reserved
  */
-/* global require, module, process */
-
 var Node = Node || {};
 
 // Import Modules
 Node.http = require("http");
 Node.https = require("https");
-Node.url = require("url");
 Node.FormData = require("form-data");
 
 // Import Classes
@@ -33,166 +30,102 @@ Node.Request = function (config, logger)
  * POST request
  * @param {obj} options
  * @param {form} form
- * @param {callback} callback - function(statusCode, data, err)
+ * @returns {Promise<{code, data}>}
  */
-Node.Request.prototype.postRequest = function (options, form, callback)
+Node.Request.prototype.postRequest = async function (options, form)
 {
-  // If there is a pending GET/POST request, better wait
-  if (this.pendingRequest) {
-    this.logger.log("WARN", "Pending request -> enqueue", "Request.postRequest", {options: options, pendingOptions: this.pendingRequest});
-    this.reqQueue = this.reqQueue || [];
-    return this.reqQueue.push({options: options, form: form, callback: callback});
-  }
-  //
-  // Set semaphore
-  this.pendingRequest = options;
-  //
-  // Set method to POST
   options.method = "POST";
-  //
-  // Timeout (if not specified -> 300 sec)
-  if (options.timeout === undefined)
-    options.timeout = 300000;
-  //
-  var done = (statusCode, data, err) => {
-    // I can't call the callback more than once!
-    if (this.pendingRequest) {
-      delete this.pendingRequest;
-      callback(statusCode, data, err);
-    }
-    //
-    if (this.timeoutReq) {
-      clearTimeout(this.timeoutReq);
-      delete this.timeoutReq;
-    }
-    //
-    if (this.reqQueue) {
-      let req = this.reqQueue.shift();
-      this.logger.log("INFO", "Handle next request", "Request.postRequest", {req: req});
-      if (this.reqQueue.length === 0)
-        delete this.reqQueue;
-      //
-      // Handle request
-      if (req.options.method === "POST")
-        this.postRequest(req.options, req.form, req.callback);
-      else
-        this.getRequest(req.options, req.callback);
-    }
-  };
-  //
-  var readReply = (res) => {
-    var data = "";
-    res.on("data", (chunk) => {
-      data += chunk;
-    });
-    res.on("end", () => {
-      done(res.statusCode, data);
-    });
-  };
-  //
-  // If procotol is missing
-  if (!options.protocol) {
-    this.logger.log("ERROR", "Missing protocol", "Request.postRequest", {options: options});
-    return done(null, null, "Missing protocol");
-  }
-  //
-  var proto = options.protocol.substring(0, options.protocol.length - 1);
-  var req = Node[proto].request(options, readReply);
-  req.on("error", (err) => {
-    done(null, null, err);
-  });
-  req.on("timeout", () => {
-    req.destroy("POST request timeout");
-  });
-  //
-  form.pipe(req);
+  return await this.httpRequest(options, form);
 };
 
 
 /**
  * GET request
  * @param {obj} options
- * @param {callback} callback - function(statusCode, data, err)
+ * @returns {Promise<{code, data}>}
  */
-Node.Request.prototype.getRequest = function (options, callback)
+Node.Request.prototype.getRequest = async function (options)
 {
-  // If there is a pending GET/POST request, better wait
-  if (this.pendingRequest) {
-    this.logger.log("WARN", "Pending request", "Request.getRequest", {options: options, pendingOptions: this.pendingRequest});
-    this.reqQueue = this.reqQueue || [];
-    return this.reqQueue.push({options: options, callback: callback});
-  }
-  //
-  // Set semaphore
-  this.pendingRequest = options;
-
-  // Set method to GET
   options.method = "GET";
-  //
-  // Timeout (if not specified -> 300 sec)
-  if (options.timeout === undefined)
-    options.timeout = 300000;
-  //
-  var done = (statusCode, data, err) => {
-    // I can't call the callback more than once!
-    if (this.pendingRequest) {
-      delete this.pendingRequest;
-      callback(statusCode, data, err);
-    }
-    //
-    if (this.timeoutReq) {
-      clearTimeout(this.timeoutReq);
-      delete this.timeoutReq;
-    }
-    //
-    if (this.reqQueue) {
-      let req = this.reqQueue.shift();
-      this.logger.log("INFO", "Handle next request", "Request.getRequest", {req: req});
-      if (this.reqQueue.length === 0)
-        delete this.reqQueue;
-      //
-      // Handle request
-      if (req.options.method === "POST")
-        this.postRequest(req.options, req.form, req.callback);
-      else
-        this.getRequest(req.options, req.callback);
-    }
-  };
-  //
-  var readReply = (res) => {
-    var data = "";
-    res.on("data", (chunk) => {
-      data += chunk;
-    });
-    res.on("end", () => {
-      done(res.statusCode, data);
-    });
-  };
-  //
+  return await this.httpRequest(options);
+};
+
+
+/**
+ * Executes an HTTP request and queues it if there are pending requests
+ * @param {object} options - HTTP request options (protocol, hostname, port, path, method, etc.)
+ * @param {FormData} form - Optional form data to be sent with the request
+ * @returns {Promise<{code: number, data: string}>} Promise that resolves with status code and response data
+ */
+Node.Request.prototype.httpRequest = async function (options, form)
+{
   // If procotol is missing
   if (!options.protocol) {
-    this.logger.log("ERROR", "Missing protocol", "Request.getRequest", {options: options});
-    return done(null, null, "Missing protocol");
+    this.logger.log("ERROR", "Missing protocol", "Request.httpRequest", {options});
+    throw new Error("Missing protocol");
   }
   //
-  var proto = options.protocol.substring(0, options.protocol.length - 1);
-  var req = Node[proto].request(options, readReply);
-  req.on("error", (err) => {
-    done(null, null, err);
+  this.reqQueue = this.reqQueue || [];
+  //
+  return await new Promise((resolve, reject) => {
+    this.reqQueue.push({options, form, resolve, reject});
+    //
+    // If there is a pending GET/POST request, better wait
+    if (this.reqQueue.length === 1)
+      this.processNextHttpRequest();
+    else
+      this.logger.log("WARN", "Pending request -> enqueue", "Request.httpRequest", {options});
   });
-  req.on("timeout", () => {
-    req.destroy("GET request timeout");
-  });
-  req.end();
+};
+
+
+/**
+ * Processes all queued HTTP requests sequentially
+ */
+Node.Request.prototype.processNextHttpRequest = async function ()
+{
+  while (this.reqQueue?.length > 0) {
+    let {options, form, resolve, reject} = this.reqQueue[0];
+    this.logger.log("INFO", "Handle http request", "Request.processNextHttpRequest", {options, form});
+    //
+    // Timeout (if not specified -> 300 sec)
+    if (options.timeout === undefined)
+      options.timeout = 300000;
+    //
+    try {
+      resolve(await new Promise((resolve, reject) => {
+        let proto = options.protocol.substring(0, options.protocol.length - 1);
+        let req = Node[proto].request(options, res => {
+          let data = "";
+          res.on("data", chunk => data += chunk);
+          res.on("end", () => resolve({code: res.statusCode, data}));
+        });
+        req.on("error", err => reject(err));
+        req.on("timeout", () => req.destroy("request timeout"));
+        //
+        if (form)
+          form.pipe(req);
+        else
+          req.end();
+      }));
+    }
+    catch (err) {
+      reject(err);
+    }
+    finally {
+      this.reqQueue.shift();
+      if (this.reqQueue.length === 0)
+        delete this.reqQueue;
+    }
+  }
 };
 
 
 /*
  * Send a new auth token to the console
  */
-Node.Request.prototype.sendTokenToConsole = function ()
+Node.Request.prototype.sendTokenToConsole = async function ()
 {
-  var pthis = this;
   if (!this.config.name)
     return;
   //
@@ -200,7 +133,7 @@ Node.Request.prototype.sendTokenToConsole = function ()
   this.config.autk = Node.Utils.generateUID36();
   //
   // Create a form to be sent via post
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("server", this.config.name);
   form.append("tk", this.config.autk);
   if (this.config.server.version)
@@ -208,21 +141,30 @@ Node.Request.prototype.sendTokenToConsole = function ()
   if (process.env["DOCKER_NAME"])
     form.append("dockerName", process.env["DOCKER_NAME"]);
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=idetk",
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, options;
+  try {
+    // Check if consoleURL is valid before trying to parse it
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=idetk`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200)
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendTokenToConsole",
-              {err: err, code: code, data: data, options: options});
-  });
+  if (err || code !== 200)
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendTokenToConsole", {err, code, data, options});
 };
 
 
@@ -232,31 +174,37 @@ Node.Request.prototype.sendTokenToConsole = function ()
  * @param {string} code
  * @param {string} text
  */
-Node.Request.prototype.sendResponse = function (RID, code, text)
+Node.Request.prototype.sendResponse = async function (RID, code, text)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("code", code);
   form.append("text", text);
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=rid&rid=" + RID + "&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, respCode, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=rid&rid=${RID}&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code: respCode, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200)
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendResponse",
-              {err: err, code: code, data: data, options: options});
-    else
-      pthis.logger.log("DEBUG", "POST reply", "Request.sendResponse", {code: code, data: data, options: options});
-  });
+  if (err || respCode !== 200)
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendResponse", {err, code: respCode, data, options});
+  else
+    this.logger.log("DEBUG", "POST reply", "Request.sendResponse", {code, data, options});
 };
 
 
@@ -264,50 +212,41 @@ Node.Request.prototype.sendResponse = function (RID, code, text)
  * Send an http request to the console in order to get the parent project name
  * @param {string} userName
  * @param {string} projectName
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.getParentProject = function (userName, projectName, callback)
+Node.Request.prototype.getParentProject = async function (userName, projectName)
 {
-  // TODO: Eliminare
-  if (this.config.local && projectName === "cloud-control-center-forked")
-    return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center", user: "lucabaldini"});
-  if (this.config.local && projectName === "cloud-control-center-forked1")
-    return callback({server: "http://127.0.0.1:8081", project: "cloud-control-center-forked", user: "lucabaldini"});
-  if (this.config.local && projectName.substring(0, 16) === "cccmaster-forked")
-    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
-  if (this.config.local && projectName.substring(0, 17) === "cccmaster-forked2")
-    return callback({server: "http://127.0.0.1:8081", project: "cccmaster", user: "diegopierangeli"});
-  //
-  var pthis = this;
-  //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=parent&username=" + userName + "&projectname=" +
-            projectName + "&company=" + this.config.serverType + "&autk=" + this.config.autk,
-    method: "GET"
-  };
-  this.getRequest(options, function (code, data, err) {
+  let code, data, options, warning;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=parent&username=${userName}&projectname=${projectName}&company=${this.config.serverType}&autk=${this.config.autk}`,
+      method: "GET"
+    };
+    //
+    ({code, data} = await this.getRequest(options));
+    //
     if (code === 404)
-      callback(null, "Project not found");
-    else if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getParentProject", {err: err, code: code, data: data, options: options});
-      callback(null, err || "Invalid response");
+      throw new Error("Project not found");
+    //
+    if (code !== 200) {
+      warning = true;
+      throw new Error("Invalid response");
     }
-    else {
-      // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
-      // Better check if the answer is a JSON string... I don't want to crash everything
-      try {
-        callback(JSON.parse(data));
-      }
-      catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.getParentProject", {data: data, code: code, options: options, err: ex.message});
-        callback(null, "Invalid response");
-      }
-    }
-  });
+    //
+    // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
+    // Better check if the answer is a JSON string... I don't want to crash everything
+    return JSON.parse(data);
+  }
+  catch (err) {
+    this.logger.log(warning ? "WARN" : "ERROR", "GET reply error", "Request.getParentProject", {err, code, data, options});
+    throw err;
+  }
 };
 
 
@@ -315,39 +254,50 @@ Node.Request.prototype.getParentProject = function (userName, projectName, callb
  * Send an http request to a server and gets the list of active branches
  * @param {string} userName
  * @param {string} projectName
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.getBranches = function (userName, projectName, callback)
+Node.Request.prototype.getBranches = async function (userName, projectName)
 {
-  var pthis = this;
-  //
   // First ask the console where is the parent project
-  this.getParentProject(userName, projectName, function (data, err) {
-    if (err)
-      return callback(null, err);
+  let data = await this.getParentProject(userName, projectName);
+  //
+  if (!data)
+    return;
+  //
+  let err, code, branches, options;
+  try {
+    if (!data.server)
+      throw new Error("Missing server URL in parent project data");
     //
-    if (data) {
-      // Parse SERVER url and perpare re
-      var urlParts = Node.url.parse(data.server);
-      var options = {
-        protocol: urlParts.protocol,
-        hostname: urlParts.hostname,
-        port: urlParts.port,
-        path: "/" + data.user + "/" + data.project + "/branches?autk=" + data.autk,
-        method: "GET"
-      };
-      //
-      pthis.getRequest(options, function (code, branches, err) {
-        if (err || code !== 200) {
-          pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getBranches",
-                  {err: err, code: code, data: branches, options: options});
-          callback(null, err || "Invalid response");
-        }
-        else
-          callback({branches: JSON.parse(branches), user: data.user, project: data.project});
-      });
-    }
-  });
+    // Parse SERVER url and perpare re
+    let urlParts = new URL(data.server);
+    options = {
+      protocol: urlParts.protocol,
+      hostname: urlParts.hostname,
+      port: urlParts.port,
+      path: `/${data.user}/${data.project}/branches?autk=${data.autk}`,
+      method: "GET"
+    };
+    //
+    ({code, data: branches} = await this.getRequest(options));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "GET reply error", "Request.getBranches", {err, code, data: branches, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
+  //
+  return {
+    branches: JSON.parse(branches),
+    user: data.user,
+    project: data.project
+  };
 };
 
 
@@ -356,37 +306,44 @@ Node.Request.prototype.getBranches = function (userName, projectName, callback)
  * @param {string} userName
  * @param {string} projectName
  * @param {object} params
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.getParentCommits = function (userName, projectName, params, callback)
+Node.Request.prototype.getParentCommits = async function (userName, projectName, params)
 {
-  var pthis = this;
+  let data = await this.getParentProject(userName, projectName);
   //
-  this.getParentProject(userName, projectName, function (data, err) {
-    if (err)
-      return callback(null, err);
+  if (!data)
+    return [];
+  //
+  let err, code, commits, options;
+  try {
+    if (!data.server)
+      throw new Error("Missing server URL in parent project data");
     //
-    if (data) {
-      var urlParts = Node.url.parse(data.server);
-      var options = {
-        protocol: urlParts.protocol,
-        hostname: urlParts.hostname,
-        port: urlParts.port,
-        path: "/" + data.user + "/" + data.project + "/commits?onlyID=true&branch=" + encodeURIComponent(params.branch) + "&autk=" + data.autk,
-        method: "GET"
-      };
-      //
-      pthis.getRequest(options, function (code, commits, err) {
-        if (err || code !== 200) {
-          pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getCommits",
-                  {err: err, code: code, data: commits, options: options});
-          callback(null, err || "Invalid response");
-        }
-        else
-          callback(JSON.parse(commits).commits);
-      });
-    }
-  });
+    let urlParts = new URL(data.server);
+    options = {
+      protocol: urlParts.protocol,
+      hostname: urlParts.hostname,
+      port: urlParts.port,
+      path: `/${data.user}/${data.project}/commits?onlyID=true&branch=${encodeURIComponent(params.branch)}&autk=${data.autk}`,
+      method: "GET"
+    };
+    //
+    ({code, data: commits} = await this.getRequest(options));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.getCommits", {err, code, data: commits, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
+  //
+  return JSON.parse(commits).commits;
 };
 
 
@@ -396,34 +353,36 @@ Node.Request.prototype.getParentCommits = function (userName, projectName, param
  */
 Node.Request.prototype.getComponents = async function (userName)
 {
-  let consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  let options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: `${consoleUrlParts.pathname}?mode=rest&cmd=compList&user=${userName}&company=${this.config.serverType}&autk=${this.config.autk}`,
-    method: "GET"
-  };
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=compList&user=${userName}&company=${this.config.serverType}&autk=${this.config.autk}`,
+      method: "GET"
+    };
+    //
+    ({code, data} = await this.getRequest(options));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  return new Promise((resolve, reject) => {
-    this.getRequest(options, (code, data, err) => {
-      if (err || code !== 200) {
-        this.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.getComponents", {err, code, data, options});
-        reject(err || "Invalid response");
-      }
-      else {
-        // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
-        // Better check if the answer is a JSON string... I don't want to crash everything
-        try {
-          resolve(JSON.parse(data).cmpList);
-        }
-        catch (ex) {
-          this.logger.log("ERROR", "GET reply error", "Request.getComponents", {data, code, options, err: ex.message});
-          reject("Invalid response");
-        }
-      }
-    });
-  });
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.getComponents", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
+  //
+  return JSON.parse(data).cmpList;
 };
 
 
@@ -432,13 +391,10 @@ Node.Request.prototype.getComponents = async function (userName)
  * @param {string} userName
  * @param {string} projectName
  * @param {InDe.AComponent} component - component to export
- * @param {function} callback - function(err)
  */
-Node.Request.prototype.sendExportedComponent = function (userName, projectName, component, callback)
+Node.Request.prototype.sendExportedComponent = async function (userName, projectName, component)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", userName);
   form.append("project", projectName);
   form.append("company", this.config.serverType);
@@ -449,24 +405,35 @@ Node.Request.prototype.sendExportedComponent = function (userName, projectName, 
   if (component.version)
     form.append("componentVersion", component.version);
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=comp&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendExportedComponent",
-              {err: err, code: code, data: data, options: options});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=comp&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendExportedComponent", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -475,36 +442,44 @@ Node.Request.prototype.sendExportedComponent = function (userName, projectName, 
  * @param {string} userName
  * @param {string} projectName
  * @param {string} prjInfo
- * @param {function} callback - function(err)
  */
-Node.Request.prototype.sendPrjInfo = function (userName, projectName, prjInfo, callback)
+Node.Request.prototype.sendPrjInfo = async function (userName, projectName, prjInfo)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", userName);
   form.append("project", projectName);
   form.append("company", this.config.serverType);
   form.append("prjInfo", prjInfo);
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=prjInfo&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendPrjInfo",
-              {err: err, code: code, data: data, options: options});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=prjInfo&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendPrjInfo", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -512,37 +487,45 @@ Node.Request.prototype.sendPrjInfo = function (userName, projectName, prjInfo, c
  * Send create PR message to console
  * @param {string} userName
  * @param {string} projectName
- * @param {Object} prInfo
- * @param {function} callback - function(err)
+ * @param {object} prInfo
  */
-Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, callback)
+Node.Request.prototype.sendTwPrInfo = async function (userName, projectName, prInfo)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", userName);
   form.append("project", projectName);
   form.append("company", this.config.serverType);
   form.append("prInfo", JSON.stringify(prInfo));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=pr&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendTwPrInfo",
-              {err: err, code: code, data: data, options: options});
-      callback(null, err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=pr&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendTwPrInfo", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -550,36 +533,45 @@ Node.Request.prototype.sendTwPrInfo = function (userName, projectName, prInfo, c
  *  Send create commit message to console
  * @param {string} userName
  * @param {string} projectName
- * @param {Object} commitInfo
- * @param {function} callback - function(err)
+ * @param {object} commitInfo
  */
-Node.Request.prototype.sendCommitInfo = function (userName, projectName, commitInfo, callback)
+Node.Request.prototype.sendCommitInfo = async function (userName, projectName, commitInfo)
 {
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", userName);
   form.append("project", projectName);
   form.append("company", this.config.serverType);
   form.append("commitInfo", JSON.stringify(commitInfo));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=commit&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=commit&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendCommitInfo",
-              {err: err, code: code, data: data, options: options});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  }.bind(this));
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendCommitInfo", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -587,34 +579,42 @@ Node.Request.prototype.sendCommitInfo = function (userName, projectName, commitI
  * Send course information to console
  * @param {string} RID
  * @param {string} courseData
- * @param {function} callback - function(err)
  */
-Node.Request.prototype.sendCourseInfo = function (RID, courseData, callback)
+Node.Request.prototype.sendCourseInfo = async function (RID, courseData)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("text", JSON.stringify({courseData: JSON.parse(courseData)}));
   form.append("code", "200");
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=rid&rid=" + RID + "&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.sendCourseInfo",
-              {err: err, code: code, data: data, options: options});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=rid&rid=${RID}&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
+  //
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.sendCourseInfo", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -623,37 +623,44 @@ Node.Request.prototype.sendCourseInfo = function (RID, courseData, callback)
  * @param {string} branchName
  * @param {object} parentPrjData - data of the parent project (see getParentProject)
  * @param {object} options {commits, user(destination), project(destination)}
- * @param {function} callback - function(err)
  */
-Node.Request.prototype.backupBranch = function (branchName, parentPrjData, options, callback)
+Node.Request.prototype.backupBranch = async function (branchName, parentPrjData, options)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("branch", branchName);
   form.append("commits", options.commits);
   form.append("user", options.user);          // User that will receive this branch
   form.append("project", options.project);    // Project that will receive this branch
   //
-  var urlParts = Node.url.parse(parentPrjData.server);
-  var postOpt = {
-    protocol: urlParts.protocol,
-    hostname: urlParts.hostname,
-    port: urlParts.port,
-    path: "/" + parentPrjData.user + "/" + parentPrjData.project + "/backupBranch",
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, postOpt;
+  try {
+    if (!parentPrjData.server)
+      throw new Error("Missing server URL in parent project data");
+    //
+    let urlParts = new URL(parentPrjData.server);
+    postOpt = {
+      protocol: urlParts.protocol,
+      hostname: urlParts.hostname,
+      port: urlParts.port,
+      path: `/${parentPrjData.user}/${parentPrjData.project}/backupBranch`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(postOpt, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(postOpt, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.backupBranch",
-              {err: err, code: code, data: data, options: postOpt});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.backupBranch", {err, code, data, options: postOpt});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
@@ -662,13 +669,10 @@ Node.Request.prototype.backupBranch = function (branchName, parentPrjData, optio
  * @param {string} branchName - name of the branch
  * @param {object} parentPrjData - data of the parent project (see getParentProject)
  * @param {object} options - options to be used {msg: message}
- * @param {function} callback - function(err)
  */
-Node.Request.prototype.restoreBranch = function (branchName, parentPrjData, options, callback)
+Node.Request.prototype.restoreBranch = async function (branchName, parentPrjData, options)
 {
-  var pthis = this;
-  //
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("branch", branchName);
   if (options.msg)
     form.append("message", options.msg);
@@ -680,194 +684,216 @@ Node.Request.prototype.restoreBranch = function (branchName, parentPrjData, opti
   form.append("srcProject", options.srcProject);
   form.append("srcCompany", options.srcCompany);
   //
-  var urlParts = Node.url.parse(parentPrjData.server);
-  var postOpt = {
-    protocol: urlParts.protocol,
-    hostname: urlParts.hostname,
-    port: urlParts.port,
-    path: "/" + parentPrjData.user + "/" + parentPrjData.project + "/restoreBranch",
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, postOpt;
+  try {
+    if (!parentPrjData.server)
+      throw new Error("Missing server URL in parent project data");
+    //
+    let urlParts = new URL(parentPrjData.server);
+    postOpt = {
+      protocol: urlParts.protocol,
+      hostname: urlParts.hostname,
+      port: urlParts.port,
+      path: `/${parentPrjData.user}/${parentPrjData.project}/restoreBranch`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(postOpt, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(postOpt, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.restoreBranch",
-              {err: err, code: code, data: data, options: postOpt});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.restoreBranch", {err, code, data, options: postOpt});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
 /*
  * Send request to console to invite users for telecollaboration
  * @param {Object} msg
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.inviteUsers = function (msg, callback)
+Node.Request.prototype.inviteUsers = async function (msg)
 {
-  var pthis = this;
-  //
   // Create a form to be sent via post
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", msg.userName);
   form.append("users", JSON.stringify(msg.users));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=inviteUsers&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=inviteUsers&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.inviteUsers",
-              {err: err, code: code, data: data, options: options});
-      callback(err || "Invalid response");
-    }
-    else
-      callback();
-  });
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.inviteUsers", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
 };
 
 
 /*
  * Ask to console users list
  * @param {Object} msg
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.listUsers = function (msg, callback)
+Node.Request.prototype.listUsers = async function (msg)
 {
-  var pthis = this;
-  //
   // Create a form to be sent via post
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("user", msg.user);
   form.append("company", this.config.serverType);
   form.append("matchingString", msg.matchingString);
   form.append("organizationOnly", (msg.organizationOnly ? 1 : 0));
   form.append("onlineStatus", (msg.onlineStatus ? 1 : 0));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=listUsers&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.listUsers",
-              {err: err, code: code, data: data, options: options});
-      callback(undefined, err || "Invalid response");
+  let code, data, options, warning;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=listUsers&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+    //
+    if (code !== 200) {
+      warning = true;
+      throw new Error("Invalid response");
     }
-    else {
-      try {
-        callback(JSON.parse(data));
-      }
-      catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.listUsers", {data: data, code: code, options: options, err: ex.message});
-        callback(null, "Invalid response");
-      }
-    }
-  });
+    //
+    return JSON.parse(data);
+  }
+  catch (err) {
+    this.logger.log(warning ? "WARN" : "ERROR", "POST reply error", "Request.listUsers", {err, code, data, options});
+    throw err;
+  }
 };
 
 
 /**
  * Ask to console if user with given address is online
  * @param {string} address
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.isUserOnline = function (address, callback)
+Node.Request.prototype.isUserOnline = async function (address)
 {
-  var pthis = this;
-  //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=isUserOnline&email=" + address + "&autk=" + this.config.autk,
-    method: "GET"
-  };
-  this.getRequest(options, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "GET reply error", "Request.isUserOnline", {err: err, code: code, data: data, options: options});
-      callback(null, err || "Invalid response");
+  let code, data, options, warning;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=isUserOnline&email=${address}&autk=${this.config.autk}`,
+      method: "GET"
+    };
+    //
+    ({code, data} = await this.getRequest(options));
+    //
+    if (code !== 200) {
+      warning = true;
+      throw new Error("Invalid response");
     }
-    else {
-      // Maybe the system answered 200-OK but with an HTML file (like when it's updating)
-      // Better check if the answer is a JSON string... I don't want to crash everything
-      try {
-        callback(JSON.parse(data));
-      }
-      catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.isUserOnline", {data: data, code: code, options: options, err: ex.message});
-        callback(null, "Invalid response");
-      }
-    }
-  });
+    return JSON.parse(data);
+  }
+  catch (err) {
+    this.logger.log(warning ? "WARN": "ERROR", "POST reply error", "Request.isUserOnline", {err, code, data, options});
+    throw err;
+  }
 };
 
 
 /*
  * Ask the console to execute a query on a remote server
  * @param {Object} options
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.executeRemoteQuery = function (options, callback)
+Node.Request.prototype.executeRemoteQuery = async function (options)
 {
   // Create a form to be sent via post
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("server", options.server);
   form.append("database", options.database);
   form.append("sql", encodeURIComponent(options.sql));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var postOpt = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=query&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, postOpt;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    postOpt = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=query&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(postOpt, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(postOpt, form, function (code, data, err) {
-    if (err || code !== 200) {
-      this.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.executeRemoteQuery",
-              {err: err, code: code, data: data, options: options});
-      callback(undefined, err || "Invalid response");
-    }
-    else
-      callback(data);
-  }.bind(this));
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.executeRemoteQuery", {err, code, data, postOpt});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
+  //
+  return data;
 };
 
 
 /*
  * Ask to console to manage the notification of an issue
  * @param {Object} msg
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.notifyIssueCommand = function (msg, callback)
+Node.Request.prototype.notifyIssueCommand = async function (msg)
 {
-  var pthis = this;
-  //
   // Create a form to be sent via post
-  var form = new Node.FormData();
-  var cmd = msg.cmd;
+  let form = new Node.FormData();
+  let cmd = msg.cmd;
   switch (cmd) {
     case "changeIssueNotification":
       form.append("username", msg.username);
@@ -895,67 +921,78 @@ Node.Request.prototype.notifyIssueCommand = function (msg, callback)
       break;
   }
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL || "");
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=" + cmd + "&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
-  //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.notifyIssueCommand",
-              {err: err, code: code, data: data, options: options});
-      callback(undefined, err || "Invalid response");
+  let code, data, options, warning;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=${cmd}&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+    //
+    if (code !== 200) {
+      warning = true;
+      throw new Error("Invalid response");
     }
-    else {
-      try {
-        callback(JSON.parse(data));
-      }
-      catch (ex) {
-        pthis.logger.log("ERROR", "GET reply error", "Request.notifyIssueCommand", {data: data, code: code, options: options, err: ex.message});
-        callback(null, "Invalid response");
-      }
-    }
-  });
+    //
+    return JSON.parse(data);
+  }
+  catch (err) {
+    this.logger.log(warning ? "WARN" : "ERROR", "POST reply error", "Request.notifyIssueCommand", {err, code, data, options});
+    throw err;
+  }
 };
 
 
 /*
  * Ask to console users list
  * @param {Object} msg
- * @param {function} callback - function(data, err)
  */
-Node.Request.prototype.notifyFeedback = function (msg, callback)
+Node.Request.prototype.notifyFeedback = async function (msg)
 {
-  var pthis = this;
-  //
   // Create a form to be sent via post
-  var form = new Node.FormData();
+  let form = new Node.FormData();
   form.append("issuesJSON", JSON.stringify(msg));
   //
-  var consoleUrlParts = Node.url.parse(this.config.consoleURL);
-  var options = {
-    protocol: consoleUrlParts.protocol,
-    hostname: consoleUrlParts.hostname,
-    port: consoleUrlParts.port,
-    path: consoleUrlParts.pathname + "?mode=rest&cmd=notifyIssue&autk=" + this.config.autk,
-    method: "POST",
-    headers: form.getHeaders()
-  };
+  let err, code, data, options;
+  try {
+    if (!this.config.consoleURL)
+      throw new Error("Missing consoleURL configuration");
+    //
+    let consoleUrlParts = new URL(this.config.consoleURL);
+    options = {
+      protocol: consoleUrlParts.protocol,
+      hostname: consoleUrlParts.hostname,
+      port: consoleUrlParts.port,
+      path: `${consoleUrlParts.pathname}?mode=rest&cmd=notifyIssue&autk=${this.config.autk}`,
+      method: "POST",
+      headers: form.getHeaders()
+    };
+    //
+    ({code, data} = await this.postRequest(options, form));
+  }
+  catch (e) {
+    err = e;
+  }
   //
-  this.postRequest(options, form, function (code, data, err) {
-    if (err || code !== 200) {
-      pthis.logger.log((err ? "ERROR" : "WARN"), "POST reply error", "Request.notifyFeedback",
-              {err: err, code: code, data: data, options: options});
-      callback(undefined, err || "Invalid response");
-    }
-    else
-      callback(data);
-  });
+  if (err || code !== 200) {
+    this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.notifyFeedback", {err, code, data, options});
+    if (!err)
+      err = new Error("Invalid response");
+  }
+  //
+  if (err)
+    throw err;
+  //
+  return data;
 };
 
 

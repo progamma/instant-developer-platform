@@ -19,610 +19,657 @@ Node.path = require("path");
 
 
 /**
- * @class Represents an Instant Developer Archiver
- * @param {Node.Server/Node.Child} par
- * @param {type} nightly
+ * @class Node.Archiver
+ * @classdesc
+ * Manages file archiving operations for Instant Developer applications.
+ * Provides unified interface for file operations across local storage and Google Cloud Storage.
+ *
+ * Key features:
+ * - **Cloud Storage**: Seamless integration with Google Cloud Storage for backup operations
+ * - **Archive Operations**: Create and extract tar.gz and zip archives
+ * - **Backup/Restore**: Automated backup and restore of project directories
+ * - **File Transfer**: Upload and download files between local and cloud storage
+ *
+ * @property {Node.Server|Node.Child} parent - Parent server or child process instance
+ * @property {Object} indertBucket - Google Cloud Storage bucket instance (when using GCloud)
  */
-Node.Archiver = function (par, nightly)
+Node.Archiver = class Archiver
 {
-  this.parent = par;
-  //
-  if (this.useGCloud()) {
-    let storage = new Node.googleCloudStorage(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
-    if (nightly)
-      this.indertBucket = storage.bucket(this.config.nigthlybucketGCloud);
-    else
-      this.indertBucket = storage.bucket(this.config.bucketGCloud);
-  }
-};
-
-
-// Define usefull properties for this object
-Object.defineProperties(Node.Archiver.prototype, {
-  config: {
-    get() {
-      return this.parent.config;
-    }
-  },
-  logger: {
-    get() {
-      return this.parent.logger;
-    }
-  }
-});
-
-
-/**
- * Checks whether to use Google Cloud Storage for archiving
- * @returns {boolean} true if the project is not IDF and storage is configured as "gcloud"
- */
-Node.Archiver.prototype.useGCloud = function ()
-{
-  return !this.parent.doc?.prj.isIDF() && this.config.storage === "gcloud";
-};
-
-
-/**
- * Upload a file in the cloud
- * @param {string} pathFile
- * @param {string} pathCloud
- */
-Node.Archiver.prototype.upload = async function (pathFile, pathCloud)
-{
-  try {
-    // If the storage is gcloud
-    if (this.useGCloud()) {
-      let file = this.indertBucket.file(pathCloud);
-      let readStream = Node.fs.createReadStream(pathFile);
-      let writeStream = file.createWriteStream({resumable: false});
-      //
-      await new Promise((resolve, reject) => {
-        readStream.pipe(writeStream);
-        //
-        readStream.on("error", err => reject(new Error(`Error reading the file ${pathFile}: ${err}`)));
-        writeStream.on("error", err => reject(new Error(`Error writing the file ${pathFile} to GCloud ${pathCloud}: ${err}`)));
-        writeStream.on("finish", () => resolve());
-      });
-    }
-    else {
-      // Supponiamo che il file sia locale
-      let fs = require("fs-extra");
-      try {
-        await fs.copy(pathFile, pathCloud);
-      }
-      catch (err) {
-        throw new Error(`Error writing the file ${pathFile} to local file ${pathCloud}: ${err}`);
-      }
-    }
-  }
-  catch (err) {
-    this.logger.log("ERROR", err.message || err, "Archiver.upload");
-    throw err;
-  }
-};
-
-
-/**
- * Download a file from the cloud
- * @param {string} pathCloud
- * @param {string} pathFile
- */
-Node.Archiver.prototype.download = async function (pathCloud, pathFile)
-{
-  try {
-    // Path cloud is needed!
-    if (!pathCloud)
-      throw new Error("Missing file name");
+  /**
+   * @param {Node.Server|Node.Child} par - Parent server or child process that owns this archiver
+   * @param {Boolean} [nightly] - Whether to use nightly backup bucket (for GCloud storage)
+   */
+  constructor(par, nightly)
+  {
+    this.parent = par;
     //
-    // First, if the pathCloud is an URL, download the file directly
-    if (pathCloud.toLowerCase().startsWith("http://") || pathCloud.toLowerCase().startsWith("https://")) {
-      return new Promise((resolve, reject) => {
-        // Handle only HTTP and HTTPS
-        let request = (pathCloud.toLowerCase().startsWith("http://") ? Node.http : Node.https).get(pathCloud, resp => {
-          // Check status code before piping
-          if (resp.statusCode >= 400) {
-            reject(new Error(`Wrong reply: ${resp.statusCode}`));
-            return;
-          }
-          //
-          let writeStream = Node.fs.createWriteStream(pathFile);
-          resp.pipe(writeStream);
-          //
-          // Listen to writeStream's finish event, not response's end event
-          // The "end" event on response only means data was received, not written to disk
-          writeStream.on("finish", resolve);
-          writeStream.on("error", reject);
-        });
-        request.on("error", reject);
-      });
-    }
-    //
-    // If the storage is gcloud
     if (this.useGCloud()) {
-      await new Promise((resolve, reject) => {
+      let storage = new Node.googleCloudStorage(JSON.parse(JSON.stringify(this.config.configGCloudStorage)));
+      if (nightly)
+        this.indertBucket = storage.bucket(this.config.nightlyBucketGCloud);
+      else
+        this.indertBucket = storage.bucket(this.config.bucketGCloud);
+    }
+  }
+
+
+  /**
+   * Gets the configuration object from the parent server/child.
+   * Contains storage settings, GCloud credentials, and bucket names.
+   * @type {Object}
+   * @readonly
+   */
+  get config()
+  {
+    return this.parent.config;
+  }
+
+
+  /**
+   * Gets the logger instance from the parent server/child.
+   * Used for logging operations and errors.
+   * @type {Object}
+   * @readonly
+   */
+  get logger()
+  {
+    return this.parent.logger;
+  }
+
+
+  /**
+   * Checks whether to use Google Cloud Storage for archiving.
+   * Returns true only if the project is not IDF and storage is configured as "gcloud".
+   * @returns {Boolean} true if Google Cloud Storage should be used, false for local storage
+   */
+  useGCloud()
+  {
+    return !this.parent.doc?.prj.isIDF() && this.config.storage === "gcloud";
+  }
+
+
+  /**
+   * Uploads a file to cloud storage or copies it locally.
+   * Handles both Google Cloud Storage and local file system operations.
+   * Uses streaming for efficient memory usage with large files.
+   * @param {String} pathFile - Local file path to upload
+   * @param {String} pathCloud - Destination path in cloud storage or local filesystem
+   * @throws {Error} If upload fails due to read/write errors
+   */
+  async upload(pathFile, pathCloud)
+  {
+    try {
+      // If the storage is gcloud
+      if (this.useGCloud()) {
         let file = this.indertBucket.file(pathCloud);
-        let readStream = file.createReadStream();
-        let writeStream = Node.fs.createWriteStream(pathFile);
-        let rejected = false;
-        readStream.pipe(writeStream);
-        //
-        // NOTE: if there are READ errors (i.e. the file is not there) the gcloud module notifies
-        // the "read.error" AND "finish" events!!!!
-        readStream.on("error", err => {
-          rejected = true;
-          // In this particular case an empty file remains here. Delete it!
-          writeStream.end();
-          Node.fs.rm(pathFile, {force: true}, () => reject(err));
-        });
-        writeStream.on("error", reject);
-        writeStream.on("finish", () => {
-          if (!rejected)
-            resolve();
-        });
-      });
+        try {
+          // pipeline destroys both streams on error (no fd leak) and waits for the upload to flush
+          await require("stream/promises").pipeline(Node.fs.createReadStream(pathFile), file.createWriteStream({resumable: false}));
+        }
+        catch (err) {
+          throw new Error(`Error uploading the file ${pathFile} to GCloud ${pathCloud}: ${err}`);
+        }
+      }
+      else {
+        // Assume the file is on the local filesystem
+        let fs = require("fs-extra");
+        try {
+          await fs.copy(pathFile, pathCloud);
+        }
+        catch (err) {
+          throw new Error(`Error writing the file ${pathFile} to local file ${pathCloud}: ${err}`);
+        }
+      }
     }
-    else {
-      // Supponiamo che il file sia locale
-      let fs = require("fs-extra");
+    catch (err) {
+      this.logger.log("ERROR", err.message || err, "Archiver.upload");
+      throw err;
+    }
+  }
+
+
+  /**
+   * Downloads a file from cloud storage or copies it locally.
+   * Supports downloading from HTTP/HTTPS URLs, Google Cloud Storage, or local filesystem.
+   * Automatically handles different source types based on the pathCloud format.
+   * Note: Empty files created due to read errors are automatically cleaned up.
+   * @param {String} pathCloud - Source path (URL, cloud storage path, or local path)
+   * @param {String} pathFile - Local destination file path
+   * @throws {Error} If download fails or source file is missing
+   */
+  async download(pathCloud, pathFile)
+  {
+    try {
+      // Path cloud is needed!
+      if (!pathCloud)
+        throw new Error("Missing file name");
+      //
+      // First, if the pathCloud is an URL, download the file directly
+      if (pathCloud.toLowerCase().startsWith("http://") || pathCloud.toLowerCase().startsWith("https://")) {
+        return new Promise((resolve, reject) => {
+          // Handle only HTTP and HTTPS
+          let request = (pathCloud.toLowerCase().startsWith("http://") ? Node.http : Node.https).get(pathCloud, async resp => {
+            // Check status code before piping
+            if (resp.statusCode >= 400) {
+              reject(new Error(`Wrong reply: ${resp.statusCode}`));
+              return;
+            }
+            //
+            // pipeline waits for the data to be flushed to disk (not just received) and tears the
+            // file stream down on a mid-download error, avoiding fd leaks and orphan partial files
+            try {
+              await require("stream/promises").pipeline(resp, Node.fs.createWriteStream(pathFile));
+              resolve();
+            }
+            catch (err) {
+              reject(err);
+            }
+          });
+          request.on("error", reject);
+        });
+      }
+      //
+      // If the storage is gcloud
+      if (this.useGCloud()) {
+        let file = this.indertBucket.file(pathCloud);
+        try {
+          // pipeline rejects on a read error (e.g. the object is not there) and tears both streams
+          // down, so the gcloud "read error AND finish both fire" quirk no longer needs a manual guard
+          await require("stream/promises").pipeline(file.createReadStream(), Node.fs.createWriteStream(pathFile));
+        }
+        catch (err) {
+          // On a read error an empty/partial file may remain: delete it
+          await Node.fs.promises.rm(pathFile, {force: true});
+          throw err;
+        }
+      }
+      else {
+        // Assume the file is on the local filesystem
+        let fs = require("fs-extra");
+        try {
+          await fs.copy(pathCloud, pathFile);
+        }
+        catch (err) {
+          throw new Error(`Error writing the file ${pathCloud} to local file ${pathFile}: ${err}`);
+        }
+      }
+    }
+    catch (err) {
+      this.logger.log("ERROR", err.message || err, "Archiver.download");
+      throw err;
+    }
+  }
+
+
+  /**
+   * Backs up a directory to cloud storage as a tar.gz archive.
+   * Creates a temporary compressed archive and uploads it to the specified location.
+   * Note: the archive is a `.tar.gz` sibling of pathServer. The one this call builds is cleaned up
+   * on both paths - once uploaded, and before propagating a failure - and a failed cleanup is
+   * logged, not thrown. The archive a previous run may have left behind is removed first instead,
+   * and that removal does throw: nothing has been done yet that a failure would waste.
+   * @param {String} pathServer - Local directory path to backup
+   * @param {String} pathCloud - Destination path in cloud storage
+   * @throws {Error} If a previous archive cannot be removed, or if compression or upload fails
+   */
+  async backup(pathServer, pathCloud)
+  {
+    let fileServer = `${pathServer}.tar.gz`;
+    //
+    try {
+      // If the output file already exists, delete it
       try {
-        await fs.copy(pathCloud, pathFile);
+        await Node.fs.promises.rm(fileServer, {force: true});
       }
       catch (err) {
-        throw new Error(`Error writing the file ${pathCloud} to local file ${pathFile}: ${err}`);
+        throw new Error(`Error deleting the old file ${fileServer}: ${err}`);
+      }
+      //
+      // Compress the file into a tar.gz file
+      let parentPath = Node.path.dirname(pathServer);
+      let dirName = Node.path.basename(pathServer);
+      try {
+        await Node.tar.create({file: fileServer, cwd: parentPath, gzip: true, portable: true}, [dirName]);
+      }
+      catch (err) {
+        throw new Error(`Error compressing the directory ${pathServer}: ${err}`);
+      }
+      //
+      // Upload the file in the cloud
+      try {
+        await this.upload(fileServer, pathCloud);
+      }
+      catch (err) {
+        throw new Error(`Error while uploading file ${fileServer}: ${err}`);
+      }
+      //
+      // From here on the backup is already in the cloud: removing the archive is an accessory step,
+      // and a failure must not throw away a backup that succeeded
+      try {
+        await Node.fs.promises.rm(fileServer, {force: true});
+      }
+      catch (err) {
+        // ERROR, not WARN: the backup goes on, so this log is the only trace of the archive left on
+        // the disk, as big as the folder it holds
+        this.logger.log("ERROR", `Error removing the file ${fileServer} (remove it manually): ${err}`, "Archiver.backup");
       }
     }
-  }
-  catch (err) {
-    this.logger.log("ERROR", err.message || err, "Archiver.download");
-    throw err;
-  }
-};
-
-
-/**
- * Backup the given pathServer in the cloud as a tar.gz file
- * @param {string} pathServer
- * @param {string} pathCloud
- */
-Node.Archiver.prototype.backup = async function (pathServer, pathCloud)
-{
-  let fileServer = `${pathServer}.tar.gz`;
-  //
-  try {
-    // If the output file already exists, delete it
-    try {
-      await Node.fs.promises.rm(fileServer, {force: true});
-    }
     catch (err) {
-      throw new Error(`Error deleting the old file ${fileServer}: ${err}`);
+      this.logger.log("ERROR", err.message, "Archiver.backup");
+      //
+      // Cleanup: delete the archive being built: it is as big as the folder it holds, and it is a
+      // sibling of it - for App.backup, inside the `apps` the server publishes as static content
+      try {
+        await Node.fs.promises.rm(fileServer, {force: true});
+      }
+      catch (err1) {
+        this.logger.log("WARN", `Error while deleting the file ${fileServer}: ${err1}`, "Archiver.backup");
+      }
+      //
+      throw err;
     }
+  }
+
+
+  /**
+   * Backs up a directory to cloud storage as a ZIP archive.
+   * Creates a temporary ZIP file and uploads it to the specified location.
+   * Note: the archive is a `.zip` sibling of pathServer, and it is cleaned up on both paths - once
+   * uploaded, and before propagating a failure; a failed cleanup is logged but does not fail the
+   * backup.
+   * @param {String} pathServer - Local directory path to backup
+   * @param {String} pathCloud - Destination path in cloud storage
+   * @throws {Error} If compression or upload fails
+   */
+  async backupZip(pathServer, pathCloud)
+  {
+    let fileServer = `${pathServer}.zip`;
     //
-    // Compress the file into a tar.gz file
-    let parentPath = Node.path.dirname(pathServer);
-    let dirName = Node.path.basename(pathServer);
     try {
-      await Node.tar.create({file: fileServer, cwd: parentPath, gzip: true, portable: true}, [dirName]);
-    }
-    catch (err) {
-      throw new Error(`Error compressing the directory ${pathServer}: ${err}`);
-    }
-    //
-    // Upload the file in the cloud
-    try {
-      await this.upload(fileServer, pathCloud);
-    }
-    catch (err) {
-      throw new Error(`Error while uploading file ${fileServer}: ${err}`);
-    }
-    //
-    // Remove the compressed file
-    try {
-      await Node.fs.promises.rm(fileServer, {force: true});
-    }
-    catch (err) {
-      throw new Error(`Error removing the file ${fileServer}: ${err}`);
-    }
-  }
-  catch (err) {
-    this.logger.log("ERROR", err.message, "Archiver.backup");
-    throw err;
-  }
-};
-
-
-/**
- * Backup the project located at pathServer into pathS3 on AWS as a zip
- * @param {string} pathServer
- * @param {string} pathCloud
- */
-Node.Archiver.prototype.backupZip = async function (pathServer, pathCloud)
-{
-  let fileServer = `${pathServer}.zip`;
-  //
-  try {
-    await new Promise((resolve, reject) => {
+      // Create the ZIP; pipeline resolves when the file is fully written, rejecting on archive/output errors
       let output = Node.fs.createWriteStream(fileServer);
       let archive = Node.archiver.create("zip");
-      //
-      output.on("close", async () => {
-        try {
-          await this.upload(fileServer, pathCloud);
-        }
-        catch (err) {
-          reject(new Error(`Error while uploading the file ${fileServer} to the cloud: ${err}`));
-          return;
-        }
-        //
-        // Remove the compressed file
-        try {
-          await Node.fs.promises.rm(fileServer, {force: true});
-          resolve();
-        }
-        catch (err) {
-          reject(new Error(`Error removing the file ${fileServer}: ${err}`));
-        }
-      });
-      //
-      output.on("error", err => reject(new Error(`Error while writing the ZIP file ${fileServer}: ${err}`)));
-      archive.on("error", err => reject(new Error(`Error while compressing the file ${fileServer}: ${err}`)));
-      //
-      archive.pipe(output);
+      let written = require("stream/promises").pipeline(archive, output);
       archive.directory(pathServer, false).finalize();
-    });
-  }
-  catch (err) {
-    this.logger.log("ERROR", err.message || err, "Archiver.backupZip");
-    throw err;
-  }
-};
-
-
-/**
- * Restore a file from the cloud
- * @param {string} pathServer
- * @param {string} pathCloud
- */
-Node.Archiver.prototype.restore = async function (pathServer, pathCloud)
-{
-  let fileServer = `${pathServer}.tar.gz`;
-  //
-  // Check if the pathServer exists
-  let pathExists = await Node.fs.promises.access(pathServer).then(() => true, err => false);
-  //
-  try {
-    // Download the file from the cloud
-    try {
-      await this.download(pathCloud, fileServer);
-    }
-    catch (err) {
-      throw new Error(`Error downloading the file ${pathCloud} from the cloud: ${err}`);
-    }
-    //
-    // Rename the old path to a temporary one if it exists
-    if (pathExists) {
       try {
-        await Node.fs.promises.rename(pathServer, `${pathServer}.$$$`);
+        await written;
       }
       catch (err) {
-        if (err?.code === "ENOTEMPTY") {
-          // Log the error and attempt cleanup
-          this.logger.log("WARN", `Directory ${pathServer}.$$$ not empty, attempting cleanup`, "Archiver.restore");
-          try {
-            // Try to remove the backup directory if it exists
-            await Node.fs.promises.rm(`${pathServer}.$$$`, {recursive: true, force: true});
-            //
-            // Retry the rename
-            await Node.fs.promises.rename(pathServer, `${pathServer}.$$$`);
-            this.logger.log("INFO", `Successfully cleaned up and renamed ${pathServer}`, "Archiver.restore");
-          }
-          catch (cleanupErr) {
-            this.logger.log("ERROR", `Failed to cleanup and rename: ${cleanupErr.message || cleanupErr}`, "Archiver.restore");
-            throw new Error(`Cannot prepare for restore - directory conflicts exist: ${cleanupErr.message || cleanupErr}`);
-          }
-        }
-        else
-          throw new Error(`Error rename the path ${pathServer} to temporary: ${err}`);
+        throw new Error(`Error while creating the ZIP file ${fileServer}: ${err}`);
       }
-    }
-    //
-    // Extract the file to parent directory (so that it becomes a pathServer sibling)
-    try {
-      await Node.tar.extract({file: fileServer, cwd: `${pathServer}/..`});
-    }
-    catch (err) {
-      throw new Error(`Error during the ${fileServer} extraction: ${err}`);
-    }
-    //
-    try {
-      // Delete the .tar.gz file
-      await Node.fs.promises.rm(fileServer, {force: true});
-    }
-    catch (err) {
-      throw new Error(`Error delering the file ${fileServer}: ${err}`);
-    }
-    //
-    // If the path on the server existed already, delete old path
-    if (pathExists) {
+      //
+      // Upload the compressed file to the cloud
       try {
-        await Node.fs.promises.rm(`${pathServer}.$$$`, {recursive: true, force: true});
+        await this.upload(fileServer, pathCloud);
       }
       catch (err) {
-        throw new Error(`Error deleting the old folder ${pathServer}.$$$: ${err}`);
+        throw new Error(`Error while uploading the file ${fileServer} to the cloud: ${err}`);
       }
-    }
-  }
-  catch (err) {
-    // Log the error
-    this.logger.log("ERROR", err.message || err, "Archiver.restore");
-    //
-    // Cleanup: Delete the tar.gz if it exists
-    try {
-      await Node.fs.promises.rm(fileServer, {force: true});
-    }
-    catch (err1) {
-      this.logger.log("WARN", `Error while deleting the file ${fileServer}: ${err1}`, "Archiver.restore");
-    }
-    //
-    // Cleanup: If the path existed, try to restore the backup
-    if (pathExists) {
+      //
+      // From here on the backup is already in the cloud: removing the archive is an accessory step,
+      // and a failure must not throw away a backup that succeeded
       try {
-        await Node.fs.promises.access(`${pathServer}.$$$`);
-        //
-        // First, try to remove the potentially corrupted directory
-        try {
-          await Node.fs.promises.rm(pathServer, {recursive: true, force: true});
-        }
-        catch (err1) {
-          this.logger.log("WARN", `Error while deleting the directory ${pathServer}: ${err1}`, "Archiver.restore");
-        }
-        //
-        // Then restore the .$$$ (backup) renaming it back
-        try {
-          await Node.fs.promises.rename(`${pathServer}.$$$`, pathServer);
-        }
-        catch (err1) {
-          this.logger.log("WARN", `Error while restoring backup directory ${pathServer}.$$$: ${err1}`, "Archiver.restore");
-        }
+        await Node.fs.promises.rm(fileServer, {force: true});
       }
-      catch {
-        // The path existed but the .$$$ path does not exist -> there is nothing else to do
+      catch (err) {
+        // ERROR, not WARN: the backup goes on, so this log is the only trace of the archive left on
+        // the disk, as big as the folder it holds
+        this.logger.log("ERROR", `Error removing the file ${fileServer} (remove it manually): ${err}`, "Archiver.backupZip");
       }
     }
-    //
-    // Re-throw the original error
-    throw err;
-  }
-};
-
-
-/**
- * Get list of files in path on gcloud bucket
- * @param {string} path
- * @returns {Promise<string[]>} Array of file names
- */
-Node.Archiver.prototype.getFiles = async function (path)
-{
-  return await new Promise((resolve, reject) => {
-    this.indertBucket.getFiles({prefix: path}, (err, files, nextQuery, apiResponse) => {
-      if (err) {
-        this.logger.log("ERROR", `Error while reading files list from GCloud: ${err}`, "Archiver.getFiles", {path});
-        return reject(new Error(`Error while reading files list from GCloud: ${err}`));
+    catch (err) {
+      this.logger.log("ERROR", err.message || err, "Archiver.backupZip");
+      //
+      // Cleanup: delete the archive being built: it is as big as the folder it holds, and nothing
+      // else collects it
+      try {
+        await Node.fs.promises.rm(fileServer, {force: true});
+      }
+      catch (err1) {
+        this.logger.log("WARN", `Error while deleting the file ${fileServer}: ${err1}`, "Archiver.backupZip");
       }
       //
-      resolve(files.map(file => file.metadata.name));
-    });
-  });
-};
-
-
-/**
- * Delete file in path on gcloud bucket
- * @param {string} path
- */
-Node.Archiver.prototype.deleteFile = async function (path)
-{
-  if (this.indertBucket) {
-    await new Promise((resolve, reject) => {
-      let file = this.indertBucket.file(path);
-      file.delete(err => err ? reject(err) : resolve());
-    });
+      throw err;
+    }
   }
-  else {
-    // Provo a cancellare il file in locale
-    let fs = require("fs-extra");
-    await fs.remove(path);
+
+
+  /**
+   * Removes a directory tree, delegating to the parent when it knows how.
+   * A plain `fs.rm` is not enough for a user folder: it holds the `db` tablespace,
+   * owned by the DB user with restrictive permissions, that the Node process cannot
+   * even traverse (EACCES). Only {@link Node.Server} owns that policy, and the parent
+   * is a {@link Node.Child} when the archiver runs inside a session (see `TW/branch.js`).
+   * @param {String} path - Directory to remove
+   * @throws {Error} If the directory cannot be removed. As in {@link Node.Server#removeDir},
+   * the message always names `path`, so a caller does not have to add that context itself
+   */
+  async removeDir(path)
+  {
+    if (this.parent.removeDir)
+      await this.parent.removeDir(path);
+    else {
+      // Same contract as the parent: fs.rm names the entry deep inside that failed, not the
+      // directory it was asked to remove
+      try {
+        await Node.fs.promises.rm(path, {recursive: true, force: true});
+      }
+      catch (err) {
+        throw new Error(`Error removing the directory ${path}: ${err.message || err}`, {cause: err});
+      }
+    }
   }
-};
 
 
-/**
- * Stores an object in the cloud
- * @param {string} pathCloud
- * @param {object} obj - object to store (as JSON string)
- */
-Node.Archiver.prototype.saveObject = async function (pathCloud, obj)
-{
-  // If the storage se is gcloud
-  if (this.useGCloud()) {
-    let file = this.indertBucket.file(pathCloud);
+  /**
+   * Restores a directory from a tar.gz archive in cloud storage.
+   * Downloads the archive, backs up existing directory if present, and extracts the new content.
+   * Includes automatic rollback on failure to preserve existing data.
+   * Note: the downloaded archive and the temporary backup directory are cleaned up automatically
+   * once the content has been extracted; a failed cleanup is logged but does not fail the restore.
+   * @param {String} pathServer - Local directory path to restore to
+   * @param {String} pathCloud - Source archive path in cloud storage
+   * @param {String} [pathBackup] - Where to park the existing directory while the archive is extracted
+   * (default: a `.$$$` sibling of pathServer). Must be on the same filesystem as pathServer. A caller
+   * whose parent folder is enumerated as a list of live objects passes a path outside it, so that a
+   * failed cleanup cannot leave behind something that reads as one more object
+   * @throws {Error} If download or extraction fails. The error carries `dataOnDisk` when the archive
+   * had been extracted and the rollback did not put the previous content back, so the caller must not
+   * react to the failure by deleting the directory. No step that follows the extraction throws, so
+   * today the flag is always false: it is computed anyway, to keep the contract of a step added there
+   * in the future
+   */
+  async restore(pathServer, pathCloud, pathBackup = `${pathServer}.$$$`)
+  {
+    let fileServer = `${pathServer}.tar.gz`;
+    let extracted = false;
+    let rolledBack = false;
     //
-    // copy the file into the cloud
-    await new Promise((resolve, reject) => {
-      let wsFile = file.createWriteStream({resumable: false});
-      wsFile.on("finish", resolve);
-      wsFile.on("error", err => {
-        this.logger.log("ERROR", `Error uploading the object in GCloud storage (${pathCloud}): ${err}`, "Archiver.saveObject");
-        reject(err);
-      });
+    // Check if the pathServer exists
+    let pathExists = await Node.fs.promises.access(pathServer).then(() => true, err => false);
+    //
+    try {
+      // Download the file from the cloud
+      try {
+        await this.download(pathCloud, fileServer);
+      }
+      catch (err) {
+        throw new Error(`Error downloading the file ${pathCloud} from the cloud: ${err}`);
+      }
       //
-      if (typeof obj === "object")
-        wsFile.write(JSON.stringify(obj));
-      else
-        wsFile.write(obj);
-      //
-      wsFile.end();
-    });
-  }
-  else {
-    let fs = require("fs-extra");
-    await fs.outputFile(pathCloud, typeof obj === "object" ? JSON.stringify(obj) : obj);
-  }
-};
-
-
-/**
- * Restore an object from the cloud
- * @param {string} pathCloud
- * @returns {Promise<object>} The parsed object or throws an error
- */
-Node.Archiver.prototype.readObject = async function (pathCloud)
-{
-  // If the storage se is gcloud
-  let txt = "";
-  if (this.useGCloud()) {
-    await new Promise((resolve, reject) => {
-      let file = this.indertBucket.file(pathCloud);
-      let rsFile = file.createReadStream();
-      rsFile.read();
-      //
-      rsFile.on("data", chunk => txt += chunk);
-      rsFile.on("finish", resolve);
-      rsFile.on("error", err => {
-        this.logger.log("WARN", `Error reading the object from GCloud storage (${pathCloud}): ${err}`, "Archiver.readObject");
-        reject(new Error(`Error reading the object from GCloud storage (${pathCloud}): ${err}`));
-      });
-    });
-  }
-  else {
-    let fs = require("fs-extra");
-    txt = await fs.readFile(pathCloud, "utf8");
-  }
-  //
-  return txt ? JSON.parse(txt) : {};
-};
-
-
-Node.Archiver.prototype.zip = async function (fullPath, options)
-{
-  let outputFile = `${fullPath}.zip`;
-  //
-  try {
-    return new Promise((resolve, reject) => {
-      let output = Node.fs.createWriteStream(outputFile);      
-      let archive = Node.archiver.create("zip");
-      let baseName = Node.path.basename(fullPath);
-      //
-      output.on("close", async () => {
+      // Rename the old path to a temporary one if it exists
+      if (pathExists) {
         try {
-          resolve({fileName : baseName, filePath: outputFile});
+          await Node.fs.promises.rename(pathServer, pathBackup);
         }
         catch (err) {
-          reject(new Error(`Error removing the file ${outputFile}: ${err}`));
+          if (err?.code === "ENOTEMPTY") {
+            // Log the error and attempt cleanup
+            this.logger.log("WARN", `Directory ${pathBackup} not empty, attempting cleanup`, "Archiver.restore");
+            try {
+              // Try to remove the backup directory if it exists
+              await this.removeDir(pathBackup);
+              //
+              // Retry the rename
+              await Node.fs.promises.rename(pathServer, pathBackup);
+              this.logger.log("INFO", `Successfully cleaned up and renamed ${pathServer}`, "Archiver.restore");
+            }
+            catch (cleanupErr) {
+              this.logger.log("ERROR", `Failed to cleanup and rename: ${cleanupErr.message || cleanupErr}`, "Archiver.restore");
+              throw new Error(`Cannot prepare for restore - directory conflicts exist: ${cleanupErr.message || cleanupErr}`);
+            }
+          }
+          else
+            throw new Error(`Error rename the path ${pathServer} to temporary: ${err}`);
         }
-      });
+      }
       //
-      output.on("error", err => reject(new Error(`Error while writing the ZIP file ${outputFile}: ${err}`)));
-      archive.on("error", err => reject(new Error(`Error while compressing the file ${outputFile}: ${err}`)));
+      // Extract the file to parent directory (so that it becomes a pathServer sibling)
+      try {
+        await Node.tar.extract({file: fileServer, cwd: `${pathServer}/..`});
+      }
+      catch (err) {
+        throw new Error(`Error during the ${fileServer} extraction: ${err}`);
+      }
+      extracted = true;
       //
-      archive.pipe(output);
+      // From here on the restored data is already in place: what follows are accessory steps,
+      // and a failure must not throw away a restore that succeeded
+      try {
+        // Delete the .tar.gz file
+        await Node.fs.promises.rm(fileServer, {force: true});
+      }
+      catch (err) {
+        // ERROR, not WARN: the restore goes on, so this log is the only trace of the archive left
+        // on the disk, as big as the folder it holds
+        this.logger.log("ERROR", `Error deleting the file ${fileServer} (remove it manually): ${err}`, "Archiver.restore");
+      }
       //
-      let stats = Node.fs.statSync(fullPath);
+      // If the path on the server existed already, delete old path
+      if (pathExists) {
+        try {
+          await this.removeDir(pathBackup);
+        }
+        catch (err) {
+          // ERROR, not WARN: the restore goes on, so this log is the only trace of a whole
+          // leftover copy of the folder occupying the disk, and what would collect it on its own
+          // may never come: a later restore of the same path, or the deletion of a user folder
+          this.logger.log("ERROR", `Error deleting the old folder (remove it manually): ${err}`, "Archiver.restore");
+        }
+      }
+    }
+    catch (err) {
+      // Log the error
+      this.logger.log("ERROR", err.message || err, "Archiver.restore");
+      //
+      // Cleanup: Delete the tar.gz if it exists
+      try {
+        await Node.fs.promises.rm(fileServer, {force: true});
+      }
+      catch (err1) {
+        this.logger.log("WARN", `Error while deleting the file ${fileServer}: ${err1}`, "Archiver.restore");
+      }
+      //
+      // Cleanup: If the path existed, try to restore the backup
+      if (pathExists) {
+        try {
+          await Node.fs.promises.access(pathBackup);
+          //
+          // First, try to remove the potentially corrupted directory
+          try {
+            await this.removeDir(pathServer);
+          }
+          catch (err1) {
+            this.logger.log("WARN", `Error while deleting the directory: ${err1}`, "Archiver.restore");
+          }
+          //
+          // Then restore the backup renaming it back
+          try {
+            await Node.fs.promises.rename(pathBackup, pathServer);
+            rolledBack = true;
+          }
+          catch (err1) {
+            this.logger.log("WARN", `Error while restoring backup directory ${pathBackup}: ${err1}`, "Archiver.restore");
+          }
+        }
+        catch {
+          // The path existed but the backup path does not exist -> there is nothing else to do
+        }
+      }
+      //
+      // Tell the caller whether the disk holds restored data that must not be thrown away: the
+      // rollback above is best-effort, so only the rename that went through proves the folder is
+      // back to the content it had before the command
+      err.dataOnDisk = extracted && !rolledBack;
+      //
+      // Re-throw the original error
+      throw err;
+    }
+  }
+
+
+  /**
+   * Gets list of files from Google Cloud Storage bucket.
+   * Retrieves all files matching the specified path prefix.
+   * @param {String} path - Path prefix to filter files in the bucket
+   * @returns {Promise<String[]>} Array of file names with their full paths
+   * @throws {Error} If reading from GCloud fails
+   */
+  async getFiles(path)
+  {
+    try {
+      let [files] = await this.indertBucket.getFiles({prefix: path});
+      return files.map(file => file.metadata.name);
+    }
+    catch (err) {
+      this.logger.log("ERROR", `Error while reading files list from GCloud: ${err}`, "Archiver.getFiles", {path});
+      throw new Error(`Error while reading files list from GCloud: ${err}`, {cause: err});
+    }
+  }
+
+
+  /**
+   * Deletes a file from cloud storage or local filesystem.
+   * Handles both Google Cloud Storage and local file deletion.
+   * @param {String} path - File path to delete (cloud storage path or local path)
+   * @throws {Error} If deletion fails
+   */
+  async deleteFile(path)
+  {
+    if (this.indertBucket) {
+      let file = this.indertBucket.file(path);
+      await file.delete();
+    }
+    else {
+      // Try to delete the file from the local filesystem
+      let fs = require("fs-extra");
+      await fs.remove(path);
+    }
+  }
+
+
+  /**
+   * Stores an object in cloud storage or local filesystem as JSON.
+   * Automatically serializes objects to JSON format before saving.
+   * Supports both object and string input types.
+   * @param {String} pathCloud - Destination path in cloud storage or local filesystem
+   * @param {Object|String} obj - Object to store (will be JSON stringified if object)
+   * @throws {Error} If upload or write operation fails
+   */
+  async saveObject(pathCloud, obj)
+  {
+    let data = typeof obj === "object" ? JSON.stringify(obj) : obj;
+    //
+    // If the storage is gcloud
+    if (this.useGCloud()) {
+      try {
+        await this.indertBucket.file(pathCloud).save(data, {resumable: false});
+      }
+      catch (err) {
+        this.logger.log("ERROR", `Error uploading the object in GCloud storage (${pathCloud}): ${err}`, "Archiver.saveObject");
+        throw err;
+      }
+    }
+    else
+      await require("fs-extra").outputFile(pathCloud, data);
+  }
+
+
+  /**
+   * Reads and parses a JSON object from cloud storage or local filesystem.
+   * Automatically deserializes JSON content to JavaScript object.
+   * Returns empty object if content is empty.
+   * @param {String} pathCloud - Source path in cloud storage or local filesystem
+   * @returns {Promise<Object>} The parsed JavaScript object
+   * @throws {Error} If read operation fails or JSON parsing fails
+   */
+  async readObject(pathCloud)
+  {
+    // If the storage is gcloud
+    let txt;
+    if (this.useGCloud()) {
+      try {
+        let [buf] = await this.indertBucket.file(pathCloud).download();
+        txt = buf.toString();
+      }
+      catch (err) {
+        this.logger.log("WARN", `Error reading the object from GCloud storage (${pathCloud}): ${err}`, "Archiver.readObject");
+        let wrapped = new Error(`Error reading the object from GCloud storage (${pathCloud}): ${err}`);
+        //
+        // Normalize the GCS "file not found" to the "ENOENT" code, consistent with local fs.readFile:
+        // the SDK's ApiError exposes the HTTP status in err.code (404 = missing object), so the catch
+        // in Child.exportComponent can recognise the "first export" case (issue #13858)
+        if (err?.code === 404)
+          wrapped.code = "ENOENT";
+        throw wrapped;
+      }
+    }
+    else {
+      let fs = require("fs-extra");
+      txt = await fs.readFile(pathCloud, "utf8");
+    }
+    //
+    return txt ? JSON.parse(txt) : {};
+  }
+
+
+  /**
+   * Creates a ZIP archive from a file or directory.
+   * Supports adding custom suffix to archived file names through options.
+   * @param {String} fullPath - Path to file or directory to compress
+   * @param {Object} [options] - Compression options
+   * @param {String} [options.suffix] - Suffix to add to archived file names
+   * @returns {Promise<Object>} Object with fileName and filePath properties
+   * @throws {Error} If compression fails
+   */
+  async zip(fullPath, options)
+  {
+    let outputFile = `${fullPath}.zip`;
+    //
+    try {
+      let stats = await Node.fs.promises.stat(fullPath);
+      let baseName = Node.path.basename(fullPath);
       let zipElementName = options?.suffix ? baseName + options.suffix : baseName;
+      //
+      let output = Node.fs.createWriteStream(outputFile);
+      let archive = Node.archiver.create("zip");
+      // pipeline resolves when the ZIP is fully written, rejecting on archive/output errors
+      let written = require("stream/promises").pipeline(archive, output);
+      //
       if (stats.isDirectory())
         archive.directory(fullPath, zipElementName);
       else
         archive.file(fullPath, {name: zipElementName});
       archive.finalize();
-    });
+      //
+      await written;
+      return {fileName: baseName, filePath: outputFile};
+    }
+    catch (err) {
+      this.logger.log("ERROR", err.message || err, "Archiver.zip");
+      throw err;
+    }
   }
-  catch (err) {
-    this.logger.log("ERROR", err.message || err, "Archiver.zip");
-    throw err;
-  }
-}
 
 
-/**
- * Extracts a ZIP file to a specified directory
- * @param {string} sourceZipPath - Path to the ZIP file to extract
- * @param {string} destinationDirPath - Directory where the ZIP contents will be extracted
- * @returns {boolean} true if extraction succeeds, false otherwise
- */
-Node.Archiver.prototype.unzip = async function (sourceZipPath, destinationDirPath)
-{
-  let fs = Node.fs;
-  let path = Node.path;
-  let yauzl = require("yauzl");
-  //
-  try {
-    // Ensure the destination directory exists
-    await fs.promises.mkdir(destinationDirPath, {recursive: true});
-    //
-    // Open the ZIP file
-    let openZip = (filePath, options) => {
-      return new Promise((resolve, reject) => {
-        yauzl.open(filePath, options, (err, zipFile) => err ? reject(err) : resolve(zipFile));
-      });
-    };
-    //
-    let zipFile = await openZip(sourceZipPath, {lazyEntries: true});
-    let processEntry = async (entry) => {
-      let entryPath = path.join(destinationDirPath, entry.fileName);
-      //
-      // Normalize the path to prevent malicious relative paths
-      let normalizedPath = path.normalize(entryPath);
-      if (!normalizedPath.startsWith(destinationDirPath))
-        throw new Error(`Attempted extraction outside of directory: ${normalizedPath}`);
-      //
-      if (Node.Utils.isZipEntryDirectory(entry)) {
-        // Entry is a directory
-        await fs.promises.mkdir(normalizedPath, {recursive: true});
-      }
-      else {
-        // Entry is a file
-        await fs.promises.mkdir(path.dirname(normalizedPath), {recursive: true}); // Create parent directory
-        return new Promise((resolve, reject) => {
-          zipFile.openReadStream(entry, (err, readStream) => {
-            if (err)
-              return reject(err);
-            //
-            let writeStream = fs.createWriteStream(normalizedPath);
-            readStream.pipe(writeStream);
-            //
-            readStream.on("end", () => resolve());
-            readStream.on("error", (err) => reject(err));
-            writeStream.on("error", (err) => reject(err));
-          });
-        });
-      }
-    };
-    //
-    // Iterate through entries
-    let readEntries = () => {
-      return new Promise((resolve, reject) => {
-        zipFile.readEntry();
-        zipFile.on("entry", async (entry) => {
-          try {
-            await processEntry(entry);
-            zipFile.readEntry(); // Read next entry
-          }
-          catch (err) {
-            reject(err);
-          }
-        });
-        zipFile.on("end", resolve); // Completion
-        zipFile.on("error", reject); // Errors
-      });
-    };
-    //
-    await readEntries();
-    zipFile.close();
-    //
-    return true;
-  }
-  catch (err) {
-    this.logger.log("ERROR", err.message || err, "Archiver.unzip");
-    return false;
+  /**
+   * Extracts a ZIP file to a specified directory.
+   * Uses the framework's secure extraction utility with path traversal protection.
+   * @param {String} sourceZipPath - Path to the ZIP file to extract
+   * @param {String} destinationDirPath - Directory where the ZIP contents will be extracted
+   * @returns {Promise<Boolean>} true if extraction succeeds, false otherwise
+   */
+  async unzip(sourceZipPath, destinationDirPath)
+  {
+    try {
+      // Use the common utility function with security check enabled
+      await Node.Utils.extractZip(sourceZipPath, destinationDirPath, {checkPathSecurity: true});
+      return true;
+    }
+    catch (err) {
+      this.logger.log("ERROR", err.message || err, "Archiver.unzip");
+      return false;
+    }
   }
 };
 

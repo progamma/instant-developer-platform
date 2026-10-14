@@ -6,597 +6,496 @@
 var Node = Node || {};
 
 // Import modules
-Node.zlib = require("zlib");
-Node.cookie = require("cookie");
 Node.fs = require("fs");
 Node.path = require("path");
+Node.cookie = require("cookie");
 
 // Import Classes
-Node.AppClient = require("./appclient");
 Node.Utils = require("../utils");
+Node.AppClient = require("./appclient");
+Node.Session = require("../session");
 
 
 /**
- * @Class represent an Instan Developer session
- * @param {Node.Worker} par
+ * @class Node.AppSession
+ * @classdesc
+ * Represents an Instant Developer application session running inside a
+ * {@link Node.Worker}. A session groups one or more {@link Node.AppClient}s
+ * (browser tabs, invited slaves, REST callers) that share the same child
+ * process and communicates with it through the worker's IPC channel.
+ *
+ * Key features:
+ * - **Lifecycle**: handles master/slave client deletion, triggers child-side
+ *   session teardown, terminates orphan sessions, and schedules auto-death
+ *   for "pure" REST sessions.
+ * - **Test automation sniffing**: overrides the I/O path to feed recorded
+ *   messages to the matching {@link Node.TestAuto} (if the session is being
+ *   recorded/replayed).
+ * - **DTT channel**: optional Device Test socket used by the IDE to preview
+ *   live events; supports message caching until the socket is attached.
+ * - **Secure SID**: on top of the base SID validation, accepts "unsecured"
+ *   connections started via the `ADDSID` query parameter when there are no
+ *   cookies at all.
+ *
+ * @extends Node.Session
+ * @property {Node.Worker} parent - Parent worker
+ * @property {Date} created - Creation timestamp
+ * @property {String} [testAutoId] - Identifier of the test-auto run bound to this session (if any)
+ * @property {Node.AppClient[]} appClients - Clients currently attached to the session
+ * @property {Node.AppClient} [masterAppClient] - Master client of the session, if one has been elected
+ * @property {Object} [killClient] - `setTimeout` handle for REST auto-kill
+ * @property {Number} [sessionTimeout] - Override for the REST auto-kill timeout (ms)
+ * @property {String} [sessionName] - Optional human-readable name set by the running app
+ * @property {Socket} [syncSocket] - Socket used when this session is a sync session
+ * @property {Socket} [dttSocket] - Active DTT socket, when DTT is enabled for this session
+ * @property {Object[]} [dttCachedMessages] - DTT messages buffered before the DTT socket is attached
  */
-Node.AppSession = function (par)
+Node.AppSession = class AppSession extends Node.Session
 {
-  this.parent = par;
-  this.created = new Date();
-  //
-  // New SessionID
-  this.id = Node.Utils.generateUID36();
-  //
-  // List of client tokens (tele-collaboration)
-  this.cTokens = [];
-  //
-  // Array of AppClients (clients connected with this session)
-  this.appClients = [];
-};
+  /**
+   * Map of IPC message types exchanged with the worker's child process.
+   * @enum {String}
+   */
+  static msgTypeMap = {
+    /** Application-level message routed between child and client app.js */
+    appmsg: "appmsg",
+    /** Tells the child process to tear down the app session identified by `sid` */
+    deleteChildAppSession: "dcas"
+  };
 
 
-Node.AppSession.msgTypeMap = {
-  appmsg: "appmsg",
-  deleteChildAppSession: "dcas"
-};
+  /**
+   * @param {Node.Worker} par - Parent worker that owns this session
+   */
+  constructor(par)
+  {
+    // Call base constructor
+    super();
+    //
+    this.parent = par;
+    this.created = new Date();
+  }
 
 
-// Define usefull properties for this object
-Object.defineProperties(Node.AppSession.prototype, {
-  worker: {
-    get: function () {
-      return this.parent;
-    }
-  },
-  app: {
-    get: function () {
-      return this.worker.app;
-    }
-  },
-  config: {
-    get: function () {
-      return this.worker.config;
-    }
-  },
-  logger: {
-    get: function () {
-      return this.worker.logger;
+  /**
+   * Gets the owning worker (alias of `parent`).
+   * @type {Node.Worker}
+   * @readonly
+   */
+  get worker()
+  {
+    return this.parent;
+  }
+
+
+  /**
+   * Gets the app this session belongs to.
+   * @type {Node.App}
+   * @readonly
+   */
+  get app()
+  {
+    return this.worker.app;
+  }
+
+
+  /**
+   * Gets the configuration shared through the worker.
+   * @type {Node.Config}
+   * @readonly
+   */
+  get config()
+  {
+    return this.worker.config;
+  }
+
+
+  /**
+   * Gets the server instance.
+   * @type {Node.Server}
+   * @readonly
+   */
+  get server()
+  {
+    return this.config.server;
+  }
+
+
+  /**
+   * Gets the shared logger instance.
+   * @type {Node.Logger}
+   * @readonly
+   */
+  get logger()
+  {
+    return this.worker.logger;
+  }
+
+
+  /**
+   * Returns the object used as target when logging messages from this session
+   * (the owning app). Implements the abstract hook defined by {@link Node.Session}.
+   * @returns {Node.App} The app that owns this session
+   * @override
+   */
+  getLogTarget()
+  {
+    return this.app;
+  }
+
+
+  /**
+   * Forwards an inbound/outbound message to the matching {@link Node.TestAuto}
+   * so it can be recorded (record mode) or compared against the expected stream
+   * (replay mode). When the test-auto has a child bound to this session id, the
+   * child is used in place of the parent.
+   * @param {Object} msg - Message being routed
+   * @param {Boolean} fromClient - `true` if the message flows client → server, `false` if server → client
+   * @private
+   */
+  sniffTestMessage(msg, fromClient)
+  {
+    let testAuto = this.app.getTestById(this.testAutoId);
+    if (testAuto && msg.content) {
+      let child = testAuto.getChildBySID(this.id);
+      testAuto = child || testAuto;
+      testAuto.sniff(msg.content, fromClient);
     }
   }
-});
 
 
-/**
- * Log a new message
- * @param {string} level - message level (DEBUG, INFO, WARN, ERROR)
- * @param {string} message - text message
- * @param {string} sender - function that generated the message
- * @param {object} data - optional data to log
- */
-Node.AppSession.prototype.log = function (level, message, sender, data)
-{
-  // Add "local" info
-  data = (data ? JSON.parse(JSON.stringify(data)) : {});
-  data.sid = this.id;
-  //
-  this.app.log(level, message, sender, data);
-};
-
-
-/*
- * Send a message to the worker's child process
- * @param {object} msg - message to send
- */
-Node.AppSession.prototype.sendToChild = function (msg)
-{
-  this.worker.sendToChild(msg);
-  //
-  // Sniff messages from client
-  let  testAuto = this.app.getTestById(this.testAutoId);
-  if (testAuto && msg.content) {
-    let  child = testAuto.getChildBySID(this.id);
-    testAuto = child || testAuto;
-    testAuto.sniff(msg.content, true);
+  /**
+   * Sends a message to the worker's child process and feeds it to the
+   * test-auto sniffer as a client-originated event.
+   * @param {Object} msg - Message to send to the child
+   */
+  sendToChild(msg)
+  {
+    this.worker.sendToChild(msg);
+    //
+    // Sniff messages from client
+    this.sniffTestMessage(msg, true);
   }
-};
 
 
-/**
- * Opens a connection, save the socket on the array, redirect all the socket messages received from
- * the client to the child
- * @param {socket} socket
- * @param {Object} msg
- */
-Node.AppSession.prototype.openSyncConnection = function (socket, msg)
-{
-  this.syncSocket = socket;
-  socket.on("disconnect", () => {
+  /**
+   * Returns the SID payload used when signalling a sync disconnect to the
+   * server counterpart. Implements the abstract hook defined by
+   * {@link Node.Session}.
+   * @returns {Object} `{sidsrv}` identifying this session as the server side
+   * @override
+   */
+  getSyncDisconnectSid()
+  {
+    return {
+      sidsrv: this.id
+    };
+  }
+
+
+  /**
+   * Delegates to the base implementation to deliver a message to an online app,
+   * then feeds the message to the test-auto sniffer as a server-originated event.
+   * @param {Object} msg - Message to deliver to the client
+   * @override
+   */
+  sendMessageToClientApp(msg)
+  {
+    super.sendMessageToClientApp(msg);
+    //
+    // Sniff messages to client
+    this.sniffTestMessage(msg, false);
+  }
+
+
+  /**
+   * Starts the app in REST mode: stores the request/response via the base
+   * implementation, spawns the worker's child process if it wasn't started
+   * yet, dispatches the initial `appmsg` carrying request and cookies, and
+   * arms the REST auto-kill timer.
+   * @param {Request} req - HTTP request that triggered the REST call
+   * @param {Response} res - HTTP response used to return the reply
+   * @override
+   */
+  startRest(req, res)
+  {
+    // Call base implementation to store req/res
+    super.startRest(req, res);
+    //
+    // If I haven't done it yet create the physical process for the worker
+    if (!this.worker.child)
+      this.worker.createChild();
+    //
     this.sendToChild({
-      type: "sync",
-      sid: {
-        sidsrv: this.id
-      },
-      cnt: {
-        id: "disconnect"
-      }
+      type: Node.AppSession.msgTypeMap.appmsg,
+      sid: this.id,
+      request: this.request,
+      cookies: this.cookies
     });
-    delete this.syncSocket;
-  });
-};
-
-
-/**
- * Sends a message to an online app
- * @param {object} msg
- */
-Node.AppSession.prototype.sendMessageToClientApp = function (msg)
-{
-  for (let i = 0; i < this.appClients.length; i++) {
-    let acli = this.appClients[i];
     //
-    let send;
-    if (!msg.cidr)
-      send = true;      // No CIDR -> send message to every app client
-    else {
-      // CIDR is there... check if I need to send the message to this client
-      if (msg.cide)
-        send = (acli.id === msg.cidr);    // If CIDE -> send the message only to the client that sent the message
-      else
-        send = (acli.id !== msg.cidr);    // If no CIDE -> send the message to all others but the one that sent the message
+    // Schedule session death
+    this.scheduleRESTDeath();
+  }
+
+
+  /**
+   * Returns the class used to instantiate new app clients for this session.
+   * Implements the abstract hook defined by {@link Node.Session}.
+   * @returns {Function} The {@link Node.AppClient} constructor
+   * @override
+   */
+  getAppClientClass()
+  {
+    return Node.AppClient;
+  }
+
+
+  /**
+   * Removes an app client from the session.
+   *
+   * When the removed client was the master (or no master was set), the child
+   * process is told to tear down the session, every remaining slave is closed,
+   * and the worker is asked to delete the session. For a slave client, the
+   * method just logs and leaves the session alive.
+   *
+   * If `neverAck` is truthy and the initial request carried uploaded files,
+   * those files are removed from the `apps/<app>/files` folder — the app never
+   * had a chance to consume them, and they should not linger on disk.
+   * @param {Node.AppClient} appClient - Client to remove
+   * @param {Boolean} [neverAck] - `true` if the client never completed its first round-trip (see {@link Node.AppClient#init})
+   */
+  deleteAppClient(appClient, neverAck)
+  {
+    // Delete the app client from the array
+    let idx = this.appClients.indexOf(appClient);
+    this.appClients.splice(idx, 1);
+    //
+    // If this session has no master client or the master client has been deleted -> ask the worker to delete the session
+    if (!this.masterAppClient || this.masterAppClient === appClient) {
+      this.log("DEBUG", "Terminated MASTER client from session", "AppSession.deleteAppClient", {cid: appClient.id});
+      //
+      this.sendToChild({
+        type: Node.AppSession.msgTypeMap.deleteChildAppSession,
+        sid: this.id
+      });
+      //
+      // Disconnect all other clients (if any)
+      this.log("DEBUG", "Terminate all remaining app clients for this session", "AppSession.deleteAppClient");
+      //
+      for (let i = 0; i < this.appClients.length; i++)
+        this.appClients[i].close();
+      //
+      // Ask the worker to terminate this session
+      this.worker.deleteSession(this);
     }
-    if (send)
-      acli.sendAppMessage(msg);
-  }
-  //
-  // Sniff messages to client
-  let testAuto = this.app.getTestById(this.testAutoId);
-  if (testAuto && msg.content) {
-    let child = testAuto.getChildBySID(this.id);
-    testAuto = child || testAuto;
-    testAuto.sniff(msg.content, false);
-  }
-};
-
-
-/**
- * Start the app in rest mode
- * @param {request} req
- * @param {response} res
- */
-Node.AppSession.prototype.startRest = function (req, res)
-{
-  // Store the request/response objects so that the app can use them
-  // (for instance, the app can answer to a REST request using the .restRes property and the app::sendResponse method)
-  this.restReq = req;
-  this.restRes = res;
-  //
-  // If I haven't done it yet create the physical process for the worker
-  if (!this.worker.child)
-    this.worker.createChild();
-  //
-  this.sendToChild({type: Node.AppSession.msgTypeMap.appmsg, sid: this.id,
-    request: this.request, cookies: this.cookies});
-  //
-  // Schedule session death
-  this.scheduleRESTDeath();
-};
-
-
-/**
- * Create a new app client (called by server's config)
- * @param {Node.Request} req
- * @param {Node.Response} res
- */
-Node.AppSession.prototype.createAppClient = function (req, res)
-{
-  // Create a new app client
-  let appClient = new Node.AppClient(this);
-  //
-  // If the CID of the new client has been already computed, use it here (see Config::processRun)
-  if (this.newCid) {
-    appClient.id = this.newCid;
-    delete this.newCid;
-  }
-  //
-  // Add it to the app clients array
-  this.appClients.push(appClient);
-  //
-  // Log client creationg
-  this.log("DEBUG", "Created a new app client", "AppSession.createAppClient", {cid: appClient.id});
-  //
-  // Initialize the new app client
-  appClient.init(req, res);
-  //
-  return appClient;
-};
-
-
-/**
- * Delete an appClient
- * @param {appClient} appClient
- * @param {bool} neverAck - indicates if the client ever connected (see AppClient::Init)
- */
-Node.AppSession.prototype.deleteAppClient = function (appClient, neverAck)
-{
-  // Delete the app client from the array
-  let idx = this.appClients.indexOf(appClient);
-  this.appClients.splice(idx, 1);
-  //
-  // If this session has no master client or the master client has been deleted -> ask the worker to delete the session
-  if (!this.masterAppClient || this.masterAppClient === appClient) {
-    this.log("DEBUG", "Terminated MASTER client from session", "AppSession.deleteAppClient", {cid: appClient.id});
+    else
+      this.log("DEBUG", `Terminated SLAVE client ${idx} from session`, "AppSession.deleteAppClient");
     //
-    this.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: this.id});
+    // If the client never acknowleged and there are uploaded files -> delete them
+    // (app never responded and I don't want those files to sit on my HD forever)
+    if (neverAck && this.request.files) {
+      this.request.files.forEach(f => {
+        let fp = Node.path.join(this.config.appDirectory, "apps", this.app.name, "files", f.path);
+        Node.fs.rm(fp, {force: true}, err => {
+          if (err)
+            this.log("WARN", `Can't delete file ${fp}: ${err}`, "AppSession.deleteAppClient");
+        });
+      });
+    }
+  }
+
+
+  /**
+   * Terminates the session. Cancels the REST auto-kill timer if any, then:
+   * - if the session has no clients, disconnects the sync socket (when present)
+   *   and asks the worker to delete the session;
+   * - otherwise closes every attached client, which in turn will trigger the
+   *   normal disconnect flow leading to deletion.
+   */
+  terminate()
+  {
+    // Stop REST autokill timer
+    if (this.killClient) {
+      this.log("DEBUG", "Stop REST auto-kill timer", "AppSession.terminate");
+      clearTimeout(this.killClient);
+    }
     //
-    // Disconnect all other clients (if any)
-    this.log("DEBUG", "Terminate all remaining app clients for this session", "AppSession.deleteAppClient");
+    // If this session have no clients, terminate it
+    if (!this.appClients.length) {
+      if (this.syncSocket) {
+        this.log("DEBUG", "Sync session -> disconnect socket", "AppSession.terminate");
+        this.syncSocket.disconnect();
+      }
+      //
+      this.log("DEBUG", "Session has no clients -> terminate", "AppSession.terminate");
+      this.worker.deleteSession(this);
+      return;
+    }
+    //
+    // This session has clients -> close them
+    this.log("DEBUG", "Terminate all app clients", "AppSession.terminate");
     //
     for (let i = 0; i < this.appClients.length; i++)
       this.appClients[i].close();
-    //
-    // Ask the worker to terminate this session
-    this.worker.deleteSession(this);
   }
-  else
-    this.log("DEBUG", `Terminated SLAVE client ${idx} from session`, "AppSession.deleteAppClient");
-  //
-  // If the client never acknowleged and there are uploaded files -> delete them
-  // (app never responded and I don't want those files to sit on my HD forever)
-  if (neverAck && this.request.files) {
-    this.request.files.forEach(f => {
-      let fp = Node.path.join(this.config.appDirectory, "apps", this.app.name, "files", f.path);
-      Node.fs.rm(fp, {force: true}, err => {
-        if (err)
-          this.log("WARN", `Can't delete file ${fp}: ${err}`, "AppSession.deleteAppClient");
-      });
-    });
-  }
-};
 
 
-/**
- * Terminate this session
- */
-Node.AppSession.prototype.terminate = function ()
-{
-  // Stop REST autokill timer
-  if (this.killClient) {
-    this.log("DEBUG", "Stop REST auto-kill timer", "AppSession.terminate");
-    clearTimeout(this.killClient);
-  }
-  //
-  // If this session have no clients, terminate it
-  if (!this.appClients.length) {
-    if (this.syncSocket) {
-      this.log("DEBUG", "Sync session -> disconnect socket", "AppSession.terminate");
-      this.syncSocket.disconnect();
+  /**
+   * Checks whether the incoming socket carries an invalid SID (i.e. the
+   * `secureSID` cookie does not match the expected value). Adds an extra
+   * allowance on top of the base implementation: if the client was started
+   * "unsecured" via the `ADDSID` query parameter and the socket has no cookies
+   * at all, the connection is accepted (used by clients that can't share cookies).
+   * @param {Socket} socket - Incoming Socket.IO socket
+   * @param {Node.AppClient} client - App client attempting to connect
+   * @returns {Boolean} `true` if the SID is invalid and the socket must be rejected
+   * @override
+   */
+  invalidSID(socket, client)
+  {
+    // If there are no cookies and this session was started "unsecured" (see appclient::init)
+    if (!socket.request.headers.cookie && client.startUnsecured) {
+      this.log("INFO", "Missing cookies with ADDSID -> 'unsecure' connection accepted", "AppSession.invalidSID");
+      return false;
     }
     //
-    this.log("DEBUG", "Session has no clients -> terminate", "AppSession.terminate");
-    this.worker.deleteSession(this);
-    return;
+    return super.invalidSID(socket);
   }
-  //
-  // This session has clients -> close them
-  this.log("DEBUG", "Terminate all app clients", "AppSession.terminate");
-  //
-  for (let i = 0; i < this.appClients.length; i++)
-    this.appClients[i].close();
-};
 
 
-/**
- * Protects the SID
- * Adds a cookie to the given request in order to protect my SID
- * @param {HTTPRequest} req
- * @param {HTTPResponse} res
- */
-Node.AppSession.prototype.protectSID = function (req, res)
-{
-  // Add another HTTP-only cookie that will "protect" the SID/CID cookie
-  this.secureSID = this.secureSID || Node.Utils.generateUID36();     // Update (ex: file upload on an existing session)
-  let cookieOpt = {path: "/", httpOnly: true};
-  //
-  // If I'm working "securely"
-  let secure = (!this.config.local && this.config.protocol === "https");
-  if (secure) {
-    cookieOpt.secure = true;
-    cookieOpt.sameSite = "none";  // Allow embedding the app in an IFRAME
-  }
-  res.cookie(`${this.id}_secureSID`, this.secureSID, cookieOpt);
-  //
-  // Remove old _secureSID cookies
-  // (for every cookie there have to be a valid IDE/APP session...
-  // if such session is not there the corresponding cookie is old and useles)
-  let cookies = Node.cookie.parse(req.headers.cookie || "{}");
-  Object.keys(cookies).forEach(key => {
-    if (!key.endsWith("_secureSID"))
+  /**
+   * Arms (or re-arms) the auto-kill timer for a "pure" REST session — one that
+   * has no MASTER client and therefore would never be torn down by a client
+   * disconnect. When the timer fires, a pending REST request (if any) is closed
+   * with a timeout reply via {@link Node.Session#sendRESTTimeout} and the child
+   * process is told to delete the session. If the session has a master client it
+   * is not a pure REST session and the method is a no-op. Calling the method
+   * again resets the timer so repeated REST calls extend the session's life.
+   */
+  scheduleRESTDeath()
+  {
+    // If this session has a valid MASTER client it means that this is not a "pure" REST
+    // but it a "true" session that received a "REST" command (like an image upload for instance)
+    // In this case do nothing... session will die when the client disconnects (see appclient::init)
+    if (this.masterAppClient)
       return;
     //
-    let sid = key.substring(0, key.length - "_secureSID".length);
-    let session = (this.config.server.IDESessions[sid] || this.config.server.appSessions[sid]);
-    if (!session) {
-      this.log("DEBUG", `Remove OLD cookie ${key}`, "AppSession.protectSID");
-      res.clearCookie(key);
-    }
-  });
-};
-
-
-/**
- * Checks if the SID is invalid (i.e. secureSID cookie is not the expected one)
- * @param {Socket} socket
- * @param {AppClient} client
- */
-Node.AppSession.prototype.invalidSID = function (socket, client)
-{
-  // If there are no cookies and this session was started "unsecured" (see appclient::init)
-  if (!socket.request.headers.cookie && client.startUnsecured) {
-    this.log("INFO", "Missing cookies with ADDSID -> 'unsecure' connection accepted", "AppSession.invalidSID");
-    return false;
-  }
-  //
-  let secureSID = Node.cookie.parse(socket.request.headers.cookie || "{}")[`${this.id}_secureSID`];
-  if (secureSID !== this.secureSID) {
-    this.log("WARN", "Secure SID does not match", "AppSession.invalidSID",
-            {expectedSecureSID: this.secureSID, secureSID});
-    return true;
-  }
-};
-
-
-/**
- * Program an automatic timer that will kill this REST session
- */
-Node.AppSession.prototype.scheduleRESTDeath = function ()
-{
-  // If this session has a valid MASTER client it means that this is not a "pure" REST
-  // but it a "true" session that received a "REST" command (like an image upload for instance)
-  // In this case do nothing... session will die when the client disconnects (see appclient::init)
-  if (this.masterAppClient)
-    return;
-  //
-  // This is a "pure" REST session -> prepare a timer that will automatically kill this session
-  // If this REST session has been used more than once... procrastinate timer
-  if (this.killClient)
-    clearTimeout(this.killClient);
-  //
-  // Compute new timeout
-  let sessTimeout = this.sessionTimeout || 60000;
-  this.killClient = setTimeout(() => {
-    this.log("DEBUG", `REST session did not send a reply within ${sessTimeout / 1000} sec -> deleted`, "AppSession.scheduleRESTDeath");
+    // This is a "pure" REST session -> prepare a timer that will automatically kill this session
+    // If this REST session has been used more than once... procrastinate timer
+    if (this.killClient)
+      clearTimeout(this.killClient);
     //
-    // Timer expired
-    delete this.killClient;
-    //
-    // Ask the worker to terminate this session
-    this.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: this.id});
-  }, sessTimeout);
-};
-
-
-/**
- * A running app wants to change a session parameter
- * @param {object} params
- */
-Node.AppSession.prototype.handleSessionParams = function (params)
-{
-  this.log("DEBUG", "Session params changed for session", "AppSession.handleSessionParams", params);
-  //
-  // If param is session timeout
-  if (params.sessionTimeout !== undefined) {
-    // Change session timeout
-    this.sessionTimeout = params.sessionTimeout;
-    //
-    // If this session is a "pure" REST session... I need to "re-schedule" my death
-    this.scheduleRESTDeath();
-  }
-  else if (params.sessionName !== undefined)    // Session name
-    this.sessionName = params.sessionName;
-};
-
-
-/**
- * Handles a CToken operation for this session
- * @param {object} msg
- */
-Node.AppSession.prototype.handleCTokenOpMsg = function (msg)
-{
-  let ctidx = this.cTokens.indexOf(msg.cnt.ctoken);
-  if (msg.cnt.op === "add" && ctidx === -1)
-    this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
-  else if (msg.cnt.op === "del" && ctidx !== -1)
-    this.cTokens.splice(ctidx, 1);  // Add the ctoken to the array (if not there already)
-};
-
-
-/**
- * Handles a send response message
- * Supports both batch and streaming responses
- * @param {object} msg - {code, text, options}
- */
-Node.AppSession.prototype.handleSendResponseMsg = function (msg)
-{
-  if (!this.restRes)
-    return this.log("WARN", "Can't send REST response: Response object not found (was this a REST request?)",
-            "AppSession.handleSendResponseMsg", msg);
-  //
-  // STREAMING MODE - START
-  if (msg.options.stream === "start") {
-    try {
-      // Prepare headers
-      let headers = Object.assign({
-        "Content-Type": "text/plain; charset=utf-8",
-        "Transfer-Encoding": "chunked",
-        "Cache-Control": "no-cache",
-        "Connection": "keep-alive"
-      }, msg.options.headers || {});
+    // Compute new timeout
+    let sessTimeout = this.sessionTimeout || 60000;
+    this.killClient = setTimeout(() => {
+      this.log("DEBUG", `REST session did not send a reply within ${sessTimeout / 1000} sec -> deleted`, "AppSession.scheduleRESTDeath");
       //
-      // Start streaming
-      this.restRes.writeHead(msg.code, headers);
+      // Timer expired
+      delete this.killClient;
       //
-      // Reset REST death timer - if streaming blocks, session will be cleaned after 60s
+      // The session is about to be deleted: if the caller is still waiting for a reply nobody would
+      // ever answer it -> close the request with an explicit timeout instead of leaving it hanging
+      this.sendRESTTimeout(sessTimeout);
+      //
+      // Ask the worker to terminate this session
+      this.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: this.id});
+    }, sessTimeout);
+  }
+
+
+  /**
+   * Applies a session-parameter change requested by the running app.
+   * Currently supports:
+   * - `sessionTimeout`: updates the REST auto-kill timeout and re-arms the
+   *   timer via {@link Node.AppSession#scheduleRESTDeath};
+   * - `sessionName`: updates the human-readable session name.
+   * @param {Object} params - Parameter bag (`{sessionTimeout?, sessionName?}`)
+   */
+  handleSessionParams(params)
+  {
+    this.log("DEBUG", "Session params changed for session", "AppSession.handleSessionParams", params);
+    //
+    // If param is session timeout
+    if (params.sessionTimeout !== undefined) {
+      // Change session timeout
+      this.sessionTimeout = params.sessionTimeout;
+      //
+      // If this session is a "pure" REST session... I need to "re-schedule" my death
       this.scheduleRESTDeath();
     }
-    catch (ex) {
-      this.log("WARN", "Can't start streaming: " + ex, "AppSession.handleSendResponseMsg", msg);
-    }
-    return;
+    else if (params.sessionName !== undefined)    // Session name
+      this.sessionName = params.sessionName;
+    else if (params.killClientGrace !== undefined)    // OIDC redirect login: extend/restore the post-disconnect kill grace (0 = back to default)
+      this.killClientGrace = params.killClientGrace || undefined;
   }
-  //
-  // STREAMING MODE - CHUNK
-  if (msg.options.stream === "chunk") {
-    try {
-      let chunk = msg.text;
-      //
-      // Handle buffer chunks
-      if (msg.options.type === "buffer")
-        chunk = Buffer.from(chunk, "base64");
-      else if (typeof chunk !== "string")
-        chunk = JSON.stringify(chunk);
-      //
-      this.restRes.write(chunk);
-      //
-      // Reset REST death timer on every chunk - keeps session alive while chunks arrive
-      this.scheduleRESTDeath();
-    }
-    catch (ex) {
-      this.log("WARN", "Can't send chunk: " + ex, "AppSession.handleSendResponseMsg", msg);
-    }
-    return;
-  }
-  //
-  // STREAMING MODE - END
-  if (msg.options.stream === "end") {
-    try {
-      this.restRes.end();
-    }
-    catch (ex) {
-      this.log("WARN", "Can't end stream: " + ex, "AppSession.handleSendResponseMsg", msg);
-    }
-    //
-    // Session termination will happen in child process (app.js) after sendResponse with stream:"end"
-    // REST death timer will be automatically canceled during termination
-    return;
-  }
-  //
-  // BATCH MODE (existing code)
-  //
-  this.log("DEBUG", "Send REST response", "AppSession.handleSendResponseMsg", msg);
-  //
-  // Handle options, if any
-  if (typeof msg.code === "string")
-    msg.code = parseInt(msg.code);      // Change code to INT if needed
-  if (!msg.code || msg.code < 100 || msg.code >= 600)
-    msg.code = 500;              // Don't send an invalid value (server crashes!!!)
-  //
-  // Handle some default content-type
-  if (!msg.options.contentType) {
-    if (typeof msg.text === "string")
-      msg.options.contentType = "text/plain; charset=utf-8";
-    else if (!msg.options.type && msg.text && typeof msg.text === "object")
-      msg.options.contentType = "application/json";
-  }
-  //
-  // Handle content-type
-  if (msg.options.contentType) {
-    msg.options.headers = msg.options.headers || {};
-    msg.options.headers["Content-Type"] = msg.options.contentType;
-  }
-  //
-  try {
-    // Send headers
-    if (msg.options.headers && typeof msg.options.headers === "object") {
-      Object.keys(msg.options.headers).forEach(header => {
-        this.restRes.setHeader(header, msg.options.headers[header]);
-      });
-    }
-    //
-    // Send code
-    this.restRes.status(msg.code);
-    //
-    // Send response
-    if (msg.options.type === "buffer")
-      this.restRes.end(Buffer.from(msg.text, "base64"));
-    else if (msg.options.type === "file")
-      this.restRes.sendFile(msg.text);
-    else
-      this.restRes.end(typeof msg.text !== "string" ? JSON.stringify(msg.text) : msg.text);
-  }
-  catch (ex) {
-    this.log("WARN", `Can't send REST response: ${ex}`, "AppSession.handleSendResponseMsg", msg);
-  }
-};
 
 
-/**
- * Opens a connection, save the socket on the array, redirect all the socket messages received from
- * the client to the child
- * @param {socket} socket
- * @param {Object} msg
- */
-Node.AppSession.prototype.openDttConnection = function (socket, msg)
-{
-  this.dttSocket = socket;
-  //
-  socket.on("disconnect", () => {
-    this.log("DEBUG", "DTT socket disconnected", "AppSession.openDttConnection");
+  /**
+   * Attaches a DTT (Developer Tracing Tool) socket to this session.
+   * The method stores the socket, enables DTT on this session — which also
+   * disables it on every other session of the same app — and flushes any
+   * messages that were buffered in `dttCachedMessages` while waiting for the
+   * socket. On socket disconnect the binding is cleared and DTT is globally
+   * disabled for the app.
+   * @param {Socket} socket - Socket opened by the IDE to receive DTT events
+   * @param {Object} msg - Opening payload (carries `sid` used to enable DTT)
+   */
+  openDttConnection(socket, msg)
+  {
+    this.dttSocket = socket;
     //
-    // Forget about the DTT socket
-    delete this.dttSocket;
-    //
-    // Disable DTT for all sessions
-    this.app.handleChangedAppParamMsg({par: "enableDtt"}, true);
-  });
-  //
-  // Enable DTT for this session (and disable DTT for every other session)
-  this.app.handleChangedAppParamMsg({par: "enableDtt", new : msg.sid}, true);
-  //
-  // If I already have cached one or more DTT messages it's the right time to send them (now that I've the socket)
-  if (this.dttCachedMessages) {
-    this.dttCachedMessages.forEach(m => {
-      this.dttSocket.emit("dtt", m.content);
+    socket.on("disconnect", () => {
+      this.log("DEBUG", "DTT socket disconnected", "AppSession.openDttConnection");
+      //
+      // Forget about the DTT socket
+      delete this.dttSocket;
+      //
+      // Disable DTT for all sessions
+      this.app.handleChangedAppParamMsg({par: "enableDtt"}, true);
     });
     //
-    delete this.dttCachedMessages;
+    // Enable DTT for this session (and disable DTT for every other session)
+    this.app.handleChangedAppParamMsg({par: "enableDtt", new: msg.sid}, true);
+    //
+    // If I already have cached one or more DTT messages it's the right time to send them (now that I've the socket)
+    if (this.dttCachedMessages) {
+      this.dttCachedMessages.forEach(m => {
+        this.dttSocket.emit("dtt", m.content);
+      });
+      //
+      delete this.dttCachedMessages;
+    }
   }
-};
 
 
-/**
- * Sends a DTT message to an IDE client
- * @param {object} msg
- */
-Node.AppSession.prototype.sendDttMessage = function (msg)
-{
-  // If there is a socket, use it
-  if (this.dttSocket)
-    return this.dttSocket.emit("dtt", msg.content);
-  //
-  // No socket... Cache messages... when socket will be available I'll send them
-  this.log("WARN", "No socket connected -> DTT message cached", "AppSession.sendDttMessage");
-  this.dttCachedMessages = this.dttCachedMessages || [];
-  this.dttCachedMessages.push(msg);
-};
+  /**
+   * Sends a DTT message to the attached IDE client. If the DTT socket is not
+   * attached yet, the message is buffered in `dttCachedMessages` and flushed
+   * later by {@link Node.AppSession#openDttConnection}.
+   * @param {Object} msg - DTT message (`{content, ...}`)
+   */
+  sendDttMessage(msg)
+  {
+    // If there is a socket, use it
+    if (this.dttSocket)
+      return this.dttSocket.emit("dtt", msg.content);
+    //
+    // No socket... Cache messages... when socket will be available I'll send them
+    this.log("WARN", "No socket connected -> DTT message cached", "AppSession.sendDttMessage");
+    this.dttCachedMessages = this.dttCachedMessages || [];
+    this.dttCachedMessages.push(msg);
+  }
 
 
-/**
- * Search an app client by its ID
- * @param {string} id
- */
-Node.AppSession.prototype.getAppClientById = function (id)
-{
-  return this.appClients.find(acli => acli.id === id);
-};
-
-
-/**
- * Return the number of active sockets (i.e. number of connected clients)
- */
-Node.AppSession.prototype.countClients = function ()
-{
-  return this.appClients.length;
+  /**
+   * Returns the number of clients currently attached to this session
+   * (i.e. the number of active app-client sockets).
+   * @returns {Number} Client count
+   */
+  countClients()
+  {
+    return this.appClients.length;
+  }
 };
 
 

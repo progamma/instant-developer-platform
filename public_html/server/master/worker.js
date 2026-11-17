@@ -267,6 +267,7 @@ Node.Worker = class Worker
     this.child.send({
       type: Node.Worker.msgTypeMap.initApp,
       sender: "master",
+      serverType: this.config.serverType,
       name: this.app.name,
       url: this.config.getUrl(),
       path: Node.path.join(this.config.appDirectory, "apps", this.app.name),
@@ -277,8 +278,8 @@ Node.Worker = class Worker
       services: this.config.services
     });
     //
-    // Tell the app how to connect with the database
-    let constring = `postgres://${this.config.dbUser}:${this.config.dbPassword}@${this.config.dbAddress}:${this.config.dbPort}`;
+    // Tell the app how to connect with the database (user and password encoded, see App.Database.parseConString)
+    let constring = `postgres://${encodeURIComponent(this.config.dbUser)}:${encodeURIComponent(this.config.dbPassword)}@${this.config.dbAddress}:${this.config.dbPort}`;
     this.child.send({
       type: Node.Worker.msgTypeMap.connectionDB,
       username: (this.user.userName === "manager" ? undefined : this.user.userName),

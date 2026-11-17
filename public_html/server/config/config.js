@@ -14,6 +14,7 @@ Node.path = require("path");
 Node.child = require("child_process");
 Node.os = require("os");
 Node.dns = require("dns");
+Node.querystring = require("querystring");
 
 // Import Classes
 Node.Utils = require("../utils");
@@ -92,6 +93,68 @@ Node.Config = class Config
    * @type {Number}
    */
   static licSrvConnectionError = 9250;
+
+
+  /**
+   * Configuration properties holding a secret: they are never sent back to the Console by the status
+   * command, and their value never reaches the log — not in the config command, not in a request URL.
+   * @type {Array<String>}
+   */
+  static secretProperties = ["configGCloudStorage", "dbPassword", "googleAPIKey", "devAgentApiKey", "configS3"];
+
+
+  /**
+   * Query-string parameters whose value must never reach the log: the secret properties, plus the
+   * credentials that are not saved properties but ride a query string or a handshake — the AUTK of
+   * every console command, the project edit token, the app invitation token and the IDE reconnect
+   * token. The session ids are not among them: they are what the log correlates events on.
+   * @type {Array<String>}
+   */
+  static secretQueryParams = [...Config.secretProperties, "autk", "t", "ctoken", "reconnectToken"];
+
+
+  /**
+   * Masks the value of every secret a URL carries in its query string, so that a request URL can go
+   * to the log without exposing what it brings. The parameter name is kept: what the log is for is
+   * knowing which parameters arrived, never their value. The name is compared decoded, so that a
+   * percent-encoded letter cannot slip a secret past the mask and still reach its case in
+   * configureServer.
+   * @param {String} url - URL to log, query string included
+   * @returns {String} The URL with the value of each secret parameter replaced by ***
+   */
+  static redactUrl(url)
+  {
+    // Not only request URLs: a socket message hands over whatever the client sent
+    let qs = typeof url === "string" ? url.indexOf("?") : -1;
+    if (qs < 0)
+      return url;
+    //
+    let query = url.substring(qs + 1).split("&").map(param => {
+      // The switch of configureServer matches on req.query, whose names the parser has already
+      // percent-decoded: unescape is that parser's own decoder, and unlike decodeURIComponent it
+      // returns a malformed sequence instead of throwing here, on the path of an always-written WARN
+      let name = param.split("=")[0];
+      return Config.secretQueryParams.includes(Node.querystring.unescape(name)) ? `${name}=***` : param;
+    }).join("&");
+    //
+    return `${url.substring(0, qs)}?${query}`;
+  }
+
+
+  /**
+   * Masks the value of every secret a command query carries, the same names redactUrl masks in the
+   * URL: the query is the merged object of query string and body, so it carries the AUTK too.
+   * @param {Object} query - Query to log
+   * @returns {Object} A copy of the query with the value of each secret parameter replaced by ***
+   */
+  static redactQuery(query)
+  {
+    let logged = {...query};
+    for (let prop of Config.secretQueryParams)
+      if (logged[prop] !== undefined)
+        logged[prop] = "***";
+    return logged;
+  }
 
 
   /**
@@ -270,8 +333,7 @@ Node.Config = class Config
       licdata: this.licdata,
       idfoptions: this.idfoptions,
       devAgentApiKey: this.devAgentApiKey,
-      devAgentDailyBudget: this.devAgentDailyBudget,
-      turnConfig: this.turnConfig
+      devAgentDailyBudget: this.devAgentDailyBudget
     };
     //
     // Remove certificate's file content
@@ -423,8 +485,6 @@ Node.Config = class Config
       this.devAgentApiKey = v.devAgentApiKey;
     if (v.devAgentDailyBudget)
       this.devAgentDailyBudget = v.devAgentDailyBudget;
-    if (v.turnConfig)
-      this.turnConfig = v.turnConfig;
   }
 
 
@@ -442,7 +502,6 @@ Node.Config = class Config
     delete r.cl;
     delete r.users;
     delete r.ides;
-    delete r.turnConfig;
     //
     // Add usefull properties
     r.url = this.getUrl();
@@ -476,48 +535,6 @@ Node.Config = class Config
       }
     //
     return remoteDBurls;
-  }
-
-
-  /**
-   * Builds the ICE servers list with TURN credentials (issue #12897).
-   * With a "secret" the credentials are ephemeral, following the coturn REST API mechanism
-   * (use-auth-secret): the username is the expiry unix timestamp and the credential is the
-   * base64 HMAC-SHA1 of the username computed with the shared secret, so no static TURN
-   * credential reaches the client. With "username"/"credential" the static credentials are
-   * distributed as they are: transition mode for a coturn still using long-term credentials
-   * (the secret takes precedence when both are present).
-   * Requires a "turnConfig" section in config.json: {urls: [String], secret: String, ttl: Number}
-   * (ttl in seconds, default 86400) or {urls: [String], username: String, credential: String}.
-   * A single String is also accepted for "urls".
-   * @returns {Array} ICE server entries as {urls, username, credential}, or null if no TURN server is configured
-   */
-  getIceServers()
-  {
-    // Tolerate a single URL string: a plain string would pass the length check and then crash on map
-    let urls = this.turnConfig?.urls;
-    if (typeof urls === "string")
-      urls = [urls];
-    if (!urls?.length)
-      return null;
-    //
-    let username, credential;
-    if (this.turnConfig.secret) {
-      // Ephemeral credential: username = expiry timestamp, credential = HMAC-SHA1(secret, username)
-      let crypto = require("crypto");
-      let ttl = parseInt(this.turnConfig.ttl) || 86400;
-      username = `${Math.floor(Date.now() / 1000) + ttl}:inde`;
-      credential = crypto.createHmac("sha1", this.turnConfig.secret).update(username).digest("base64");
-    }
-    else if (this.turnConfig.username && this.turnConfig.credential) {
-      // Transition mode: static credentials from config, delivered only to authenticated clients
-      username = this.turnConfig.username;
-      credential = this.turnConfig.credential;
-    }
-    else
-      return null;
-    //
-    return urls.map(url => ({urls: url, username, credential}));
   }
 
 
@@ -564,6 +581,9 @@ Node.Config = class Config
    * Performs one atomic write of the configuration to the config.json file (temp file + fsync +
    * backup rotation). Never throws: the write error is logged and returned, and it is
    * {@link Node.Config#saveConfig} — the only caller — that decides whether to surface it.
+   * The three log calls are optional because the logger is born in {@link Node.Server#start}: a save
+   * that comes earlier must write the file even when there is nobody to tell about it, and before
+   * this it threw instead (#16379).
    * @returns {Promise<Error>} The write error, undefined when the write succeeded
    * @private
    */
@@ -575,7 +595,7 @@ Node.Config = class Config
     else
       configFile = Node.path.resolve(__dirname, "..", "..", "..", "config", "config.json");
     //
-    this.logger.log("INFO", "Config file save started", "Config.saveConfig");
+    this.logger?.log("INFO", "Config file save started", "Config.saveConfig");
     //
     let action;
     try {
@@ -620,10 +640,10 @@ Node.Config = class Config
       action = `renaming the CONFIG file ${configFile}.new to ${configFile}`;
       await Node.fs.promises.rename(`${configFile}.new`, configFile);
       //
-      this.logger.log("INFO", "Config file saved successfully", "Config.saveConfig");
+      this.logger?.log("INFO", "Config file saved successfully", "Config.saveConfig");
     }
     catch (err) {
-      this.logger.log("ERROR", `Error ${action}: ${err}`, "Config.saveConfig");
+      this.logger?.log("ERROR", `Error ${action}: ${err}`, "Config.saveConfig");
       return new Error(`Error ${action}: ${err.message || err}`, {cause: err});
     }
   }
@@ -764,8 +784,10 @@ Node.Config = class Config
 
   /**
    * Validates and initializes the server configuration.
-   * Ensures required users exist, creates necessary directories, and validates
-   * all user configurations in the system.
+   * Ensures required users exist and creates the home folder. The users are checked later by
+   * {@link Node.Config#checkUsers}.
+   * Note: this runs before {@link Node.Server#start} creates the logger, hence the optional log
+   * call below - see {@link Node.Config#writeConfig}.
    */
   async check()
   {
@@ -790,11 +812,23 @@ Node.Config = class Config
     }
     catch (err) {
       if (err.code !== "EEXIST")
-        this.logger.log("ERROR", `Error creating the home folder ${this.directory}: ${err}`, "Config.ensureInitialized");
+        this.logger?.log("ERROR", `Error creating the home folder ${this.directory}: ${err}`, "Config.ensureInitialized");
     }
+  }
+
+
+  /**
+   * Checks all the users at startup (see {@link Node.User#check}).
+   * Called by {@link Node.Server#start} once the childer exists, as the checks can fix the
+   * ownership of the folders they create through {@link Node.Server#execFileAsRoot}.
+   */
+  async checkUsers()
+  {
+    // If there is no IDE directory, there is nothing to check
+    if (!this.directory)
+      return;
     //
-    // Check the configuration for all the users
-    // (this operation must be serialized as the OS cannot create many users at the same time)
+    // This operation must be serialized as the OS cannot create many users at the same time
     for (let user of this.users)
       await user.check().catch(() => {});
   }
@@ -962,10 +996,11 @@ Node.Config = class Config
    * Initializes the user, creates their directory structure, and persists the configuration.
    * For local installations, can auto-generate username from system user.
    * @param {String} userName - The username to create (use "$$$" for system user in local mode)
+   * @param {Boolean} [skipDbEnv=false] - Defer PostgreSQL initialization until the user backup is restored
    * @returns {Promise<Node.User>} The user that was created
    * @throws {Error} If a user with the same name already exists
    */
-  async createUser(userName)
+  async createUser(userName, skipDbEnv = false)
   {
     console.error("NOT SUPPORTED FOR SELF");
   }
@@ -1147,7 +1182,7 @@ Node.Config = class Config
     let isBot = Node.Utils.isBotRequest(req);
     let isRest = (req.query?.mode === "rest");
     //
-    this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: req.originalUrl, host: req.socket.remoteAddress});
+    this.logger.log("DEBUG", "Handle process RUN", "Config.processRun", {url: Node.Config.redactUrl(req.originalUrl), host: req.socket.remoteAddress});
     //
     Node.Utils.unlockRequestQuery(req);
     //
@@ -1156,7 +1191,7 @@ Node.Config = class Config
       req.query.mode = "rest";
       isRest = true;
       //
-      this.logger.log("DEBUG", "Bot request -> activate REST", "Config.processRun", {url: req.originalUrl, userAgent: req.useragent.source});
+      this.logger.log("DEBUG", "Bot request -> activate REST", "Config.processRun", {url: Node.Config.redactUrl(req.originalUrl), userAgent: req.useragent.source});
     }
     //
     // OPTIONS preflight
@@ -1169,14 +1204,14 @@ Node.Config = class Config
     let allowedMethods = isWebApi ? ["GET", "POST", "PUT", "DELETE", "PATCH"] : ["GET", "POST"];
     if (!allowedMethods.includes(req.method)) {
       this.logger.log("WARN", "Request method not allowed", "Config.processRun",
-              {meth: req.method, url: req.originalUrl, remoteAddress: req.socket.remoteAddress});
+              {meth: req.method, url: Node.Config.redactUrl(req.originalUrl), remoteAddress: req.socket.remoteAddress});
       return res.status(405).end("HTTP method not supported");
     }
     //
     // Validate HOST
     if (!this.getHostFromReq(req)) {
       this.logger.log("WARN", "Bad HOST", "Config.processRun",
-              {meth: req.method, url: req.originalUrl, host: req.headers.host, remoteAddress: req.socket.remoteAddress});
+              {meth: req.method, url: Node.Config.redactUrl(req.originalUrl), host: req.headers.host, remoteAddress: req.socket.remoteAddress});
       return res.status(500).end("Invalid HOST parameter");
     }
     //
@@ -1188,6 +1223,9 @@ Node.Config = class Config
       session = this.server.IDESessions[sid];
       if (!session) {
         this.logger.log("WARN", "Session not found", "Config.processRun", {sid});
+        if (req.method === "GET" && !isRest && !isWebApi && req.accepts("html"))
+          return this.sendExpiredIDESessionPage(req, res);
+        //
         return res.status(500).send("Session not found");
       }
     }
@@ -1250,6 +1288,7 @@ Node.Config = class Config
       session.request.remoteAddress = req.socket.remoteAddress.replace(/^.*:/, "");
     //
     if (isRest || isWebApi) {
+      session.request.rawBodyBase64 = req.rawBodyBase64;
       session.request.protocol = req.protocol;
       session.request.host = req.get("host");
       session.request.url = req.url;
@@ -1287,12 +1326,12 @@ Node.Config = class Config
     let meth = req.headers["access-control-request-method"];
     if (!["GET", "POST", "DELETE", "PUT", "PATCH"].includes(meth) || (!isRest && !isWebApi)) {
       this.logger.log("WARN", "Invalid OPTIONS request", "Config.processRun",
-              {meth: req.method, url: req.originalUrl, headers: req.headers});
+              {meth: req.method, url: Node.Config.redactUrl(req.originalUrl), headers: req.headers});
       return res.status(405).end("HTTP method not supported");
     }
     //
     this.logger.log("DEBUG", "Valid OPTIONS request", "Config.processRun",
-            {meth: req.method, url: req.originalUrl, headers: req.headers});
+            {meth: req.method, url: Node.Config.redactUrl(req.originalUrl), headers: req.headers});
     //
     // If config.corsOrigins is a non-empty array, reflect the request Origin only if allowed.
     // Otherwise fall back to "*" (legacy default).
@@ -1311,6 +1350,59 @@ Node.Config = class Config
     res.header("Access-Control-Allow-Methods", "*");
     res.header("Access-Control-Max-Age", "86400"); // Cache for 24 hours
     res.status(204).end();
+  }
+
+
+  /**
+   * Explains a missing preview session without presenting a server error to the user.
+   * A missing SID also occurs after an explicit close, so do not promise recovery here.
+   * @param {Request} req - Browser navigation request
+   * @param {Response} res - Express response object
+   * @private
+   */
+  sendExpiredIDESessionPage(req, res)
+  {
+    let italian = req.acceptsLanguages("it", "en") === "it";
+    let title = italian ? "Sessione terminata" : "Session ended";
+    let explanation = italian
+            ? "La sessione di lavoro non è più attiva. Può succedere dopo un periodo di inattività o quando chiudi il progetto."
+            : "Your work session is no longer active. This can happen after a period of inactivity or when you close the project.";
+    let nextStep = italian
+            ? "Per continuare, riapri il progetto nell’IDE e avvia di nuovo l’app."
+            : "To continue, reopen the project in the IDE and run the app again.";
+    let recovery = italian
+            ? "Alla riapertura del progetto, un avviso ti informerà se sono state recuperate modifiche non salvate."
+            : "When you reopen the project, a notification will tell you if unsaved changes were recovered.";
+    //
+    // The page is self-contained: assets and links tied to the expired SID cannot be used.
+    res.status(410).set("Cache-Control", "no-store").type("html").send(`<!doctype html>
+<html lang="${italian ? "it" : "en"}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>${title} · Instant Developer</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: grid; place-items: center; padding: 24px;
+      font: 16px/1.6 system-ui, sans-serif; color: #273449; background: #f4f6f9; }
+    main { width: 100%; max-width: 580px; padding: 32px; background: white;
+      border: 1px solid #e0e5ed; border-radius: 16px; }
+    .brand { margin: 0 0 20px; color: #526279; font-size: 14px; }
+    h1 { margin: 0 0 16px; font-size: 28px; line-height: 1.25; }
+    p { margin: 0 0 16px; }
+    .note { margin-bottom: 0; color: #526279; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <main>
+    <p class="brand">Instant Developer</p>
+    <h1>${title}</h1>
+    <p>${explanation}</p>
+    <p>${nextStep}</p>
+    <p class="note">${recovery}</p>
+  </main>
+</body>
+</html>`);
   }
 
 
@@ -1355,7 +1447,7 @@ Node.Config = class Config
       defApp = defApp || this.defaultApp;
       if (defApp) {
         this.logger.log("DEBUG", "No app specified -> redirect to default app", "Config.processRun",
-                {defaultApp: defApp, url: req.originalUrl});
+                {defaultApp: defApp, url: Node.Config.redactUrl(req.originalUrl)});
         //
         // Don't use `this.getUrl() + "/" + this.defaultApp`: reply using the domain used in the request
         // (may differ from the server URL when DNS or custom certificates define several domains)
@@ -1371,23 +1463,23 @@ Node.Config = class Config
     else if (urlParts.length === 1) { // [app] and [app]?sid={SID}
       userName = "manager";
       appName = urlParts[0];
-      this.logger.log("DEBUG", "App detected (manager/app form)", "Config.processRun", {userName, app: appName, url: req.originalUrl});
+      this.logger.log("DEBUG", "App detected (manager/app form)", "Config.processRun", {userName, app: appName, url: Node.Config.redactUrl(req.originalUrl)});
     }
     else if (isWebApi) {
       userName = "manager";
       appName = req.params.app;
-      this.logger.log("DEBUG", "App detected (manager/app/cls form)", "Config.processRun", {userName, app: appName, url: req.originalUrl});
+      this.logger.log("DEBUG", "App detected (manager/app/cls form)", "Config.processRun", {userName, app: appName, url: Node.Config.redactUrl(req.originalUrl)});
     }
     else {
       userName = urlParts[0];
       appName = urlParts[1];          // [user]/[app] and [user]/[app]?sid={SID}
-      this.logger.log("DEBUG", "App detected (user/app form)", "Config.processRun", {userName, app: appName, url: req.originalUrl});
+      this.logger.log("DEBUG", "App detected (user/app form)", "Config.processRun", {userName, app: appName, url: Node.Config.redactUrl(req.originalUrl)});
     }
     //
     if (!appName) {
       let exitUrl = this.saveProperties().exitUrl;
       this.logger.log("WARN", `No command detected and no app to start. Redirect to ${exitUrl}`, "Config.processRun",
-              {url: req.originalUrl});
+              {url: Node.Config.redactUrl(req.originalUrl)});
       res.redirect(exitUrl);
       return;
     }
@@ -1398,7 +1490,7 @@ Node.Config = class Config
         req.next();
         return;
       }
-      this.logger.log("WARN", "User not found", "Config.processRun", {user: userName, app: appName, url: req.originalUrl});
+      this.logger.log("WARN", "User not found", "Config.processRun", {user: userName, app: appName, url: Node.Config.redactUrl(req.originalUrl)});
       res.status(500).send(`User ${userName} not found`);
       return;
     }
@@ -1409,7 +1501,7 @@ Node.Config = class Config
         req.next();
         return;
       }
-      this.logger.log("WARN", "App not found", "Config.processRun", {user: userName, app: appName, url: req.originalUrl});
+      this.logger.log("WARN", "App not found", "Config.processRun", {user: userName, app: appName, url: Node.Config.redactUrl(req.originalUrl)});
       res.status(404).send(`App ${appName} not found`);
       return;
     }
@@ -1573,8 +1665,8 @@ Node.Config = class Config
 
 
   /**
-   * Resolves the app session for a MASTER request: validates the existing SID (with client/telecollab
-   * handling) or creates a new one. For WebAPI requests without SID, runs the meta routes handler first.
+   * Resolves the app session for a MASTER request: validates the existing SID, handling both an
+   * explicit client and an invited one, or creates a new one. For WebAPI requests without SID, runs the meta routes handler first.
    * Returns nothing (undefined) when the response has already been taken over — callers must stop processing in that case.
    * @param {Request} req - Express request object
    * @param {Response} res - Express response object
@@ -1610,13 +1702,15 @@ Node.Config = class Config
         }
       }
       else if (!isRest && req.query.ctoken) {
-        // Telecollaboration: SID valid and connected with a master client, session is not REST, no CID provided.
+        // A client invited on a running app session: SID valid and connected with a master client,
+        // session is not REST, no CID provided (the invitation URL comes from App.Session.requestConnectionUrl).
         // Use the CTOKEN as the new client ID (easier); the client will be created inside session::createAppClient.
         cid = req.query.ctoken;
         session.newCid = cid;
         //
-        this.logger.log("DEBUG", "No CID provided for MASTER session -> grant for telecollaboration", "Config.processRun",
-                {sid, cid, user: app.user.userName, app: app.name});
+        // No cid in the log: here it is the ctoken, which stays valid until the client connects
+        this.logger.log("DEBUG", "No CID provided for MASTER session -> grant to the invited client", "Config.processRun",
+                {sid, user: app.user.userName, app: app.name});
       }
     }
     else {
@@ -1636,7 +1730,7 @@ Node.Config = class Config
       session.newCid = cid;
       //
       this.logger.log("DEBUG", "Created new app session", "Config.processRun",
-              {user: app.user.userName, app: appName, sid: session.id, cid, url: req.originalUrl});
+              {user: app.user.userName, app: appName, sid: session.id, cid, url: Node.Config.redactUrl(req.originalUrl)});
     }
     //
     return {session, cid};
@@ -1723,6 +1817,16 @@ Node.Config = class Config
     let uploadDir = isIDE
             ? Node.path.join(this.directory, session.project.user.userName, session.project.name, "files", "uploaded")
             : Node.path.join(this.appDirectory, "apps", app.name, "files", "uploaded");
+    //
+    // multiparty does not create the folder, and an installed app may have lost it (#15010)
+    try {
+      await Node.fs.promises.mkdir(uploadDir, {recursive: true});
+    }
+    catch (err) {
+      this.logger.log("ERROR", `Error creating the upload folder: ${err}`, "Config.processRun", {uploadDir});
+      res.status(500).end(err.message);
+      return;
+    }
     //
     let form = new Node.multiparty.Form({autoFields: true, autoFiles: true, maxFilesSize, uploadDir});
     //
@@ -1870,12 +1974,8 @@ Node.Config = class Config
     delete status.users;
     //
     // Remove "sensitive data"
-    delete status.configGCloudStorage;
-    delete status.dbPassword;
-    delete status.googleAPIKey;
-    delete status.devAgentApiKey;
-    delete status.configS3;
-    delete status.turnConfig;
+    for (let prop of Node.Config.secretProperties)
+      delete status[prop];
     //
     // Add server info
     let srvFile = Node.path.resolve(__dirname, "..", "server.js");
@@ -2104,6 +2204,20 @@ Node.Config = class Config
               this.lowDiskThreshold = value ? (parseInteger(value) || 0) : 0;
             break;
 
+          // DevAgent server-level credential: the onboarding key of community servers. Unlike the
+          // other secrets above it must be revocable from the Console, so an empty value clears it
+          case "devAgentApiKey":
+            if (value !== undefined)
+              this.devAgentApiKey = value || undefined;
+            break;
+
+          // DevAgent daily budget, in whole USD. An empty value drops the property, restoring the
+          // default the agent applies on its own
+          case "devAgentDailyBudget":
+            if (value !== undefined)
+              this.devAgentDailyBudget = value ? parseInteger(value) : undefined;
+            break;
+
           // JSON properties
           case "configS3":
           case "configGCloudStorage":
@@ -2112,7 +2226,9 @@ Node.Config = class Config
                 this[key] = JSON.parse(value);
               }
               catch (err) {
-                logData = {[key]: value};
+                // Both keys are secrets, and the message below already names the one that failed
+                // to parse: the value would only put a credential in the log
+                logData = {[key]: "***"};
                 throw new Error(`Invalid JSON for ${key}: ${err.message || err}`, {cause: err});
               }
             }
@@ -2273,8 +2389,11 @@ Node.Config = class Config
       // Save the new configuration
       await this.saveConfig();
       //
-      // Log the operation
-      this.logger.log("DEBUG", "Updated server configuration", "Config.configureServer", {config: query});
+      // Log the operation, hiding the value of the secrets the command carries. The list is the
+      // same one redactUrl uses on the URL of this very request: the query is the merged object,
+      // so it carries the AUTK too, and masking it here but not there (or the other way round)
+      // would leave the same key readable on one of the two log lines
+      this.logger.log("DEBUG", "Updated server configuration", "Config.configureServer", {config: Node.Config.redactQuery(query)});
       //
       // If something changed, restart services
       if (query.numHoursSnapshot !== undefined || query.numMaxSnapshot !== undefined || query.timeSnapshot !== undefined)
@@ -2421,6 +2540,15 @@ Node.Config = class Config
             filename = "console.error.log";
             break;
 
+          // The two console files merged in time order, read on demand. The alternative - a third
+          // file written by every worker - doubles the console logging footprint on the production
+          // disks, and each line already carries its timestamp in the prefix (#13870), so the merge
+          // costs nothing to keep: both files are append-only, hence each is already sorted, and two
+          // sorted sequences merge in one linear pass (#13872)
+          case "all":
+            filename = ["console.out.log", "console.error.log"];
+            break;
+
           default:
             logData = {
               console: params.req.query.console
@@ -2429,16 +2557,68 @@ Node.Config = class Config
         }
       }
       //
+      // The level filter only makes sense on the console files: the daily server log is written as
+      // one JSON object per line by ServerLogger.output, with no [app][timestamp][LEVEL] prefix, so
+      // filtering it here would match nothing and answer 200 with an empty body - and whoever reads
+      // that concludes there are no errors. Refusing is louder than ignoring, and `level` is new
+      // enough that nobody can be relying on it (#13872)
+      if (params.req.query.level !== undefined && params.req.query.console === undefined) {
+        logData = {
+          level: params.req.query.level
+        };
+        throw new Error("Wrong parameter: level needs console");
+      }
+      //
       // Handle commands
       let path = Node.path.resolve(__dirname, "..", "..", "log");
       let command = params.tokens[1] || "download";
+      //
+      // And only view and download read it: the three below never reach sendLogFile, so they would
+      // throw it away - whoever asks how much the errors weigh would get the weight of everything.
+      // A number that looks right is worse than an empty page, because nobody notices it. The list
+      // is the commands that do not go through sendLogFile: a new one belongs here too (#13872)
+      if (params.req.query.level !== undefined && ["status", "clear", "checkrotate"].includes(command)) {
+        logData = {
+          level: params.req.query.level,
+          cmd: command
+        };
+        throw new Error(`Wrong parameter: level does not apply to ${command}`);
+      }
+      //
+      // And the names are the five that dumpToConsole writes (App.DTT.itemTypeLabels): any other
+      // one keeps no line and answers an empty body, which is the same silence as above - and
+      // "warning" is the one that catches people out, because the label is WARN. A level that
+      // exists but has no lines still answers empty, and that one is the true answer. This one too
+      // is closed on the commands that read `level`, so a command that does not exist keeps the
+      // message that says so, whether the level is spelled right or not (#13872)
+      if (params.req.query.level !== undefined && ["view", "download"].includes(command)) {
+        let levels = ["log", "info", "debug", "warn", "error"];
+        let unknown = String(params.req.query.level).split(",").map(l => l.trim().toLowerCase())
+                .filter(l => l && !levels.includes(l));
+        if (unknown.length) {
+          logData = {
+            level: params.req.query.level
+          };
+          throw new Error(`Wrong parameter: unknown level ${unknown.join(", ")} - use ${levels.join(", ")}`);
+        }
+      }
+      //
       switch (command) {
-        case "status":
-          return await Node.Config.getLogFileStatus(path, filename);
+        case "status": {
+          if (!Array.isArray(filename))
+            return await Node.Config.getLogFileStatus(path, filename);
+          //
+          // With console=all the size is the one the caller would download: the sum of the two
+          let size = 0;
+          for (let f of filename)
+            size += (await Node.Config.getLogFileStatus(path, f)).size || 0;
+          return {size};
+        }
 
         case "clear":
           logData = {filename};
-          await this.clearConsoleLog(path, filename);
+          for (let f of Array.isArray(filename) ? filename : [filename])
+            await this.clearConsoleLog(path, f);
           break;
 
         case "view":
@@ -2448,14 +2628,19 @@ Node.Config = class Config
         case "checkrotate": {
           logData = {filename};
           let maxLen = 50 * 1024 * 1024;
-          await this.rotateConsoleLog(path, filename, maxLen);
+          //
+          // The list too, like clear does: rotateConsoleLog wants one name and died on the array,
+          // inside filename.startsWith. Before console=all the same URL fell into the default and
+          // answered a clean "Wrong parameter", so without this loop it would be a regression
+          for (let f of Array.isArray(filename) ? filename : [filename])
+            await this.rotateConsoleLog(path, f, maxLen);
           break;
         }
 
         default:
           logData = {
             cmd: command,
-            url: params.req.originalUrl
+            url: Node.Config.redactUrl(params.req.originalUrl)
           };
           throw new Error("Invalid Command");
       }
@@ -2533,6 +2718,125 @@ Node.Config = class Config
 
 
   /**
+   * Reads a console log file together with its rotated .1, oldest first.
+   * @private
+   * @param {String} path - Directory holding the log files
+   * @param {String} filename - Name of the log file
+   * @returns {String} The file content, the rotated part first
+   */
+  async readLogFile(path, filename)
+  {
+    let data;
+    try {
+      data = await Node.fs.promises.readFile(Node.path.join(path, filename), "utf8");
+    }
+    catch (err) {
+      throw new Error(`Error reading the file ${filename}: ${err.message || err}`, {cause: err});
+    }
+    //
+    try {
+      let data1 = await Node.fs.promises.readFile(Node.path.join(path, `${filename}.1`), "utf8");
+      if (data1)
+        data = data1 + data;
+    }
+    catch (err) {
+      if (err.code !== "ENOENT")
+        throw new Error(`Error reading the file ${filename}.1: ${err.message || err}`, {cause: err});
+    }
+    //
+    return data;
+  }
+
+
+  /**
+   * Merges console logs in time order. Every line carries its timestamp in the prefix
+   * [app][timestamp][LEVEL] (#13870), and each file is append-only - hence already sorted - so this
+   * is one linear pass over the sources, not a sort. Lines with no readable timestamp keep their
+   * place inside their own file, which keeps multi-line messages in one piece.
+   * @private
+   * @param {Array} parts - Content of each log file
+   * @returns {String} The lines of every part, in time order
+   */
+  static mergeLogLines(parts)
+  {
+    // Anchored at the start of the line, and the same shape filterLogLevels uses: looking for "]["
+    // anywhere would hand a made-up timestamp to a continuation line that happens to contain it -
+    // "at dump [cfg][prod]" - and tear it away from the message it belongs to. The two functions
+    // have to agree on what a prefixed line is
+    let stamp = line => {
+      let m = line.match(/^\[[^\]]*\]\[([^\]]*)\]\[[^\]]*\]/);
+      return m ? m[1] : undefined;
+    };
+    //
+    // The trailing newline of each file would leave an empty string behind: with no timestamp it
+    // sorts before everything and would surface in the middle of the other file's lines
+    let righe = p => {
+      let r = p.split("\n");
+      if (r.length && r[r.length - 1] === "")
+        r.pop();
+      //
+      return r;
+    };
+    //
+    // One cursor per source: at every step the oldest line wins. A line with no timestamp - the
+    // continuation of a multi-line message - sorts before everything, and that is exactly right:
+    // its cursor reaches it only after the line it belongs to, so it follows that one and nothing
+    // else can slip in between
+    let sources = parts.map(p => ({lines: righe(p), i: 0}));
+    let out = [];
+    for (;;) {
+      let pick;
+      for (let s of sources) {
+        if (s.i >= s.lines.length)
+          continue;
+        //
+        let ts = stamp(s.lines[s.i]) || "";
+        if (!pick || ts < pick.ts)
+          pick = {src: s, ts};
+      }
+      if (!pick)
+        break;
+      //
+      out.push(pick.src.lines[pick.src.i++]);
+    }
+    //
+    return out.join("\n");
+  }
+
+
+  /**
+   * Keeps only the log lines whose prefix carries one of the asked levels. Meant for the console
+   * files: the daily server log is one JSON object per line and carries no such prefix.
+   *
+   * A line without the prefix follows the one above it. That covers the continuation lines of a
+   * multi-line message, and also the console lines that carry no prefix at all - dumpToConsole
+   * leaves it out when the worker is not a master one, when App.name is missing, or when the
+   * application opted out with consolePrefix === false.
+   * @private
+   * @param {String} data - Log content
+   * @param {String} levels - Comma separated level names (log, info, debug, warn, error)
+   * @returns {String} The lines that match, in the order they had
+   */
+  static filterLogLevels(data, levels)
+  {
+    let wanted = String(levels).split(",").map(l => l.trim().toUpperCase()).filter(l => l);
+    if (!wanted.length)
+      return data;
+    //
+    // A line with no level marker belongs to the message above it, so it is kept when that one was:
+    // otherwise a stack trace would lose its body and keep only its first line
+    let keep = false;
+    return data.split("\n").filter(line => {
+      let m = line.match(/^\[[^\]]*\]\[[^\]]*\]\[([^\]]*)\]/);
+      if (m)
+        keep = wanted.includes(m[1].toUpperCase());
+      //
+      return keep;
+    }).join("\n");
+  }
+
+
+  /**
    * Reads and sends a log file to the client for viewing or download.
    * @private
    * @param {Object} params - Request parameters
@@ -2542,35 +2846,39 @@ Node.Config = class Config
    */
   async sendLogFile(params, path, filename, command)
   {
-    // Read main file
     let data;
-    try {
-      data = await Node.fs.promises.readFile(Node.path.join(path, filename));
+    if (Array.isArray(filename)) {
+      // console=all: the files merged in time order, and the name of the download says so
+      let parts = [];
+      for (let f of filename)
+        parts.push(await this.readLogFile(path, f));
+      data = Node.Config.mergeLogLines(parts);
+      filename = "console.all.log";
     }
-    catch (err) {
-      throw new Error(`Error reading the file ${filename}: ${err.message || err}`, {cause: err});
-    }
+    else
+      data = await this.readLogFile(path, filename);
     //
-    // Read rotated file if exists and prepend it
-    try {
-      let data1 = await Node.fs.promises.readFile(Node.path.join(path, `${filename}.1`));
-      if (data1)
-        data = data1 + data;
-    }
-    catch (err) {
-      if (err.code !== "ENOENT")
-        throw new Error(`Error reading the file ${filename}.1: ${err.message || err}`, {cause: err});
-    }
+    // The level filter applies to every console file, not just the merged one: the prefix is the
+    // same everywhere (#13870), and refusing it elsewhere would be a rule without a reason
+    let level = params.req.query.level;
+    if (level)
+      data = Node.Config.filterLogLevels(data, level);
     //
     // Send response
     params.res.status(200);
+    //
+    // No encoding here, which means utf8: "binary" is the alias of latin1, and on a string read
+    // as utf8 it would send every accented character back broken - "città" arrives as "citt?". It
+    // held up while the read returned a Buffer, because there the encoding is ignored and the bytes
+    // go through untouched; now that the read returns a string it would break every log with an
+    // accent in it, which on an Italian product is the norm and not the corner case
     if (command === "view") {
-      params.res.setHeader("Content-type", "text/plain");
-      params.res.write(data, "binary");
+      params.res.setHeader("Content-type", "text/plain; charset=utf-8");
+      params.res.write(data);
     }
     else {
       params.res.setHeader("Content-disposition", `attachment; filename = ${this.name}-${filename}`);
-      params.res.write(data, "binary");
+      params.res.write(data);
     }
     params.res.end();
   }
@@ -4001,7 +4309,8 @@ Node.Config = class Config
   /**
    * Checks and adjusts the data disk size to match available space.
    * Automatically expands the file system when disk space has been increased.
-   * Supports FreeBSD and Linux platforms.
+   * Supports FreeBSD and Linux platforms; on Linux the device is resolved from /proc/mounts because
+   * the kernel can enumerate the data disk as sda or sdb, and the other letter is the boot disk.
    * @param {Object} params - Request parameters
    * @returns {Promise<Object>} Disk adjustment result or undefined if no change needed
    */
@@ -4128,9 +4437,30 @@ Node.Config = class Config
         return `Fixed to ${disk.designSize}`;
       }
       else if (process.platform === "linux") {
+        // The kernel does not enumerate the data disk at a fixed letter (see #10346): under
+        // docker+alpine it comes up as sda as often as sdb, and there sdb is the BOOT disk.
+        // /proc/mounts says which device is under /mnt/disk, which is the filesystem to grow
+        let mounts;
+        try {
+          mounts = await Node.fs.promises.readFile("/proc/mounts", "utf8");
+        }
+        catch (err) {
+          throw new Error(`Error while reading /proc/mounts: ${err.message || err}`, {cause: err});
+        }
+        //
+        for (let line of mounts.split("\n")) {
+          let [dev, mountPoint] = line.split(" ");
+          if (mountPoint === "/mnt/disk" && dev.startsWith("/dev/"))
+            disk.device = dev;   // The last one wins: a mount stacked on the same point hides the ones below it
+        }
+        //
+        // There is nothing safe to fall back on: every other letter is the boot disk
+        if (!disk.device)
+          throw new Error("Can't find the device mounted on /mnt/disk");
+        //
         let stdout;
         try {
-          stdout = await this.server.execFileAsRoot("/usr/sbin/parted", ["-m", "/dev/sdb", "print"]);
+          stdout = await this.server.execFileAsRoot("/usr/sbin/parted", ["-m", disk.device, "print"]);
         }
         catch (err) {
           throw new Error(`Error while executing PARTED: ${err.message || err}`, {cause: err});
@@ -4145,7 +4475,7 @@ Node.Config = class Config
         //
         // Resize partition to fill up all the free space
         try {
-          await this.server.execFileAsRoot("/usr/sbin/resize2fs", ["/dev/sdb"]);
+          await this.server.execFileAsRoot("/usr/sbin/resize2fs", [disk.device]);
         }
         catch (err) {
           // If the disk needs nothing
@@ -4337,7 +4667,7 @@ Node.Config = class Config
           warning = true;
           logData = {
             op,
-            url: params.req.originalUrl
+            url: Node.Config.redactUrl(params.req.originalUrl)
           };
           throw new Error("Invalid operation");
         }
@@ -4378,7 +4708,7 @@ Node.Config = class Config
     }
     //
     // Done!
-    this.logger.log("INFO", "Disk freezed -> ready for snapshot", "Config.handleSnapshot", {url: params.req.originalUrl});
+    this.logger.log("INFO", "Disk freezed -> ready for snapshot", "Config.handleSnapshot", {url: Node.Config.redactUrl(params.req.originalUrl)});
     //
     // Be skeptics: auto-unlock after some time (if callee dies it's a problem... fs will remain LOCKED)
     this.autoStopSnapshotTimer = setTimeout(async () => {
@@ -4408,7 +4738,7 @@ Node.Config = class Config
       await this.server.execFileAsRoot("/sbin/fsfreeze", ["-u", "/mnt/disk"]);
       //
       // Done!
-      this.logger.log("INFO", "Disk unfreezed -> write allowed", "Config.handleSnapshot", {url: params.req.originalUrl});
+      this.logger.log("INFO", "Disk unfreezed -> write allowed", "Config.handleSnapshot", {url: Node.Config.redactUrl(params.req.originalUrl)});
     }
     catch (err) {
       throw new Error(`Error while executing FSFREEZE: ${err.message || err}`, {cause: err});
@@ -4439,7 +4769,7 @@ Node.Config = class Config
     }
     let trackDB = new Postgres();
     trackDB.schema = {"id": "q0QvNTfSzEHdmYsdj+WEIA==", "name": "$trackingDB$", "type": "$trackingDB$", "tables": [{"id": "h6aAxGQcqGH9zCgYcN/7jA==", "name": "Issues", "fields": [{"id": "raFFirodiY5SYrKs8khbnA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "GMu4qCtqK2ylk1a9+xpSzw==", "name": "IssueApplicationID", "datatype": "id", "maxlen": 24}, {"id": "gvEa1E8hV0EYuzk0b48xpA==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "8VuRWXB3HiIb8rR5L7iwUA==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "zrluHniES3g/HlY1+VhBNg==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24}, {"id": "8RtjtmBa9CskXDbDL8QArw==", "name": "BuildID", "datatype": "id", "maxlen": 24}, {"id": "uuxk4NaVz0wfFNt9+NK2rw==", "name": "BuildName", "datatype": "vc"}, {"id": "zZqgdCi9k5ffG38wROQ4ug==", "name": "BuildFormat", "datatype": "vc", "maxlen": 3}, {"id": "G1hOjxkADUkjWc9H0tmO6A==", "name": "LinkedObject", "datatype": "j"}, {"id": "C4uWoHljnhoiyDRuIdXb3w==", "name": "Branch", "datatype": "j"}, {"id": "qvHBMiJyYTHMDzHxAriiug==", "name": "Context", "datatype": "j"}, {"id": "gfkj8VwK7c9mVs8NZHdgbA==", "name": "CommitID", "datatype": "id", "maxlen": 24}, {"id": "X1faYOw57iteQzy8jNTaxw==", "name": "AuthorID", "datatype": "vc"}, {"id": "1Btb7CUR/U0m/piKpRuDow==", "name": "AuthorAvatar", "datatype": "vc"}, {"id": "7hp+1ep1FS+Nt6Su4hWa7Q==", "name": "AuthorName", "datatype": "vc"}, {"id": "c9eqpXDdFKkI+QeIdbXKmw==", "name": "AuthorLanguage", "datatype": "vc"}, {"id": "tzxZ+ZpfBIvT3M4uFJetGw==", "name": "Title", "datatype": "vc"}, {"id": "gKx8db8g8IPsv9AYTd8XPw==", "name": "Description", "datatype": "vc"}, {"id": "c9RBYdro91EuMbxanQGH2Q==", "name": "SourceObject", "datatype": "j"}, {"id": "GcPOOAVhhSXXD1EBmZVFEg==", "name": "CreationDate", "datatype": "dt"}, {"id": "s7oYtzRmGYs4UV03a2DABQ==", "name": "IssueType", "datatype": "i"}, {"id": "e4gvrscSsjb4niwd+33vsw==", "name": "Screenshot", "datatype": "vc"}, {"id": "BQrvkhKUsdZbEXEx0boqzA==", "name": "Activities", "datatype": "j"}, {"id": "Yd9MeOLH6zNdFjMLB9mbUA==", "name": "AssignToID", "datatype": "id", "maxlen": 24}, {"id": "PHO+nUZD6k9pWlj7K0xMlA==", "name": "AssignToAvatar", "datatype": "vc"}, {"id": "dbNioY++YCw+oobrhybsSg==", "name": "AssignToName", "datatype": "vc"}, {"id": "olDW06tCtsfiq9mGo22j7w==", "name": "Code", "datatype": "i"}, {"id": "D+DFykWF3JeHv+cTpC0nyA==", "name": "Priority", "datatype": "i"}, {"id": "myfGITWjTKzaOl31z4dvaw==", "name": "Tags", "datatype": "vc"}, {"id": "2GysvAQaUxS+25h5e4dHow==", "name": "DeployStatus", "datatype": "i"}, {"id": "vhMO4QuJeAfi2fk0M0qrQg==", "name": "Category", "datatype": "i"}, {"id": "dbT7We57+jk9NuE8dluPzg==", "name": "Votes", "datatype": "i", "defval": "0"}, {"id": "TneyghFUGS6pK5F5B9JGVA==", "name": "NotificationEmails", "datatype": "vc"}, {"id": "v/ljRAQzPtMNI8sRsL+yGg==", "name": "ForkChainID", "datatype": "id", "maxlen": 24}], "fks": [{"id": "dPSTX+LzXuTMSoAcVUIT4A==", "name": "fkIssueApplications", "t": "IssueApplications", "ur": "c", "dr": "c", "refs": {"GMu4qCtqK2ylk1a9+xpSzw==": "ID"}}]}, {"id": "UAZbmF3p3VFzZANljHCUyw==", "name": "IssueTags", "fields": [{"id": "+5mLeHZjmPbZYVCCUKLPUg==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "qcZe2R1nhWsm2AluUqIPsA==", "name": "TagLabel", "datatype": "vc", "notn": true}, {"id": "knNBsG9IjNTixiSPMU4/xQ==", "name": "Available", "datatype": "b"}, {"id": "INik72DBhiLta5VQad9Dbg==", "name": "AccountID", "datatype": "id", "maxlen": 24}]}, {"id": "kr3qP6vuLOc4E31EN0UVwQ==", "name": "IssueApplications", "fields": [{"id": "FSAY7uGwp8zhmf7mocRjTA==", "name": "ID", "datatype": "id", "maxlen": 24, "pk": true}, {"id": "D7rgv3xFaWjP3A7yUv82+A==", "name": "ProjectID", "datatype": "id", "maxlen": 24}, {"id": "KVVu0MTG5AtVzUC1xJdphg==", "name": "ProjectJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "cu2THSSWPeLnH8qKW0NMXA==", "name": "ApplicationJsonID", "datatype": "id", "maxlen": 24, "notn": true}, {"id": "VF7d2FtNzhEMBee1dGzOAQ==", "name": "ApplicationName", "datatype": "vc"}, {"id": "e0FdPOi5ITQlMXyKE5J6Pg==", "name": "Format", "datatype": "vc", "maxlen": 3, "notn": true}]}]};
-    trackDB.initDbConString(`postgres://${this.dbUser}:${this.dbPassword}@${this.dbAddress}:${this.dbPort}`);
+    trackDB.initDbConString(`postgres://${encodeURIComponent(this.dbUser)}:${encodeURIComponent(this.dbPassword)}@${this.dbAddress}:${this.dbPort}`);
     //
     // Replace the standard createDb function (normally the updateSchema method is called from a child process
     // thus the createDb method sends a message to the parent process... but not this time)
@@ -4465,7 +4795,12 @@ Node.Config = class Config
       this.logger.log("DEBUG", `${trackDB.schema.name} schema updated`, "Config.initTracking");
     }
     catch (err) {
-      let msg = `Error while updating ${trackDB.schema.name} schema: ${err}`;
+      // An AggregateError (every connection attempt failed) printed as is says just "AggregateError":
+      // the real causes are in its errors list. When the database is still to be created it arrives
+      // wrapped by Database.initDbEnv, as the cause (issue #16933)
+      let agg = [err, err?.cause].find(e => e instanceof AggregateError);
+      let causes = agg ? ` (${agg.errors.map(e => e.message || e).join("; ")})` : "";
+      let msg = `Error while updating ${trackDB.schema.name} schema: ${err}${causes}`;
       this.logger.log("ERROR", msg, "Config.initTracking");
       throw new Error(msg, {cause: err});
     }
@@ -4500,7 +4835,7 @@ Node.Config = class Config
     params.req.query = Object.assign(req.query, req.body);
     //
     // Log the operation
-    this.logger.log("DEBUG", "Processing operation", "Config.processCommand", {url: req.originalUrl, host: req.socket.remoteAddress});
+    this.logger.log("DEBUG", "Processing operation", "Config.processCommand", {url: Node.Config.redactUrl(req.originalUrl), host: req.socket.remoteAddress});
     //
     // Extract user and command
     let userName = Node.Utils.clearName(params.tokens[0]);
@@ -4543,7 +4878,7 @@ Node.Config = class Config
         case "restore": {
           // createUser can resolve the name on its own (the system user on local installations),
           // so the restore works on the user it returns and never on the requested name
-          let user = await this.createUser(userName);
+          let user = await this.createUser(userName, true);
           try {
             await user.processCommand(params);
           }
@@ -4579,7 +4914,7 @@ Node.Config = class Config
               return req.next();
             //
             this.logger.log("WARN", "User not found", "Config.processCommand",
-                    {cmd: command, user: userName, url: req.originalUrl});
+                    {cmd: command, user: userName, url: Node.Config.redactUrl(req.originalUrl)});
             throw Object.assign(new Error("User not found"), {code: 404});
           }
           //
@@ -4600,7 +4935,8 @@ Node.Config = class Config
     let code, data;
     if (error) {
       code = error.code || 500;
-      data = error.message;
+      // A thrown value that is not an Error has no message: its text is the reason
+      data = error.message || String(error);
     }
     else {
       code = 200;
@@ -4614,7 +4950,7 @@ Node.Config = class Config
       res.status(code).send(data);
     //
     this.logger.log("DEBUG", "Operation completed", "Config.processCommand",
-            {result: error ? error : data, url: req.originalUrl, host: req.socket.remoteAddress});
+            {result: error ? error : data, url: Node.Config.redactUrl(req.originalUrl), host: req.socket.remoteAddress});
   }
 
 
@@ -4637,7 +4973,7 @@ Node.Config = class Config
     if (this.autk && params.req.query.autk === this.autk)
       return;
     //
-    this.logger.log("WARN", "Unauthorized", sender, {url: params.req.originalUrl});
+    this.logger.log("WARN", "Unauthorized", sender, {url: Node.Config.redactUrl(params.req.originalUrl)});
     throw Object.assign(new Error("Unauthorized"), {code: 401});
   }
 
@@ -4773,7 +5109,7 @@ Node.Config = class Config
         if (user)
           return await user.processCommand(params);
         //
-        this.logger.log("WARN", "Invalid command", "Config.execCommand", {cmd: command, url: params.req.originalUrl});
+        this.logger.log("WARN", "Invalid command", "Config.execCommand", {cmd: command, url: Node.Config.redactUrl(params.req.originalUrl)});
         throw new Error("Invalid Command");
       }
     }
@@ -4993,11 +5329,25 @@ Node.Config = class Config
    */
   getIdfOptions(params)
   {
-    return Object.assign({
+    let options = Object.assign({
       AutoSaveTime: 1,
       MaxViews: 1,
       WorkDirectory: this.directory
     }, this.idfoptions);
+    //
+    // The service account of the TeamWorks bucket stays on the server: whoever opens the options
+    // page is told whether there is one, and can only replace it or remove it
+    let gcloud = this.idfoptions.teamWorks?.gcloud;
+    if (gcloud)
+      options.teamWorks = {
+        ...this.idfoptions.teamWorks,
+        gcloud: {
+          bucketName: gcloud.bucketName,
+          hasBucketConfig: !!gcloud.bucketConfig
+        }
+      };
+    //
+    return options;
   }
 
 
@@ -5028,22 +5378,22 @@ Node.Config = class Config
         delete data.WorkDirectory;
       }
       //
+      // The service account: a new JSON replaces it, an empty string removes it, and no value at all
+      // keeps the one already there, which the options page never receives and so cannot resend
+      let bucketConfig = this.idfoptions.teamWorks?.gcloud?.bucketConfig;
+      if (data.BucketConfig !== undefined)
+        bucketConfig = data.BucketConfig ? JSON.parse(data.BucketConfig.replaceAll(/\n/g, "\\n")) : undefined;
+      //
       data.teamWorks = {
         gcloud: {
           bucketName: data.BucketName,
-          bucketConfig: data.BucketConfig
+          bucketConfig
         }
       };
       //
-      try {
-        if (data.BucketConfig)
-          data.teamWorks.gcloud.bucketConfig = JSON.parse(data.BucketConfig.replaceAll(/\n/g, "\\n"));
-      }
-      catch {
-      }
-      //
       delete data.BucketName;
       delete data.BucketConfig;
+      delete data.HasBucketConfig;
       //
       this.idfoptions = data;
       //
@@ -5208,8 +5558,14 @@ Node.Config = class Config
   /**
    * Retrieves the list of available licenses from the license server.
    * Gets all licenses associated with the current user account.
-   * @returns {Promise<Array<Object>>} Array of license objects, empty if there is no registered user
-   * or the license server could not be reached
+   *
+   * The error travels WITH the list, because an empty list alone does not say why it is empty:
+   * no registered user, a user who has no licenses, and an unreachable license server all give
+   * the same array, and the wizard that reads it declares the Express license active in all
+   * three - which is false in the third (#14957).
+   * @returns {Promise<Object>} `{licenses, error}`: the array of license objects, and the error
+   * code - 0 when the list is trustworthy, {@link Node.Config.licSrvConnectionError} when the
+   * license server could not be reached
    */
   async licSrvGetLicList()
   {
@@ -5330,14 +5686,62 @@ Node.Config = class Config
 
 
   /**
+   * Il ProgId che Windows associa al protocollo http, cioe' il browser predefinito dell'utente.
+   * Sta in un metodo suo perche' lo leggono in due: il rilevamento vero e proprio e la correzione
+   * una tantum in testa a initBrowserPath. Una seconda copia della chiave di registro sarebbe la
+   * solita coppia destinata a divergere (#16178)
+   * @returns {Promise<String|undefined>} "ChromeHTML", "MSEdgeHTM", "FirefoxURL", ... o undefined
+   */
+  async getHttpProgId()
+  {
+    try {
+      let regedit = require("regedit").promisified;
+      let key = "HKCU\\Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice";
+      let registry = (await regedit.list([key]))[key];
+      if (registry.exists)
+        return registry.values?.ProgId?.value;
+    }
+    catch {
+      // Registro non leggibile: chi chiama tratta l'assenza di risposta come "non so"
+    }
+  }
+
+
+  /**
    * Initialize browser paths by detecting installed browsers on the system
    * Detects installed browsers (IE, Firefox, Safari, Chrome, Edge) and determines the default browser
    * Supports Windows, macOS, and Linux platforms
    */
   async initBrowserPath()
   {
-    if (!this.idfoptions || this.idfoptions.SelBrowser)
+    if (!this.idfoptions)
       return;
+    //
+    // Il valore che il rilevamento scrive resta salvato, quindi chi ha avviato lo Studio col
+    // difetto ha gia' Edge e non lo rifa' piu' nessuno. Si azzera percio' il solo stato che il
+    // difetto produceva - Edge su Windows con Chrome predefinito - e si lascia che il rilevamento
+    // lo rifaccia: se il predefinito e' un altro, il conto lo dira' (#16178)
+    if (this.idfoptions.SelBrowser) {
+      // numero e non si'/no: alzandolo a 2 si puo' rifare un altro giro, un domani
+      if (this.idfoptions.SelBrowserCheck >= 1)
+        return;
+      //
+      // segnato subito e comunque: se restasse da fare, chi ha scelto Edge di proposito se lo
+      // vedrebbe azzerare a ogni avvio
+      this.idfoptions.SelBrowserCheck = 1;
+      //
+      if (require("os").platform() !== "win32")
+        return;
+      if (parseInt(this.idfoptions.SelBrowser, 10) !== 5) // 5 = BROWSER_EDGE, il ripiego di Windows
+        return;
+      //
+      let progid = await this.getHttpProgId();
+      if (progid !== "ChromeHTML")
+        return;
+      //
+      // E' lo stato del difetto: si azzera e si lascia che il rilevamento lo rifaccia
+      delete this.idfoptions.SelBrowser;
+    }
     //
     let os = require("os");
     let util = require("util");
@@ -5392,8 +5796,7 @@ Node.Config = class Config
         this.idfoptions.EdgePath = edgePath;
       //
       // Get default browser from user choice
-      let key = "Software\\Microsoft\\Windows\\Shell\\Associations\\UrlAssociations\\http\\UserChoice";
-      let progid = await getRegistryValue(["HKCU"], key, "ProgId");
+      let progid = await this.getHttpProgId();
       switch (progid) {
         case "ChromeHTML":
           defBrowser = "CHROME.EXE";
@@ -5405,7 +5808,13 @@ Node.Config = class Config
           defBrowser = "FIREFOX.EXE";
           break;
         default:
-          defBrowser = "IEXPLORE";
+          // Nessun valore, cosi' il ripiego qui sotto puo' girare. Assegnare "IEXPLORE" rendeva
+          // quella condizione sempre falsa, e i due tentativi sul registro non venivano mai
+          // eseguiti: un ProgId che non e' uno dei tre noti finiva dritto nel ripiego della
+          // piattaforma. Se anche il registro non dice niente, defBrowser resta indefinito e si
+          // arriva allo stesso ripiego di prima - il comportamento cambia solo dove il registro
+          // una risposta ce l'ha (#16178)
+          break;
       }
       //
       // Se non ho ancora trovato, provo con la default app per i file con estensione http
@@ -5528,7 +5937,13 @@ Node.Config = class Config
       this.idfoptions.SelBrowser = 2;
     else if (defBrowser.includes("SAFARI") && this.idfoptions.SafariPath)
       this.idfoptions.SelBrowser = 3;
-    else if (["CHROME", "CHROMIUM"].includes(defBrowser) && this.idfoptions.ChromePath)
+    // Per sottostringa come tutti gli altri: qui si confrontava per uguaglianza, e nessuno dei
+    // valori che arrivano davvero e' una parola sola. Su Windows lo switch qui sopra rende
+    // "CHROME.EXE", su Linux xdg-settings rende "google-chrome.desktop": ne' l'uno ne' l'altro e'
+    // uguale a "CHROME", quindi Chrome non veniva mai riconosciuto e si finiva nel ripiego della
+    // piattaforma - Edge su Windows, Firefox su Linux (#16178).
+    // Servono ENTRAMBE le sottostringhe: "CHROMIUM" non contiene "CHROME", gli manca la E
+    else if ((defBrowser.includes("CHROME") || defBrowser.includes("CHROMIUM")) && this.idfoptions.ChromePath)
       this.idfoptions.SelBrowser = 4;
     else if (defBrowser.includes("EDGE") && this.idfoptions.EdgePath)
       this.idfoptions.SelBrowser = 5;

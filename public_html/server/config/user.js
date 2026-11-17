@@ -20,6 +20,8 @@ Node.App = require("./app");
 Node.Archiver = require("../archiver");
 Node.Utils = require("../utils");
 Node.Device = require("./device");
+// config.js requires this file while it loads: Config is read when used, not here
+Object.defineProperty(Node, "Config", {get: () => require("./config")});
 
 
 // Reversible-cipher key/IV used by encryptUserPassword / decryptUserPassword
@@ -160,6 +162,9 @@ Node.User = class User
   /**
    * Logs a message through the shared logger, automatically decorating
    * the payload with the user name so every entry can be attributed to this user.
+   * Note: before {@link Node.Server#start} creates the logger there is none, and the entry goes to
+   * the console instead. The console is not a dead end: on IDS the launcher pipes the stdout of
+   * server.js into the application log.
    * @param {String} level - Message level (DEBUG, INFO, WARN, ERROR)
    * @param {String} message - Text of the message
    * @param {String} sender - Function that generated the message
@@ -173,7 +178,10 @@ Node.User = class User
       user: this.userName
     };
     //
-    this.logger.log(level, message, sender, data);
+    if (this.logger)
+      this.logger.log(level, message, sender, data);
+    else
+      console.log(`${new Date().toISOString()} - ${level} - ${message} - (sender: ${sender})`, data);
   }
 
 
@@ -353,8 +361,9 @@ Node.User = class User
    * even before any database is created (e.g. when an onboarding example is
    * restored from a backup without going through `Database.createDb`).
    * @param {String} userName - Name of the user being initialized
+   * @param {Boolean} [skipDbEnv=false] - Defer PostgreSQL initialization until the user backup is restored
    */
-  async init(userName)
+  async init(userName, skipDbEnv = false)
   {
     this.userName = userName;
     //
@@ -369,10 +378,9 @@ Node.User = class User
     await this.assignOsUser();
     this.folderExisted = await this.createUserFolder();
     //
-    // Initialize the PostgreSQL environment (role + tablespace). initDbEnv is
-    // idempotent (existing role/tablespace are tolerated), so the lazy call from
-    // Database.init keeps working unchanged.
-    await Node.Database.initDbEnv(this);
+    // A user restore replaces the whole folder: initialize its tablespace only afterwards.
+    if (!skipDbEnv)
+      await Node.Database.initDbEnv(this);
   }
 
 
@@ -468,13 +476,15 @@ Node.User = class User
    * and permissions so that the coupled OS user (and the DB process for the `db`
    * folder) can access them. Permission fixing happens only where the root helper is
    * available ({@link Node.Server#canExecAsRoot}).
+   * @param {Boolean} [onlyCreated=false] - Fix only the folders created now, without scanning the existing ones
    * @returns {Promise<Boolean>} True if the user folder was already on disk
    * @throws {Error} If folder creation or permission adjustment fails
    */
-  async createUserFolder()
+  async createUserFolder(onlyCreated = false)
   {
     let path = Node.path.join(this.config.directory, this.userName);
     let folderExisted = false;
+    let dbFolderExisted = false;
     let logData;
     //
     try {
@@ -496,26 +506,32 @@ Node.User = class User
       catch (err) {
         if (err.code !== "EEXIST")
           throw new Error(`Error creating the db folder ${path}/db: ${err.message || err}`, {cause: err});
+        //
+        dbFolderExisted = true;
       }
       //
       // Only where the root helper is available: the ownership of the folders is meaningful
       // on the servers that run the user as a real OS user
       if (this.server.canExecAsRoot) {
         // Set ownership of all files and directories
-        try {
-          await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
-        }
-        catch (err) {
-          logData = {OSUser: this.OSUser, path};
-          throw new Error(`Error changing user folder permissions: ${err.message || err}`, {cause: err});
+        if (!onlyCreated || !folderExisted) {
+          try {
+            await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+          }
+          catch (err) {
+            logData = {OSUser: this.OSUser, path};
+            throw new Error(`Error changing user folder permissions: ${err.message || err}`, {cause: err});
+          }
         }
         //
-        try {
-          await this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")]);
-        }
-        catch (err) {
-          logData = {path: Node.path.join(path, "db")};
-          throw new Error(`Error changing the database folder permissions: ${err.message || err}`, {cause: err});
+        if (!onlyCreated || !dbFolderExisted) {
+          try {
+            await this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")]);
+          }
+          catch (err) {
+            logData = {path: Node.path.join(path, "db")};
+            throw new Error(`Error changing the database folder permissions: ${err.message || err}`, {cause: err});
+          }
         }
       }
     }
@@ -542,6 +558,10 @@ Node.User = class User
   /**
    * Creates a new project for this user, initializes it on disk, registers it in
    * the user's projects list and persists the updated configuration.
+   * Note: it registers a project whose folder may well be on disk already — {@link Node.User#importPrj}
+   * and the TeamWorks fork and clone materialize it first and come here to record it. The command
+   * that asks for a NEW project is the one that must refuse a folder already there, and it checks
+   * for it before calling ({@link Node.User#processCommand}, case "create").
    * @param {String} projectName - Name of the project to create
    * @throws {Error} If a project with the same name already exists
    */
@@ -784,10 +804,12 @@ Node.User = class User
             throw new Error(`Error creating the folder ${this.config.directory}/tmp: ${err.message || err}`, {cause: err});
         }
         //
-        // Fix permissions if needed before backing up the user
+        // Fix permissions if needed before backing up the user. The db folder is left out: the
+        // databases are running, and handing their files to the OS user, even for a moment, would
+        // take them away from the DB process. The copy below skips that folder anyway
         if (this.server.canExecAsRoot) {
           try {
-            await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+            await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path, Node.path.join(path, "db")]);
           }
           catch (err) {
             logData = {OSUser: this.OSUser, path};
@@ -795,16 +817,16 @@ Node.User = class User
           }
           //
           try {
-            await this.server.execFileAsRoot("ChownDBFolder", [`${path}/db`]);
+            await this.server.execFileAsRoot("ChownDBFolder", [Node.path.join(path, "db")]);
           }
           catch (err) {
-            logData = {path: `${path}/db`};
+            logData = {path: Node.path.join(path, "db")};
             throw new Error(`Error changing database folder permissions: ${err.message || err}`, {cause: err});
           }
         }
         //
         // Copy all the user folder except the db directory into the tmp folder
-        let skipdb = item => item !== `${path}/db`;
+        let skipdb = item => item !== Node.path.join(path, "db");
         await new Promise((resolve, reject) => {
           Node.ncp(path, Node.path.join(tempPath, this.userName), {filter: skipdb}, err => {
             if (err)
@@ -881,8 +903,8 @@ Node.User = class User
   /**
    * Restores the user from the cloud backup: downloads and extracts the tarball
    * into the user folder, recreates the `db` directory, fixes permissions, loads
-   * the `index.json` descriptor, saves the configuration and then restores every
-   * database described in it.
+   * the `index.json` descriptor, saves the configuration, initializes the PostgreSQL
+   * environment and then restores every database described in it.
    * @param {Object} params - Command parameters (currently unused by this method)
    * @throws {Error} If restore of files or databases fails. The error carries `dataOnDisk` when the
    * backup had already been extracted, so that the caller does not undo the failure by deleting the user
@@ -909,10 +931,11 @@ Node.User = class User
           throw new Error(`Error creating the user folder ${path}/db: ${err.message || err}`, {cause: err});
       }
       //
-      // Fix permissions if needed then restore user directory
+      // Fix permissions if needed then restore user directory. The db folder belongs to the DB
+      // process only, so the fix of the user folder leaves it out
       if (this.server.canExecAsRoot) {
         try {
-          await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path]);
+          await this.server.execFileAsRoot("ChownChmod", [this.OSUser, path, Node.path.join(path, "db")]);
         }
         catch (err) {
           logData = {OSUser: this.OSUser, path};
@@ -952,10 +975,31 @@ Node.User = class User
       //
       // Restore all user's DBs
       try {
+        // The restored folder and credentials must be in place, even when the backup has no databases.
+        await Node.Database.initDbEnv(this);
         await this.restoreDatabases();
       }
       catch (err) {
         throw new Error(`Error restoring databases: ${err.message || err}`, {cause: err});
+      }
+      //
+      // The fix above ran on a still empty db folder: initDbEnv creates the tablespace,
+      // and PostgreSQL gives its PG_<version> folder the native 700 mode. Left
+      // that way the postmaster gets EACCES at the next restart and the instance does not come up,
+      // so the db folder goes back to postgres:postgres 770 as the LAST step of the restore (#14615).
+      // Database.restore repeats it after every database it replays, and that one is not redundant:
+      // it is what leaves the tablespace readable at the next restart when the restore died half way
+      // through — in the field the bill arrives on a docker restart, where the fs overlays give the
+      // user slightly different permissions
+      if (this.server.canExecAsRoot) {
+        let dbPath = this.getDbFolder();
+        try {
+          await this.server.execFileAsRoot("ChownDBFolder", [dbPath]);
+        }
+        catch (err) {
+          logData = {path: dbPath};
+          throw new Error(`Error changing the database folder permissions after the restore: ${err.message || err}`, {cause: err});
+        }
       }
       //
       // Log the user restore
@@ -985,9 +1029,11 @@ Node.User = class User
 
   /**
    * Performs a startup sanity check on the user: couples it with an OS user if
-   * needed, (re)creates the user folder, and runs the same check on each of its
-   * projects. Errors raised by individual project checks are logged but do not
-   * abort the overall check. The `manager` user is exempt.
+   * needed, (re)creates the missing user folders fixing the ownership of those only, reconciles the
+   * projects with what is on disk ({@link Node.User#sanitizeProjectNames},
+   * {@link Node.User#adoptProjectFolders}) and runs the same check on each of its projects. Errors
+   * raised by individual project checks are logged but do not abort the overall check. The
+   * `manager` user is exempt.
    */
   async check()
   {
@@ -999,10 +1045,34 @@ Node.User = class User
     await this.assignOsUser();
     //
     try {
-      // Create the user folder
-      await this.createUserFolder();
+      // Create the user folder. The existing trees are not scanned: a full fix at every startup would
+      // delay it on the servers with many files, and would take the db folder away from the DB process
+      await this.createUserFolder(true);
     }
     finally {
+      // Only where a raw name can get registered, i.e. on IDS: the cloud servers register every
+      // project through create/restore, which normalize the name, and their projects are not to be
+      // renamed on disk at startup. Before the project checks, so that a dropped entry does not get
+      // its folder skeleton back
+      if (this.config.local) {
+        try {
+          await this.sanitizeProjectNames();
+        }
+        catch (err) {
+          this.log("ERROR", `Error while sanitizing the project names: ${err}`, "User.check");
+        }
+        //
+        // The same reconciliation the other way round: a folder the registry lost goes back into it,
+        // so the project shows in the list and opens again (#16379). After the sanitize, so that a
+        // project just renamed to its normalized name is not met again here as an unknown folder
+        try {
+          await this.adoptProjectFolders();
+        }
+        catch (err) {
+          this.log("ERROR", `Error while adopting the project folders: ${err}`, "User.check");
+        }
+      }
+      //
       // Do this asynchronously... I don't care that much about the result
       for (let prj of this.projects) {
         try {
@@ -1013,6 +1083,182 @@ Node.User = class User
         }
       }
     }
+  }
+
+
+  /**
+   * Fixes the projects registered under a name that is not in its normalized form: the commands
+   * reach a project by its normalized name only, so such an entry can neither be opened nor deleted
+   * from the console, and Project.check keeps recreating its folder (#15506).
+   * A real project, i.e. one holding a project.json, is renamed along with its folder when the
+   * normalized name is free; a bare entry is dropped, and so is its folder when it is only the
+   * empty skeleton.
+   */
+  async sanitizeProjectNames()
+  {
+    // Without the directory nothing can be told about the projects: a shared drive (#14585) not
+    // mounted yet would make every entry look like a bare one, and dropping them would be a loss
+    let prjDir = this.getProjectsDir();
+    if (!Node.fs.existsSync(prjDir)) {
+      this.log("WARN", "Projects directory not found: project names left as they are", "User.sanitizeProjectNames",
+              {directory: prjDir});
+      return;
+    }
+    //
+    let changed = false;
+    for (let prj of [...this.projects]) {
+      let name = Node.Utils.clearName(prj.name);
+      if (name === prj.name)
+        continue;
+      //
+      let oldPath = Node.path.join(prjDir, prj.name);
+      let logData = {project: prj.name, normalized: name};
+      if (Node.fs.existsSync(Node.path.join(oldPath, "project.json"))) {
+        // On a case insensitive file system the normalized name may be the very same folder under
+        // another spelling: that is not a taken name, and the rename below just fixes the spelling
+        let newPath = Node.path.join(prjDir, name);
+        let taken = Node.fs.existsSync(newPath) &&
+                await Node.Utils.realPath(newPath) !== await Node.Utils.realPath(oldPath);
+        if (!name || this.getProject(name) || taken) {
+          this.log("WARN", "Project left with a non normalized name: the normalized one is taken",
+                  "User.sanitizeProjectNames", logData);
+          continue;
+        }
+        //
+        await Node.fs.promises.rename(oldPath, newPath);
+        prj.name = name;
+        this.log("INFO", "Project renamed to its normalized name", "User.sanitizeProjectNames", logData);
+      }
+      else {
+        this.projects.splice(this.projects.indexOf(prj), 1);
+        if (Node.fs.existsSync(oldPath) && !await this.folderHoldsFiles(oldPath))
+          await Node.fs.promises.rm(oldPath, {recursive: true, force: true});
+        this.log("INFO", "Project entry without a project.json dropped", "User.sanitizeProjectNames", logData);
+      }
+      changed = true;
+    }
+    //
+    if (changed)
+      await this.config.saveConfig();
+  }
+
+
+  /**
+   * Tells whether a folder holds any file, at any depth. Empty directories do not count: the
+   * folder skeleton of a project is made of those only.
+   * @param {String} dir - Folder to be inspected
+   * @returns {Promise<Boolean>} True if there is at least one file
+   */
+  async folderHoldsFiles(dir)
+  {
+    for (let e of await Node.fs.promises.readdir(dir, {withFileTypes: true})) {
+      if (!e.isDirectory() || await this.folderHoldsFiles(Node.path.join(dir, e.name)))
+        return true;
+    }
+    //
+    return false;
+  }
+
+
+  /**
+   * Registers the project folders the configuration does not know about, the other half of the
+   * reconciliation {@link Node.Project#check} does: every command reaches a project through the
+   * registry only ({@link Node.User#getProject}), so a folder without its entry is a project that
+   * for the application does not exist - it does not show in the list, does not open, cannot be
+   * exported nor deleted, and the only way back was editing config.json by hand (#16379).
+   * A folder is a project when it holds a project.json, and that file is NOT read: a project whose
+   * project.json is broken is exactly the one that must stay reachable, because only from the list
+   * can the user restore it from its project.json.good.
+   * The adopted project gets a fresh id and ivAES like {@link Node.Project#init} does. Neither is a
+   * lasting identity: ivAES encrypts the project in the local ChromeFS cache and the code discards
+   * it on its own (Project.updateInfo with ivAES null), and the id, where it does outlive the
+   * registry, has already been copied elsewhere - a project published on TeamWorks carries it in
+   * its own TwConfig.json as originalPrjId, and every later read comes from that file.
+   * @returns {Promise<Node.Project[]>} The projects adopted by this run
+   */
+  async adoptProjectFolders()
+  {
+    let prjDir = this.getProjectsDir();
+    let shared = !!this.config.idfoptions?.IdsPrjDir;
+    let entries = await Node.fs.promises.readdir(prjDir, {withFileTypes: true}).catch(() => []);
+    let adopted = [];
+    for (let entry of entries) {
+      // Not a project: whatever is not a folder (the profile image is a file sitting right here),
+      // the transient staging of backup, restore and import, and the "foo.prj" an interrupted
+      // import leaves behind (#15005) - which the rename below would otherwise adopt as "fooprj"
+      if (!entry.isDirectory() || entry.name.startsWith("tmp_") || /\.(prj|idm|idp)$/i.test(entry.name))
+        continue;
+      //
+      // A known project is left alone: registering it again would duplicate its entry and hand it
+      // a new id and ivAES, throwing away the ChromeFS cache of a project that was working
+      if (this.getProject(entry.name))
+        continue;
+      //
+      // The filter that keeps out the service folders living next to the projects when no projects
+      // directory is configured: the db tablespace, the backups
+      if (!Node.fs.existsSync(Node.path.join(prjDir, entry.name, "project.json")))
+        continue;
+      //
+      let name = Node.Utils.clearName(entry.name);
+      let logData = {folder: entry.name, project: name};
+      if (name !== entry.name) {
+        // A raw name could never be reached by a command (#15506), so the folder is renamed to the
+        // form the registry uses - the same fix sanitizeProjectNames applies to the projects it
+        // already knows. Never on a shared projects directory (#14585): there the folder may
+        // belong to another workstation, and renaming it under its feet is not ours to do
+        if (shared) {
+          this.log("WARN", "Project folder not adopted: name not normalized", "User.adoptProjectFolders", logData);
+          continue;
+        }
+        //
+        let oldPath = Node.path.join(prjDir, entry.name);
+        let newPath = Node.path.join(prjDir, name);
+        // On a case insensitive file system the normalized name is the very same folder under
+        // another spelling: that is not a taken name, and the rename just fixes the spelling
+        let taken = Node.fs.existsSync(newPath) &&
+                await Node.Utils.realPath(newPath) !== await Node.Utils.realPath(oldPath);
+        if (!name || this.getProject(name) || taken) {
+          this.log("WARN", "Project folder not adopted: the normalized name is taken",
+                  "User.adoptProjectFolders", logData);
+          continue;
+        }
+        //
+        // A folder put there by hand is also the one a file explorer or an antivirus is holding
+        // open, and the rename fails: that must cost this project alone, not the folders the scan
+        // has yet to reach, nor the saveConfig that lives past the loop
+        try {
+          await Node.fs.promises.rename(oldPath, newPath);
+        }
+        catch (err) {
+          this.log("WARN", `Project folder not adopted: cannot rename it (${err.message || err})`,
+                  "User.adoptProjectFolders", logData);
+          continue;
+        }
+      }
+      //
+      let prj = new Node.Project(this);
+      prj.id = Node.Utils.generateUID36().substring(0, 32);
+      prj.name = name;
+      prj.ivAES = Array.from(Node.crypto.randomBytes(16));
+      this.projects.push(prj);
+      adopted.push(prj);
+      //
+      this.log("INFO", "Project folder adopted", "User.adoptProjectFolders", logData);
+    }
+    //
+    if (adopted.length) {
+      try {
+        await this.config.saveConfig(true);
+      }
+      catch (err) {
+        // Said out loud with the names inside: the adoption lives in this run only, and at the next
+        // restart those projects are adopted again - with new id and ivAES, and without the rename
+        this.log("ERROR", `Error saving the adopted projects: ${err.message || err}`, "User.adoptProjectFolders",
+                {projects: adopted.map(prj => prj.name)});
+      }
+    }
+    //
+    return adopted;
   }
 
 
@@ -1202,12 +1448,24 @@ Node.User = class User
   /**
    * Returns the project list as an array of rich descriptors including name,
    * last save timestamp, base path and — when a recovery snapshot exists — the
-   * modification time of the associated `project.json.good` file.
+   * modification time of the associated `project.json.good` file. The TeamWorks roles are there
+   * too, main project of a published one included, so that the console can word the confirmation of
+   * a reset of TeamWorks without asking the project first.
+   * Note: a project just adopted from its folder has no `lastSave` nor `lastOpen` (the adoption
+   * does not read the project.json), and JSON drops the undefined ones: those two appear when the
+   * project is saved for the first time.
    * @param {Object} params - Command parameters (unused by this method)
-   * @returns {Promise<Object[]>} Array of `{name, lastSave, lastOpen, path, restoreDT?}` objects
+   * @returns {Promise<Object[]>} Array of `{name, lastSave, lastOpen, path, restoreDT?, twMaster?, twMain?, twFork?}` objects
    */
   async getProjectsListJson(params)
   {
+    // With a shared projects directory (IdsPrjDir, e.g. a network drive - #14585) the folder changes
+    // under a running server, because another workstation creates projects in it: adopt what is new
+    // before building the list, so this workstation sees them without a restart. Everywhere else the
+    // adoption has already run at startup (User.check), which is when a folder can have appeared
+    if (this.config.idfoptions?.IdsPrjDir)
+      await this.adoptProjectFolders();
+    //
     let prjDir = this.getProjectsDir();
     let projects = [];
     for (let prj of this.projects) {
@@ -1221,47 +1479,14 @@ Node.User = class User
       let goodName = Node.path.join(prjDir, prj.name, "project.json.good");
       if (Node.fs.existsSync(goodName))
         prjData.restoreDT = (await Node.fs.promises.stat(goodName)).mtime.toISOString();
+      if (prj.twMaster) {
+        prjData.twMaster = true;
+        prjData.twMain = await this.isTwMain(prj, Node.path.join(prjDir, prj.name));
+      }
+      if (prj.twFork)
+        prjData.twFork = true;
       //
       projects.push(prjData);
-    }
-    //
-    // When a projects directory is configured (IdsPrjDir, e.g. a shared network drive - #14585), also
-    // discover the projects that exist on disk but this workstation does not know yet (created from
-    // another workstation): adopt them by registering them in the user's project list with fresh id
-    // and ivAES, like Project.init does (the on-disk project is not encrypted: id/ivAES are per-install
-    // secrets for the ChromeFS cache, regenerable, and must be unique so adopted projects don't collide).
-    // This way a second workstation pointing at the same drive can see and open them.
-    if (this.config.idfoptions?.IdsPrjDir) {
-      let adopted = false;
-      let entries = await Node.fs.promises.readdir(prjDir, {withFileTypes: true}).catch(() => []);
-      for (let entry of entries) {
-        // It is a project only if it is a folder holding a project.json and it is not known yet.
-        // Skip tmp_* folders: they are transient backup/restore staging dirs that may momentarily
-        // hold a project.json and would otherwise be adopted as phantom projects.
-        if (!entry.isDirectory() || entry.name.startsWith("tmp_") || this.getProject(entry.name))
-          continue;
-        //
-        // Skip the folders still carrying a project extension: they are what an interrupted import
-        // leaves behind, they do hold a project.json and would therefore be adopted, but a project
-        // named "foo.prj" cannot be opened - it would just sit in the list as a phantom (#15005)
-        if ([".prj", ".idm", ".idp"].includes(Node.path.extname(entry.name).toLowerCase()))
-          continue;
-        //
-        if (!Node.fs.existsSync(Node.path.join(prjDir, entry.name, "project.json")))
-          continue;
-        //
-        let prj = new Node.Project(this);
-        prj.id = Node.Utils.generateUID36().substring(0, 32);
-        prj.name = entry.name;
-        prj.ivAES = Array.from(Node.crypto.randomBytes(16));
-        this.projects.push(prj);
-        adopted = true;
-        //
-        projects.push({name: prj.name, path: prjDir});
-      }
-      //
-      if (adopted)
-        await this.config.saveConfig();
     }
     //
     return projects;
@@ -1269,70 +1494,106 @@ Node.User = class User
 
 
   /**
-   * Imports a new project from a zipped IDF file already present on the server.
-   * The file path and optional target project name are taken from the query
-   * string (`path`, `prjname`). After unzipping the archive the extracted folder
-   * is looked up by trying known project extensions (`.prj`, `.idm`, `.idp`) or
-   * by scanning the target directory, then renamed to the final project name and
+   * Tells whether a project published on TeamWorks is the main one of its owner, the project that
+   * published it, from what its local TwConfig.json records: a master copy, even one of the owner,
+   * has an id of its own and records the published project's as the original.
+   * @param {Node.Project} prj - Project
+   * @param {String} prjPath - Folder of the project
+   * @returns {Promise<Boolean>} True for the owner's main project, or when the file does not say
+   */
+  async isTwMain(prj, prjPath)
+  {
+    try {
+      let twConfig = JSON.parse(await Node.fs.promises.readFile(Node.path.join(prjPath, "TwConfig.json"), "utf8"));
+      return (!twConfig.masterUser || twConfig.masterUser.id === this.idfdata?.guid) &&
+              (!twConfig.originalPrjId || twConfig.originalPrjId === prj.id);
+    }
+    catch {
+      return true;
+    }
+  }
+
+
+  /**
+   * Imports a new project from a zipped IDF file. The archive is either already on the server, with
+   * its path in the query string (`path`), or uploaded as the `file` field of a multipart POST: the
+   * first is what Electron does, which knows the path of the file the user picked, the second what
+   * a plain browser does, which does not. The project takes the name given in the query or in the
+   * form (`prjname`), or the one of the archive; either way the name is normalized and made unique.
+   * The archive is removed once imported when `deleteSource` is given, and always when uploaded.
+   * The folder the archive holds, whatever its name, is renamed to the final project name and
    * registered through {@link Node.User#createProject}.
-   * @param {Object} params - Command parameters (expects `params.req.query.path` and optional `prjname`)
-   * @throws {Error} If the path is missing or (on a remote server) outside the user's folders, if the
-   * archive cannot be unzipped or if the extracted folder is not found
+   * @param {Object} params - Command parameters (expects `params.req.query.path` or an uploaded `file`,
+   * optional `prjname` and `deleteSource`)
+   * @returns {Promise<String>} Name of the imported project
+   * @throws {Error} If the archive is missing or (on a remote server) outside the user's folders, if
+   * it cannot be unzipped or does not hold exactly one folder. The messages name no path: the wizard
+   * shows them to the user next to the name of the archive
    */
   async importPrj(params)
   {
-    // Get the file path from query parameters. On a local server (IDS) the archive can sit anywhere:
-    // the file picker hands over the path of a file the user chose on their own machine, and the
-    // server runs on that same machine. A remote server instead only ever imports what has been
-    // uploaded into the user's own folders, so there the path must stay confined (issue #14062)
-    let filePath = await this.checkUserPath(params.req.query.path, true);
+    let source = params.req.query.path;
+    let prjname = params.req.query.prjname;
+    let deleteSource = params.req.query.deleteSource;
     //
-    // Declared out here so the catch can clean up the extracted folder
-    let oldPath, newPath;
+    // An uploaded archive lands in the user folder under a random name: the name it had on the user's
+    // machine, the one a project name can be derived from, comes separately
+    let uploadedName;
+    if (params.req.is("multipart/form-data")) {
+      let upload = await this.receiveArchive(params.req);
+      source = upload.path;
+      prjname = upload.prjname;
+      uploadedName = upload.originalFilename;
+      deleteSource = true;
+    }
+    //
+    // On a local server (IDS) the archive can sit anywhere: the file picker hands over the path of a
+    // file the user chose on their own machine, and the server runs on that same machine. A remote
+    // server instead only ever imports what has been uploaded into the user's own folders, so there
+    // the path must stay confined (issue #14062)
+    let filePath = await this.checkUserPath(source, true);
+    //
+    // Declared out here so the cleanup can find it
+    let staging;
     //
     try {
-      // Extract the file name from the path
-      let fileName = Node.path.basename(filePath, Node.path.extname(filePath));
+      // Name of the archive without its extension, and without the project extension an exported
+      // one still carries ("foo.prj.zip")
+      let archiveName = uploadedName || filePath;
+      let fileName = Node.path.basename(archiveName, Node.path.extname(archiveName)).replace(/\.(prj|idm|idp)$/i, "");
       //
-      // Get the project name from query or filename
-      let prjName = params.req.query.prjname || fileName;
-      //
-      // Refuse right away if the name is taken. createProject would throw anyway, but only at the
-      // very end, with the archive already extracted and renamed on disk (issue #15005)
-      if (this.getProject(prjName))
-        throw new Error(`A project named "${prjName}" is already in your project list: import it under a different name`);
+      // The name is registered in the normalized form every other command looks it up with: a raw
+      // name would never match what the dispatch hands to getProject (#15506). And it is made
+      // unique, so that the same archive can be imported twice without a name to be typed
+      let prjName = Node.Utils.clearName(prjname || fileName);
+      if (!prjName)
+        throw new Error(`The project name "${prjname || fileName}" holds no usable character`);
+      prjName = this.freeProjectName(prjName);
       //
       // Define target directory (user's directory)
       let targetDir = this.getProjectsDir();
       //
-      // Unzip the project file to the target directory
+      // Unzip the archive into a staging folder of its own, so that the folder it holds is
+      // unambiguous whatever its name (the one of the project it was exported from, which the
+      // archive name says nothing about) and whatever the projects directory already holds (the
+      // leftover of a failed import, say). The tmp_ prefix keeps the staging folder out of the
+      // adoption scan of getProjectsListJson
+      staging = Node.path.join(targetDir, `tmp_import_${Node.Utils.generateUID36().substring(0, 8)}`);
       let archiver = new Node.Archiver(this.server);
-      let ok = await archiver.unzip(filePath, targetDir);
+      let ok = await archiver.unzip(filePath, staging);
       if (!ok)
-        throw new Error(`Unable to unzip file ${filePath}`);
+        throw new Error("The archive cannot be unzipped: it is damaged or not a zip file");
       //
       // Wait for file system to settle after unzip
       await new Promise(resolve => setTimeout(resolve, 1000));
       //
-      // Find the extracted folder — try known extensions with the zip filename first,
-      // then look for any newly created folder with a project extension
-      oldPath = Node.path.join(targetDir, `${fileName}.prj`);
-      if (!Node.fs.existsSync(oldPath))
-        oldPath = Node.path.join(targetDir, `${fileName}.idm`);
-      if (!Node.fs.existsSync(oldPath))
-        oldPath = Node.path.join(targetDir, `${fileName}.idp`);
-      if (!Node.fs.existsSync(oldPath))
-        oldPath = Node.path.join(targetDir, fileName);
-      if (!Node.fs.existsSync(oldPath)) {
-        // The zip contained a folder with a different name — scan for it
-        let entries = await Node.fs.promises.readdir(targetDir, {withFileTypes: true});
-        let found = entries.find(e => e.isDirectory() && (e.name.endsWith(".prj") || e.name.endsWith(".idm") || e.name.endsWith(".idp")) &&
-                !this.getProject(Node.path.basename(e.name, Node.path.extname(e.name))));
-        if (found)
-          oldPath = Node.path.join(targetDir, found.name);
-      }
+      let entries = await Node.fs.promises.readdir(staging, {withFileTypes: true});
+      let folders = entries.filter(e => e.isDirectory());
+      if (folders.length !== 1)
+        throw new Error(`The archive holds ${folders.length} folders, a project archive holds one`);
       //
-      newPath = Node.path.join(targetDir, prjName);
+      let oldPath = Node.path.join(staging, folders[0].name);
+      let newPath = Node.path.join(targetDir, prjName);
       //
       // On Windows rename fails with EPERM when the destination exists, even when it is empty - and
       // the destination usually IS there, because at startup the server creates the folder skeleton
@@ -1342,21 +1603,12 @@ Node.User = class User
       // workstation sharing the drive. An empty skeleton instead can go (issue #15005)
       if (Node.fs.existsSync(newPath)) {
         if (Node.fs.existsSync(Node.path.join(newPath, "project.json")))
-          throw new Error(`A project named "${prjName}" already exists in ${targetDir}: remove it, or import the project under a different name`);
+          throw new Error(`A project named "${prjName}" is already in the projects directory: use a different name`);
         //
         // No project.json, but make sure it holds no files at all before removing it: the skeleton
         // is only empty directories, anything else is somebody's data and must not be touched
-        let holdsFiles = async dir => {
-          for (let e of await Node.fs.promises.readdir(dir, {withFileTypes: true})) {
-            if (!e.isDirectory() || await holdsFiles(Node.path.join(dir, e.name)))
-              return true;
-          }
-          //
-          return false;
-        };
-        //
-        if (await holdsFiles(newPath))
-          throw new Error(`The folder ${newPath} already exists and is not empty: remove it, or import the project under a different name`);
+        if (await this.folderHoldsFiles(newPath))
+          throw new Error(`The folder "${prjName}" in the projects directory is not empty: use a different name`);
         //
         await Node.fs.promises.rm(newPath, {recursive: true, force: true});
       }
@@ -1366,7 +1618,7 @@ Node.User = class User
         await Node.fs.promises.rename(oldPath, newPath);
       }
       catch (err) {
-        throw new Error(`Error renaming the extracted folder ${oldPath} to ${newPath}: ${err.code || err.message || err}`, {cause: err});
+        throw new Error(`Cannot move the extracted folder to "${prjName}": ${err.code || err.message}`, {cause: err});
       }
       //
       // Create the project in the user's project list
@@ -1376,26 +1628,97 @@ Node.User = class User
       this.getProject(prjName).lastSave = new Date();
       //
       await this.config.saveConfig();
+      return prjName;
     }
-    catch (err) {
-      // The extracted folder still carries the .prj suffix, so leaving it behind would litter the
-      // projects directory and, worse, get picked up by the adoption scan in getProjectsListJson as
-      // a project that cannot be opened. Best effort: if this fails too there is nothing more to do
-      if (oldPath && oldPath !== newPath)
-        await Node.fs.promises.rm(oldPath, {recursive: true, force: true}).catch(() => {});
+    finally {
+      // The staging folder is empty after a successful import, and holds what was extracted after a
+      // failed one: either way it goes. Best effort: if this fails too there is nothing more to do
+      if (staging)
+        await Node.fs.promises.rm(staging, {recursive: true, force: true}).catch(() => {});
       //
-      // Not always the unzip: it may just as well be the rename or the project registration, and
-      // blaming the unzip sends whoever reads the message looking in the wrong place (issue #15005)
-      throw new Error(`Error importing the project from ${filePath}: ${err.message || err}`, {cause: err});
+      // An uploaded archive, or the one a duplication produced, has served its purpose either way
+      if (deleteSource)
+        await Node.fs.promises.rm(filePath, {force: true}).catch(() => {});
+    }
+  }
+
+
+  /**
+   * Receives the archive a browser uploads for {@link Node.User#importPrj}, saving it in the user
+   * folder along with the project name the form may carry.
+   * @param {Request} req - Express request carrying the multipart form
+   * @returns {Promise<Object>} `{path, originalFilename, prjname}` of the uploaded archive
+   * @throws {Error} If the form cannot be parsed or holds no file
+   */
+  async receiveArchive(req)
+  {
+    let form = new Node.multiparty.Form({uploadDir: Node.path.join(this.config.directory, this.userName)});
+    let {fields, files} = await new Promise((resolve, reject) => {
+      form.parse(req, (err, fields, files) => {
+        if (err)
+          reject(new Error(`Error while parsing request data: ${err.message || err}`, {cause: err}));
+        else
+          resolve({fields, files});
+      });
+    });
+    //
+    let file = files.file?.[0];
+    if (!file)
+      throw new Error("No archive uploaded");
+    //
+    return {path: file.path, originalFilename: file.originalFilename, prjname: fields.prjname?.[0]};
+  }
+
+
+  /**
+   * Returns the given project name if no project has it, in the list or on disk, otherwise the
+   * first free one among name-2, name-3 and so on.
+   * @param {String} name - Wanted project name, already normalized
+   * @returns {String} A project name not taken
+   */
+  freeProjectName(name)
+  {
+    let prjDir = this.getProjectsDir();
+    let taken = n => this.getProject(n) || Node.fs.existsSync(Node.path.join(prjDir, n, "project.json"));
+    let free = name;
+    for (let i = 2; taken(free); i++)
+      free = `${name}-${i}`;
+    //
+    return free;
+  }
+
+
+  /**
+   * Sends the archive produced by {@link Node.User#exportPrj} to the browser as a download and
+   * removes it once the response is over. Electron shows the archive in the file manager instead:
+   * a browser has no way to reach it on disk.
+   * @param {Object} params - Command parameters (expects `params.req.query.path` and `params.res`)
+   * @throws {Error} If the path is missing, outside the user's folders or not a zip archive
+   */
+  async downloadPrj(params)
+  {
+    let filePath = await this.checkUserPath(params.req.query.path);
+    if (Node.path.extname(filePath).toLowerCase() !== ".zip")
+      throw new Error("Not an exported archive");
+    //
+    try {
+      await new Promise((resolve, reject) => {
+        params.res.download(filePath, Node.path.basename(filePath), err => err ? reject(err) : resolve());
+      });
+    }
+    finally {
+      Node.fs.promises.unlink(filePath).catch(() => {});
     }
   }
 
 
   /**
    * Exports a project as a zip archive. The source folder path is taken from
-   * the query string (`path`); the archive carries a `.prj` suffix.
+   * the query string (`path`); the archive carries a `.prj` suffix and leaves out what the
+   * project does not need to travel with: the build output, which is by far the heaviest part of a
+   * project folder and gets rebuilt anyway, and the temporary files (#11586).
    * @param {Object} params - Command parameters (expects `params.req.query.path`)
-   * @returns {Promise<Boolean>} Whether the archive was produced successfully
+   * @returns {Promise<Object>} `{fileName, filePath}` of the archive produced
    * @throws {Error} If the path is missing, falls outside the user's folders, or the archiver fails
    */
   async exportPrj(params)
@@ -1405,7 +1728,7 @@ Node.User = class User
     let fullPath = await this.checkUserPath(params.req.query.path);
     let archiver = new Node.Archiver(this.server);
     try {
-      return await archiver.zip(fullPath, {suffix: ".prj"});
+      return await archiver.zip(fullPath, {suffix: ".prj", exclude: ["build", "files/temp"]});
     }
     catch (err) {
       throw new Error(`Error while exporting project ${fullPath}: ${err.message || err}`, {cause: err});
@@ -1522,7 +1845,7 @@ Node.User = class User
     // Invalidate the profile cache on any open IDE session bound to this user:
     // IDESession.getProfile() captures name/surname/idfdata.language at first call
     // and would otherwise broadcast stale values to subsequently-connected sockets
-    // (telecollab peers, reconnections) until the session is restarted.
+    // (reconnections) until the session is restarted.
     for (let sess of Object.values(this.server.IDESessions)) {
       if (sess.project.user === this)
         sess.invalidateProfileCache();
@@ -1826,7 +2149,9 @@ Node.User = class User
    * Broadcasts the current cloud-connector list to every live session owned by
    * this user, annotating the message with the triggering event so the UI can
    * show a contextual notification.
-   * @param {Object} event - Event descriptor, e.g. `{name: <connectorName>, connected: true|false}` or `{name, changed: true}`
+   * @param {Object} [event] - Event descriptor, e.g. `{name: <connectorName>, connected: true|false}` or `{name, changed: true}`.
+   *                           Omitted when nothing happened to the connectors and the list is sent again only to carry
+   *                           a newly read release list, so that the UI updates without notifying anything to the user
    */
   updateAvailableCloudConnectorsList(event)
   {
@@ -1837,12 +2162,28 @@ Node.User = class User
       cnt: {
         type: "connectorList",
         event,
-        data: this.getUiCloudConnectorsList()
+        data: this.getUiCloudConnectorsList(),
+        releases: this.getCloudConnectorReleases()
       }
     };
     //
     for (let sess of sessionList)
       sess.sendToChild(msg);
+  }
+
+
+  /**
+   * Returns the latest connector release published for each major version, and nothing at all
+   * when this user has no connector: every session asks for the connector list when it starts,
+   * and an installation that has never seen a connector has no reason to ask GitHub anything.
+   * The first connector that connects goes through `addCloudConnector`, which broadcasts the
+   * list again, so the read starts there and its answer reaches the sessions.
+   * @returns {Object|undefined} Latest release by major version, or nothing
+   */
+  getCloudConnectorReleases()
+  {
+    if (this.cloudConnectors.length)
+      return this.server.getCloudConnectorReleases();
   }
 
 
@@ -1908,7 +2249,8 @@ Node.User = class User
   /**
    * Routes a cloud-connector protocol message coming from a session/worker/socket.
    * Supported message types:
-   * - `connectorListRequest`: replies with the current UI connector list;
+   * - `connectorListRequest`: replies with the current UI connector list, plus the latest
+   *   connector release known for each major version;
    * - `remoteCmd`: forwards a command to the target connector, with special
    *   handling for the `listCC` meta command, plus rejection of commands
    *   addressed to pre-21.0 connectors that don't expose `nodeVersion`; hex-
@@ -1928,7 +2270,8 @@ Node.User = class User
           type: Node.User.msgTypeMap.cloudConnectorMsg,
           cnt: {
             type: "connectorList",
-            data: this.getUiCloudConnectorsList()
+            data: this.getUiCloudConnectorsList(),
+            releases: this.getCloudConnectorReleases()
           }
         });
         break;
@@ -2112,7 +2455,7 @@ Node.User = class User
     //
     // MANAGER user can't CREATE, DELETE or RESTORE projects... Only "true" users can do that
     if (this.userName === "manager" && ["create", "restore", "delete"].includes(command) && !isDB && !isAPP) {
-      this.logger.log("WARN", "Command can't be executed on the MANAGER user", "User.processCommand", {url: params.req.originalUrl});
+      this.logger.log("WARN", "Command can't be executed on the MANAGER user", "User.processCommand", {url: Node.Config.redactUrl(params.req.originalUrl)});
       throw new Error("Command can't be executed on the MANAGER user");
     }
     //
@@ -2122,8 +2465,22 @@ Node.User = class User
           return await this.createDatabase(objName);
         else if (isAPP)
           throw new Error("Not supported");
-        else
+        else {
+          // A folder holding a project.json is a project too, even while the registry does not know
+          // it: one copied in with the server running, in the window before the restart that adopts
+          // it (#16379). Creating over it plants the new skeleton inside the lost project, and its
+          // first save overwrites the project.json that was there. The check belongs here and not in
+          // createProject, which also registers the projects whose folder is legitimately already on
+          // disk (importPrj, the TeamWorks fork and clone). Same notion of a taken name as
+          // freeProjectName, same message importPrj refuses with
+          if (Node.fs.existsSync(Node.path.join(this.getProjectsDir(), objName, "project.json"))) {
+            this.log("WARN", "A project folder with this name is already on disk", "User.processCommand",
+                    {project: objName});
+            throw new Error(`A project named "${objName}" is already in the projects directory: use a different name`);
+          }
+          //
           return await this.createProject(objName);
+        }
 
       case "restore":
         if (isDB) {
@@ -2214,7 +2571,7 @@ Node.User = class User
           let database = this.getDatabase(objName);
           if (!database) {
             this.log("WARN", "Database not found", "User.processCommand",
-                    {cmd: command, database: objName, url: params.req.originalUrl});
+                    {cmd: command, database: objName, url: Node.Config.redactUrl(params.req.originalUrl)});
             let err = new Error("Database not found");
             err.code = 404;
             throw err;
@@ -2226,7 +2583,7 @@ Node.User = class User
           let app = this.getApp(objName);
           if (!app) {
             this.log("WARN", "App not found", "User.processCommand",
-                    {cmd: command, app: objName, url: params.req.originalUrl});
+                    {cmd: command, app: objName, url: Node.Config.redactUrl(params.req.originalUrl)});
             let err = new Error("App not found");
             err.code = 404;
             throw err;
@@ -2238,7 +2595,7 @@ Node.User = class User
           let project = this.getProject(objName);
           if (!project) {
             this.log("WARN", "Project not found", "User.processCommand",
-                    {cmd: command, project: objName, url: params.req.originalUrl});
+                    {cmd: command, project: objName, url: Node.Config.redactUrl(params.req.originalUrl)});
             let err = new Error("Project not found");
             err.code = 404;
             throw err;
@@ -2256,7 +2613,7 @@ Node.User = class User
    * revision fields required by the IDF client. The encrypted password is
    * stripped from the returned object.
    * @param {Object} params - Command parameters (unused by this method)
-   * @returns {Object} Profile data (`{name, surname, version, ...idfdata}` without `password`)
+   * @returns {Object} Profile data (`{name, surname, ...idfdata, version}` without `password`)
    */
   getData(params)
   {
@@ -2267,11 +2624,14 @@ Node.User = class User
     version += "|1"; // current version
     version += "|0"; // number of available revisions (always 0)
     //
+    // The version goes after the stored data: the wizards send back everything they read, so a
+    // `version` that ended up in the data of a user would win over the one of the installation,
+    // frozen on the day it was saved. The wizards read it to know which parameters exist in this
+    // version, and with an old one the newer parameters disappear from their pages
     let data = Object.assign({
       name: this.name,
-      surname: this.surname,
-      version
-    }, this.idfdata);
+      surname: this.surname
+    }, this.idfdata, {version});
     delete data.password;
     return data;
   }
@@ -2301,6 +2661,9 @@ Node.User = class User
       delete data.name;
       delete data.surname;
       //
+      // getData computes the version: storing it would mean keeping a copy that grows old
+      delete data.version;
+      //
       // Get the new password or the decrypted password (we need it to call this.config.licSrvUpdateUser )
       data.password = data.password || this.decryptStoredPassword();
       //
@@ -2315,7 +2678,7 @@ Node.User = class User
       // Invalidate the profile cache on any open IDE session bound to this user:
       // IDESession.getProfile() captures name/surname/idfdata.language at first call
       // and would otherwise broadcast stale values to subsequently-connected sockets
-      // (telecollab peers, reconnections) until the session is restarted.
+      // (reconnections) until the session is restarted.
       for (let sess of Object.values(this.server.IDESessions)) {
         if (sess.project.user === this)
           sess.invalidateProfileCache();
@@ -2341,7 +2704,7 @@ Node.User = class User
    * is gated by the server-wide AUTK when enabled.
    *
    * Supported verbs: `status`, `apps`, `databases`, `projects`, `projects2`,
-   * `importPrj`, `exportPrj`, `appsessions`, `profile`, `backup`, `restore`,
+   * `importPrj`, `exportPrj`, `downloadPrj`, `appsessions`, `profile`, `backup`, `restore`,
    * `getdata`, `setdata`, `twListPrjs`, `twForkPrj`.
    * @param {Object} params - Command parameters (must include `params.req` and `params.tokens`)
    * @returns {Promise<*>} The command-specific result
@@ -2353,7 +2716,7 @@ Node.User = class User
     //
     // MANAGER user handles only APPS, DATABASES and SESSIONS commands
     if (this.userName === "manager" && !["apps", "databases", "appsessions"].includes(command)) {
-      this.log("WARN", "Invalid command for MANAGER", "User.execCommand", {url: params.req.originalUrl});
+      this.log("WARN", "Invalid command for MANAGER", "User.execCommand", {url: Node.Config.redactUrl(params.req.originalUrl)});
       throw new Error("Invalid command");
     }
     //
@@ -2386,6 +2749,9 @@ Node.User = class User
       case "exportPrj":
         return await this.exportPrj(params);
 
+      case "downloadPrj":
+        return await this.downloadPrj(params);
+
       case "appsessions":
         return await this.getAppSessions(params);
 
@@ -2414,7 +2780,7 @@ Node.User = class User
         return await this.downloadMasterFromTeamWorks(params);
 
       default:
-        this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: params.req.originalUrl});
+        this.log("WARN", "Invalid command", "User.execCommand", {cmd: command, url: Node.Config.redactUrl(params.req.originalUrl)});
         throw new Error("Invalid Command");
     }
   }
@@ -2518,6 +2884,24 @@ Node.User = class User
   getDbRole()
   {
     return this.userName === "manager" ? "inde" : this.userName;
+  }
+
+
+  /**
+   * Returns the folder that hosts the PostgreSQL tablespace of this user: the app
+   * directory for the `manager` user, the user folder for everybody else.
+   * This always lives on the local per-user folder, never on the configurable projects
+   * directory (IdsPrjDir, #14585): a PostgreSQL tablespace on a network share / cloud-sync
+   * drive is unsupported and the local Postgres server may not even reach the path
+   * (CREATE TABLESPACE would fail). Only project sources follow getProjectsDir().
+   * @returns {String} Absolute path of the db folder
+   */
+  getDbFolder()
+  {
+    if (this.userName === "manager")
+      return Node.path.join(this.config.appDirectory, "db");
+    //
+    return Node.path.join(this.config.directory, this.userName, "db");
   }
 
 
@@ -2657,6 +3041,27 @@ Node.User = class User
         // Set the project ID and TeamWorks properties
         newProject.updateInfo({twFork: true, lastSave: new Date()});
         //
+        // Say WHO the parent is instead of inferring it from the config just inherited: the
+        // downloaded file describes the project we forked, and inferring worked only while a
+        // project could have a single role. Whatever parent link came down with it is not ours
+        try {
+          let twConfigPath = Node.path.join(localPath, "TwConfig.json");
+          let twConfig = JSON.parse(await Node.fs.promises.readFile(twConfigPath, "utf8"));
+          twConfig.parentPrjName = twConfig.originalPrjName || projectName;
+          twConfig.parentUser = twConfig.masterUser;
+          //
+          // The history id that came down is the parent's: it is the one this fork is aligned with
+          twConfig.parentHistoryId = twConfig.historyId;
+          delete twConfig.historyId;
+          await Node.fs.promises.writeFile(twConfigPath, JSON.stringify(twConfig));
+        }
+        catch (err) {
+          // The fork stands on the inherited pointer, which is right whenever the parent has a
+          // single role: say it happened instead of failing the fork
+          this.log("WARN", `Could not record the fork's parent explicitly: ${err.message || err}`,
+                  "User.forkProjectFromTeamWorks", {forkName: finalProjectName});
+        }
+        //
         this.log("INFO", "Project forked from TeamWorks successfully", "User.forkProjectFromTeamWorks",
                 {projectId, projectName, forkName: finalProjectName});
       }
@@ -2751,6 +3156,20 @@ Node.User = class User
         }
         catch (err) {
           throw new Error(`Error creating master: ${err.message || err}`, {cause: err});
+        }
+        //
+        // A copy is the same project, so it takes over the parent the master published: without
+        // it only whoever published could carry the work further up
+        try {
+          let twConfigPath = Node.path.join(localPath, "TwConfig.json");
+          let twConfig = JSON.parse(await Node.fs.promises.readFile(twConfigPath, "utf8"));
+          if (TwGCloudDriver.adoptPublishedParent(twConfig))
+            await Node.fs.promises.writeFile(twConfigPath, JSON.stringify(twConfig));
+        }
+        catch (err) {
+          // Without it the copy still works on its own space: it just cannot reach what is above
+          this.log("WARN", `Could not inherit the master's parent: ${err.message || err}`,
+                  "User.downloadMasterFromTeamWorks", {localName: finalProjectName});
         }
         //
         // Tag the project as a master replica

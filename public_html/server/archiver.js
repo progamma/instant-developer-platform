@@ -619,6 +619,8 @@ Node.Archiver = class Archiver
    * @param {String} fullPath - Path to file or directory to compress
    * @param {Object} [options] - Compression options
    * @param {String} [options.suffix] - Suffix to add to archived file names
+   * @param {Array<String>} [options.exclude] - Folders of the directory to be left out, as paths relative
+   * to it ("build", "files/temp")
    * @returns {Promise<Object>} Object with fileName and filePath properties
    * @throws {Error} If compression fails
    */
@@ -636,8 +638,15 @@ Node.Archiver = class Archiver
       // pipeline resolves when the ZIP is fully written, rejecting on archive/output errors
       let written = require("stream/promises").pipeline(archive, output);
       //
-      if (stats.isDirectory())
-        archive.directory(fullPath, zipElementName);
+      if (stats.isDirectory()) {
+        // The entry name is relative to the directory, with the separator of the platform
+        let excluded = options?.exclude?.map(e => e.split("/")) || [];
+        let inExcluded = entry => {
+          let parts = entry.name.split(/[\\/]/);
+          return excluded.some(e => e.every((seg, i) => parts[i] === seg));
+        };
+        archive.directory(fullPath, zipElementName, entry => inExcluded(entry) ? false : entry);
+      }
       else
         archive.file(fullPath, {name: zipElementName});
       archive.finalize();

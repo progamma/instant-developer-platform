@@ -32,6 +32,8 @@ Node.Utils = require("./utils");
  * @property {String} [secureSID] - Secure session ID for cookie protection
  * @property {Object} [restReq] - Current REST request object
  * @property {Object} [restRes] - Current REST response object
+ * @property {Boolean} restBusy - True while the current REST request is waiting for the app's reply
+ * @property {Array} restQueue - REST requests arrived while another one was pending, waiting for their turn
  */
 Node.Session = class Session
 {
@@ -45,6 +47,10 @@ Node.Session = class Session
     //
     // Array of AppClients (clients connected with this session)
     this.appClients = [];
+    //
+    // REST requests waiting for the current one to be answered
+    this.restQueue = [];
+    this.restBusy = false;
   }
 
 
@@ -97,6 +103,18 @@ Node.Session = class Session
       this.cTokens.push(msg.cnt.ctoken);  // Add the ctoken to the array (if not there already)
     else if (msg.cnt.op === "del" && ctidx !== -1)
       this.cTokens.splice(ctidx, 1);  // Remove the ctoken from the array
+  }
+
+
+  /**
+   * Returns a client id as it may be written to the log. An invited client's id is its ctoken, a
+   * credential until AppClient.acceptRole consumes it: until then it is masked.
+   * @param {String} cid - Client id
+   * @returns {String} The id, or *** while it is a valid ctoken
+   */
+  cidForLog(cid)
+  {
+    return this.cTokens.includes(cid) ? "***" : cid;
   }
 
 
@@ -201,7 +219,7 @@ Node.Session = class Session
     //
     // A REST request must be answered exactly once: the reply could have been sent already
     // (i.e. the request timed out while the app was still working, see sendRESTTimeout)
-    if (this.restRes.writableEnded)
+    if (!this.restBusy)
       return this.log("WARN", "Can't send REST response: the reply has been sent already",
               "Session.handleSendResponseMsg", msg);
     //
@@ -260,6 +278,7 @@ Node.Session = class Session
       }
       // Session termination will happen in child process (app.js) after sendResponse with stream:"end"
       // REST death timer will be automatically canceled during termination
+      this.endRestCall();
       return;
     }
     //
@@ -307,7 +326,12 @@ Node.Session = class Session
     }
     catch (ex) {
       this.log("WARN", `Can't send REST response: ${ex}`, "Session.handleSendResponseMsg", msg);
+      //
+      // The queue is about to move on: a reply left open now would never be closed by anyone
+      this.closeRestResponse(this.restRes, 500, "Can't send REST response");
     }
+    //
+    this.endRestCall();
   }
 
 
@@ -322,30 +346,62 @@ Node.Session = class Session
 
 
   /**
-   * Closes a timed out REST request with an explicit `504 Gateway Timeout`, so that the caller
-   * gets an error instead of hanging forever on a request nobody is going to answer anymore.
-   * Nothing is sent if the reply has been sent already or if there is no pending request at all
-   * (i.e. the session was simply abandoned by the client): in that case there is only cleanup to do.
-   * @param {Number} timeout - Timeout (in msec) that expired, reported to the caller
+   * Closes the timed out REST requests with an explicit `504 Gateway Timeout`, so that the callers
+   * get an error instead of hanging forever on requests nobody is going to answer anymore.
+   * @param {Number} timeout - Timeout (in msec) that expired, reported to the callers
    */
   sendRESTTimeout(timeout)
   {
-    // Nothing to answer -> nothing to do (the caller is not waiting for a reply)
-    if (!this.restRes || this.restRes.writableEnded)
+    this.closeRestCalls(504, `Request timed out after ${timeout / 1000} sec`);
+  }
+
+
+  /**
+   * Answers with an error every REST request still waiting for a reply: the current one, if the app
+   * has not answered it yet, and the queued ones, that never reached the app.
+   * Nothing is sent to the requests answered already, or if there is no pending request at all
+   * (i.e. the session was simply abandoned by the client).
+   * @param {Number} code - HTTP status code
+   * @param {String} text - Response body
+   * @returns {Boolean} True if the current request was still waiting for the app's reply
+   */
+  closeRestCalls(code, text)
+  {
+    let pending = this.restQueue.splice(0).map(restCall => restCall.res);
+    let wasBusy = this.restBusy;
+    if (wasBusy)
+      pending.unshift(this.restRes);
+    this.restBusy = false;
+    //
+    pending.forEach(res => this.closeRestResponse(res, code, text));
+    //
+    return wasBusy;
+  }
+
+
+  /**
+   * Closes a REST response with an error, unless it has been completed already.
+   * @param {Response} res - Express response object
+   * @param {Number} code - HTTP status code
+   * @param {String} text - Response body
+   */
+  closeRestResponse(res, code, text)
+  {
+    if (res.writableEnded)
       return;
     //
-    this.log("DEBUG", "REST request timed out -> send timeout response", "Session.sendRESTTimeout");
+    this.log("DEBUG", `Close pending REST request with code ${code}`, "Session.closeRestResponse");
     //
     try {
       // If the response has been started already (streaming mode) status and headers are gone:
       // the only thing left to do is to close the stream so that the caller stops waiting
-      if (this.restRes.headersSent)
-        this.restRes.end();
+      if (res.headersSent)
+        res.end();
       else
-        this.restRes.status(504).send(`Request timed out after ${timeout / 1000} sec`);
+        res.status(code).send(text);
     }
     catch (ex) {
-      this.log("WARN", `Can't send REST timeout response: ${ex}`, "Session.sendRESTTimeout");
+      this.log("WARN", `Can't close pending REST request: ${ex}`, "Session.closeRestResponse");
     }
   }
 
@@ -423,7 +479,8 @@ Node.Session = class Session
   {
     let secureSID = Node.cookie.parse(socket.request.headers.cookie || "{}")[`${this.id}_secureSID`];
     if (secureSID !== this.secureSID) {
-      this.log("WARN", "Secure SID does not match", "Session.invalidSID", {sid: this.id, expectedSecureSID: this.secureSID, secureSID});
+      // Neither value goes to the log: the expected one is the secret this check protects
+      this.log("WARN", "Secure SID does not match", "Session.invalidSID", {sid: this.id, hasCookie: secureSID !== undefined});
       return true;
     }
   }
@@ -462,7 +519,7 @@ Node.Session = class Session
     this.appClients.push(appClient);
     //
     // Log client creation
-    this.log("DEBUG", "Created a new app client", "Session.createAppClient", {cid: appClient.id});
+    this.log("DEBUG", "Created a new app client", "Session.createAppClient", {cid: this.cidForLog(appClient.id)});
     //
     // Initialize the new app client
     appClient.init(req, res);
@@ -503,15 +560,85 @@ Node.Session = class Session
    * Starts a REST session.
    * Stores the request and response objects for the session, enabling the application
    * to handle REST requests and send responses using the session's REST capabilities.
+   * The app answers one REST request at a time and its reply carries only the session ID: a request
+   * arriving while another one is pending waits in the queue, or the reply would reach the wrong caller.
    * @param {Request} req - Express request object
    * @param {Response} res - Express response object
    */
   startRest(req, res)
   {
+    // The request data built by Config.processRun is restored as soon as this method returns
+    let restCall = {
+      req,
+      res,
+      request: this.request,
+      cookies: this.cookies
+    };
+    //
+    if (this.restBusy && this.queuesRestCalls) {
+      this.log("DEBUG", "REST request queued: another one is waiting for the reply", "Session.startRest", {queued: this.restQueue.length + 1});
+      this.restQueue.push(restCall);
+      return;
+    }
+    //
+    this.runRestCall(restCall);
+  }
+
+
+  /**
+   * Whether a REST request arriving while another one is pending waits for its turn (see startRest).
+   * @type {Boolean}
+   * @readonly
+   */
+  get queuesRestCalls()
+  {
+    return true;
+  }
+
+
+  /**
+   * Makes a REST request the current one and hands it to the app.
+   * @param {Object} restCall - REST request (see startRest)
+   */
+  runRestCall(restCall)
+  {
     // Store the request/response objects so that the app can use them
     // (for instance, the app can answer to a REST request using the .restRes property and the app::sendResponse method)
-    this.restReq = req;
-    this.restRes = res;
+    this.restReq = restCall.req;
+    this.restRes = restCall.res;
+    this.restBusy = true;
+    //
+    this.sendRestToChild(restCall);
+  }
+
+
+  /**
+   * Called when the app has answered the current REST request: starts the next queued one, if any.
+   * The queue moves on the app's reply, not on the caller closing the connection: a caller that gives
+   * up does not stop the app, and its late reply would reach the next caller.
+   */
+  endRestCall()
+  {
+    this.restBusy = false;
+    //
+    let restCall = this.restQueue.shift();
+    if (restCall)
+      this.runRestCall(restCall);
+  }
+
+
+  /**
+   * Sends a REST request to the child process.
+   * Abstract method that must be implemented by subclasses.
+   * @param {Object} restCall - REST request (see startRest)
+   * @param {Request} restCall.req - Express request object
+   * @param {Object} restCall.request - Request data for the app
+   * @param {Object} restCall.cookies - Request cookies
+   * @throws {Error} Throws error if not implemented by subclass
+   */
+  sendRestToChild(restCall)
+  {
+    throw new Error("sendRestToChild must be implemented by subclass");
   }
 };
 

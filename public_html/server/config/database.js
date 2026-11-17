@@ -14,6 +14,8 @@ Node.path = require("path");
 // Import classes
 Node.Archiver = require("../archiver");
 Node.Utils = require("../utils");
+// config.js requires this file while it loads: Config is read when used, not here
+Object.defineProperty(Node, "Config", {get: () => require("./config")});
 
 
 /**
@@ -49,6 +51,22 @@ Node.Database = class Database
 
 
   /**
+   * The message of an error. An AggregateError (every connection attempt failed, e.g. localhost on IPv6
+   * and IPv4) has an empty message and printed as is says just "AggregateError": its causes are added
+   * (issue #16938)
+   * @param {Error} err - The error
+   * @returns {String} The message
+   */
+  static errorMessage(err)
+  {
+    let msg = `${err?.message || err}`;
+    if (err instanceof AggregateError)
+      msg += ` (${err.errors.map(e => e.message || e).join("; ")})`;
+    return msg;
+  }
+
+
+  /**
    * Initialize the PostgreSQL environment for a user: create the login ROLE,
    * create the user's TABLESPACE under the user directory (or the app directory
    * when the user is `manager`) and set it as default tablespace for the session.
@@ -59,15 +77,8 @@ Node.Database = class Database
    */
   static async initDbEnv(user)
   {
-    // Path where the tablespace will be stored. This always lives on the local per-user folder,
-    // never on the configurable projects directory (IdsPrjDir, #14585): a PostgreSQL tablespace on
-    // a network share / cloud-sync drive is unsupported and the local Postgres server may not even
-    // reach the path (CREATE TABLESPACE would fail). Only project sources follow getProjectsDir().
-    let dbPath;
-    if (user.userName === "manager")
-      dbPath = Node.path.join(user.config.appDirectory, "db");
-    else
-      dbPath = Node.path.join(user.config.directory, user.userName, "db");
+    // Path where the tablespace will be stored (see User.getDbFolder for why it is always local)
+    let dbPath = user.getDbFolder();
     //
     // Create a new client to communicate with the db
     let client, logData;
@@ -76,8 +87,8 @@ Node.Database = class Database
         client = await Node.Database.openConnection(user.config);
       }
       catch (err) {
-        logData = {conString: Node.Database.getURL(user.config)};
-        throw new Error(`Error connecting to the database: ${err.message || err}`, {cause: err});
+        logData = {conString: Node.Database.maskURL(Node.Database.getURL(user.config))};
+        throw new Error(`Error connecting to the database: ${Node.Database.errorMessage(err)}`, {cause: err});
       }
       //
       // Create the role
@@ -149,8 +160,8 @@ Node.Database = class Database
         client = await Node.Database.openConnection(user.config);
       }
       catch (err) {
-        logData = {conString: Node.Database.getURL(user.config)};
-        throw new Error(`Error connecting to the database: ${err.message || err}`, {cause: err});
+        logData = {conString: Node.Database.maskURL(Node.Database.getURL(user.config))};
+        throw new Error(`Error connecting to the database: ${Node.Database.errorMessage(err)}`, {cause: err});
 
       }
       //
@@ -193,10 +204,61 @@ Node.Database = class Database
    */
   static getURL(config, dbname)
   {
-    let conString = `postgres://${config.dbUser}:${config.dbPassword}@${config.dbAddress}:${config.dbPort}`;
+    // User and password are encoded: a password with special characters (@, :, /, #...) would break the URL (issue #9169)
+    let conString = `postgres://${encodeURIComponent(config.dbUser)}:${encodeURIComponent(config.dbPassword)}@${config.dbAddress}:${config.dbPort}`;
     if (dbname)
       conString += `/${dbname}`;
     return conString;
+  }
+
+
+  /**
+   * A connection URL to write in the log: the password is masked (issue #16965)
+   * @param {String} url - The connection URL
+   * @returns {String} The URL with the password replaced by ***
+   */
+  static maskURL(url)
+  {
+    if (!url)
+      return url;
+    //
+    try {
+      // With more than one "@" new URL closes the authority at the first / ? # and takes part of the password
+      // as the host: mask up to the last "@" instead
+      if (url.indexOf("@") !== url.lastIndexOf("@"))
+        throw new Error("more than one @");
+      let u = new URL(url);
+      if (u.password) {
+        u.password = "***";
+        return u.toString();
+      }
+      //
+      // A user without password: nothing to mask
+      if (u.username)
+        return url;
+    }
+    catch {
+    }
+    //
+    // Not a valid URL (a password with special characters written as it is), or one that new URL misreads
+    // (a password like 2024/x becomes host and port): mask up to the last "@"
+    return url.replace(/^([^:/]+:\/\/[^:@/]*:).*@/, "$1***@");
+  }
+
+
+  /**
+   * The message of an error of psql or pg_dump: the failed command line contains the connection URL with
+   * its password, and it goes to the log and to the HTTP response (issue #16965)
+   * @param {Error} err - The error
+   * @returns {String} The message with the password masked
+   */
+  maskedMessage(err)
+  {
+    let url = this.getURL();
+    let msg = String(err?.message || err).replaceAll(url, Node.Database.maskURL(url));
+    //
+    // psql can also print the password by itself (for instance when a lone "%" makes it invalid)
+    return this.config.dbPassword ? msg.replaceAll(this.config.dbPassword, "***") : msg;
   }
 
 
@@ -455,8 +517,8 @@ Node.Database = class Database
         status.diskSize = stdout.trim();
       }
       catch (err) {
-        this.log("ERROR", `Error getting the size of user's DB: ${err.message || err}`, "Database.getStatus", {sqlcmd});
-        throw new Error(`Error getting the size of user's DB folder: ${err.message || err}`, {cause: err});
+        this.log("ERROR", `Error getting the size of user's DB: ${this.maskedMessage(err)}`, "Database.getStatus", {sqlcmd});
+        throw new Error(`Error getting the size of user's DB folder: ${this.maskedMessage(err)}`, {cause: err});
       }
     }
     //
@@ -481,8 +543,8 @@ Node.Database = class Database
         client = await Node.Database.openConnection(this.config);
       }
       catch (err) {
-        logData = {conString: this.getURL()};
-        throw new Error(`Error connecting to the database: ${err.message || err}`, {cause: err});
+        logData = {conString: Node.Database.maskURL(this.getURL())};
+        throw new Error(`Error connecting to the database: ${Node.Database.errorMessage(err)}`, {cause: err});
       }
       //
       // Create the database in the right tablespace
@@ -542,8 +604,8 @@ Node.Database = class Database
         client = await Node.Database.openConnection(this.config);
       }
       catch (err) {
-        logData = {conString: this.getURL()};
-        throw new Error(`Error connecting to the database: ${err.message || err}`, {cause: err});
+        logData = {conString: Node.Database.maskURL(this.getURL())};
+        throw new Error(`Error connecting to the database: ${Node.Database.errorMessage(err)}`, {cause: err});
       }
       //
       // Drop the database
@@ -608,7 +670,8 @@ Node.Database = class Database
     await this.config.saveConfig();
     //
     // Log the operation
-    this.log("DEBUG", "Updated database configuration", "Database.configure", {config: query});
+    this.log("DEBUG", "Updated database configuration", "Database.configure",
+            {config: Node.Config.redactQuery(query.remoteUrl ? {...query, remoteUrl: Node.Database.maskURL(query.remoteUrl)} : query)});
   }
 
 
@@ -645,8 +708,8 @@ Node.Database = class Database
         client = await Node.Database.openConnection(this.config);
       }
       catch (err) {
-        logData = {conString: Node.Database.getURL(this.config)};
-        throw new Error(`Error connecting to the database: ${err.message || err}`, {cause: err});
+        logData = {conString: Node.Database.maskURL(Node.Database.getURL(this.config))};
+        throw new Error(`Error connecting to the database: ${Node.Database.errorMessage(err)}`, {cause: err});
       }
       //
       // Change the db name
@@ -761,7 +824,7 @@ Node.Database = class Database
         return await this.renameDb(params);
 
       default:
-        this.log("WARN", "Invalid Command", "Database.execCommand", {cmd: command, url: params.req.originalUrl});
+        this.log("WARN", "Invalid Command", "Database.execCommand", {cmd: command, url: Node.Config.redactUrl(params.req.originalUrl)});
         throw new Error("Invalid Command");
     }
   }

@@ -7,7 +7,6 @@ var Node = Node || {};
 
 // Import modules
 Node.fs = require("fs");
-Node.child = require("child_process");
 Node.path = require("path");
 Node.Utils = require("./utils");
 
@@ -16,24 +15,20 @@ Node.Utils = require("./utils");
  * @class Node.Logger
  * @classdesc
  * Centralized logging system for the Instant Developer Cloud framework.
- * Handles logging across different process types (server, childer, child, app),
- * manages log file rotation, monitors disk space, and provides hierarchical log routing.
+ * Applies the common filtering rules and forwards each entry to the parent process:
+ * the entries climb the chain of processes until they reach the root logger, that owns
+ * the physical file.
  *
  * Key features:
  * - **Multi-process logging**: Routes logs from child processes to the main server
- * - **Automatic rotation**: Creates daily log files with automatic cleanup of old logs
- * - **Resource monitoring**: Stops logging when disk space or file size limits are exceeded
- * - **Exception handling**: Captures and logs uncaught exceptions and unhandled rejections
  * - **Level filtering**: Supports DEBUG, INFO, WARN, ERROR levels with configurable output
+ * - **Resource monitoring**: Stops logging when disk space or file size limits are exceeded
  *
- * @property {Node.Server|Node.Childer|Node.Child|Object} parent - The parent object that owns this logger (App runtime object for IDEAPP)
- * @property {String} parentType - Type of parent ("SERVER", "CHILDER", "CHILD", "IDEAPP")
- * @property {WriteStream} stream - File stream for writing log entries
- * @property {String} ISOdate - Current log file date in ISO format (YYYY-MM-DD)
- * @property {Number} newLogTimer - Timer ID for daily log rotation
+ * @property {Node.Server|Node.Childer|Node.Child} parent - The parent object that owns this logger
  * @property {Boolean} stopLogFileSize - Flag indicating logging stopped due to file size
  * @property {Boolean} stopLogDiskSize - Flag indicating logging stopped due to disk space
  * @property {Boolean} debug2log - Whether to write DEBUG messages to file
+ * @see Node.ServerLogger - The logger of the root process
  */
 Node.Logger = class Logger
 {
@@ -48,15 +43,11 @@ Node.Logger = class Logger
 
 
   /**
-   * @param {Node.Server|Node.Childer|Node.Child|Object} par - Parent object (App runtime object for IDEAPP)
-   * @param {String} type - Type of parent: "SERVER", "CHILDER", "CHILD", or "IDEAPP"
+   * @param {Node.Server|Node.Childer|Node.Child} par - Parent object
    */
-  constructor(par, type)
+  constructor(par)
   {
     this.parent = par;
-    this.parentType = type;
-    //
-    this.init();
   }
 
 
@@ -73,45 +64,186 @@ Node.Logger = class Logger
 
 
   /**
-   * Initializes the logger based on the parent type.
-   * For SERVER type, sets up exception handlers, creates log files, and starts monitoring.
+   * Logs a message with the specified level and metadata.
+   * Applies the filters shared by every process (deprecated warnings, resource limits, level)
+   * and console output for local mode, then hands the message over to output().
+   * @param {String} level - Message severity level (DEBUG, INFO, WARN, ERROR)
+   * @param {String} message - The log message text
+   * @param {String} [sender] - Function or module that generated the message
+   * @param {Object} [data] - Additional structured data to log
+   */
+  log(level, message, sender, data)
+  {
+    // Force message as string
+    message += "";
+    // [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues.
+    // Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
+    //
+    // Unfortunately we depend on more than 50 modules... and several have "new Buffer()" somewhere... We need to skip this message
+    if (message.includes("Buffer() is deprecated due to security and usability issues"))
+      return;
+    //
+    // If log has stopped, do nothing
+    if (this.stopLogFileSize || this.stopLogDiskSize)
+      return;
+    //
+    // Protect for un-serializable data
+    if (data) {
+      try {
+        JSON.stringify(data);
+      }
+      catch {
+        data = undefined;
+        this.log("DEBUG", `Can't dump DATA for message ${message}`, sender);
+      }
+    }
+    //
+    // Add level-specific info
+    if (this.parent.project) {  // For CHILD, add user and project
+      data = data || {};
+      data.prj = this.parent.project.name;
+      data.user = this.parent.project.user.userName;
+      data.sid = this.parent.sid;
+    }
+    //
+    // If I'm running in "local" mode
+    // - if level is DEBUG -> write to console.log
+    // - if level is ERROR -> write to console.error
+    if (this.config?.local && ["DEBUG", "ERROR"].includes(level)) {
+      // Compute text message
+      let s = `${new Date().toISOString()} - ${level} - ${message}`;
+      if (sender || data) {
+        s += " - (";
+        if (sender)
+          s += `sender: ${sender}`;
+        if (data)
+          s += (sender ? ", " : "") + `data: ${JSON.stringify(data)}`;
+        s += ")";
+      }
+      //
+      if (level === "DEBUG")
+        console.log(s);
+      else
+        console.error(s);
+    }
+    //
+    // Don't write DEBUG messages to file
+    if (level === "DEBUG" && !this.debug2log)
+      return;
+    //
+    this.output(level, message, sender, data);
+  }
+
+
+  /**
+   * Delivers a message that passed the log() filters.
+   * Asks the owner process to log it: only the root logger owns the physical file.
+   * @param {String} level - Message severity level (DEBUG, INFO, WARN, ERROR)
+   * @param {String} message - The log message text
+   * @param {String} [sender] - Function or module that generated the message
+   * @param {Object} [data] - Additional structured data to log
+   */
+  output(level, message, sender, data)
+  {
+    // Best-effort: during tab close the IPC channel may already be tearing down, and a
+    // throwing send here would re-enter the child's uncaughtException handler (which logs
+    // again) in a loop (issue #14680).
+    Node.Utils.safeSend({
+      type: Node.Logger.msgTypeMap.log,
+      level,
+      message,
+      sender,
+      data
+    });
+  }
+
+
+  /**
+   * Flushes the log stream to disk and closes it.
+   * Resolves once the underlying WriteStream has drained its buffer, so callers
+   * that exit immediately after (e.g. on a fatal disconnect) do not lose the last
+   * log entries. A safety timeout prevents a stalled stream from blocking the
+   * caller indefinitely. After flush() the logger no longer writes to file:
+   * intended for pre-exit cleanup, not regular use.
+   */
+  flush()
+  {
+    return new Promise(resolve => {
+      if (!this.stream)
+        return resolve();
+      //
+      let timer = setTimeout(resolve, 1000);
+      //
+      this.stream.end(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+  }
+
+
+};
+
+
+/**
+ * @class Node.ServerLogger
+ * @classdesc
+ * Logger of the root process: it is the only one that owns the physical log file.
+ * Every other process forwards its entries up the chain until they reach this one.
+ *
+ * @extends Node.Logger
+ * @property {WriteStream} stream - File stream for writing log entries
+ * @property {String} ISOdate - Current log file date in ISO format (YYYY-MM-DD)
+ * @property {Number} newLogTimer - Timer ID for daily log rotation
+ */
+Node.ServerLogger = class ServerLogger extends Node.Logger
+{
+  /**
+   * @param {Node.Server} par - Parent object
+   */
+  constructor(par)
+  {
+    super(par);
+    //
+    this.init();
+  }
+
+
+  /**
+   * Sets up exception handlers, creates the log file and starts resource monitoring.
    */
   init()
   {
-    // If I'm the SERVER
-    if (this.parentType === "SERVER") {
-      // If I need to log exceptions, add listener
-      if (this.config.handleException) {
-        let unhandledExceptionFnc = err => {
-          this.log("ERROR", `Uncaught server exception : ${err.stack || err}`, "Logger.init");
-          //
-          let crashAll = true;
-          if ((err.stack + "").includes("node_modules/gcloud"))
-            crashAll = false;   // Do not exit if the problem was inside gcloud
-          else if ((err.stack + "").includes("incorrect header check\n    at Zlib._handle.onerror (zlib.js:370:17)"))
-            crashAll = false;   // Do not exit if the problem is due to an "incorrect header check from the Zlib bugged library"
-          //
-          // If I have to... let's do it!!!
-          if (crashAll)
-            process.exit(1);
-        }
-        process.on("unhandledRejection", unhandledExceptionFnc);
-        process.on("uncaughtException", unhandledExceptionFnc);
+    // If I need to log exceptions, add listener
+    if (this.config.handleException) {
+      let unhandledExceptionFnc = err => {
+        this.log("ERROR", `Uncaught server exception : ${err.stack || err}`, "Logger.init");
+        //
+        let crashAll = true;
+        if ((err.stack + "").includes("node_modules/gcloud"))
+          crashAll = false;   // Do not exit if the problem was inside gcloud
+        else if ((err.stack + "").includes("incorrect header check\n    at Zlib._handle.onerror (zlib.js:370:17)"))
+          crashAll = false;   // Do not exit if the problem is due to an "incorrect header check from the Zlib bugged library"
+        //
+        // If I have to... let's do it!!!
+        if (crashAll)
+          process.exit(1);
       }
-      //
-      // Create the LOG file
-      this.initLogFile();
-      //
-      // Create timer that checks if I need to stop writing due to disk space or file size
-      this.startCheckTimer();
+      process.on("unhandledRejection", unhandledExceptionFnc);
+      process.on("uncaughtException", unhandledExceptionFnc);
     }
+    //
+    // Create the LOG file
+    this.initLogFile();
+    //
+    // Create timer that checks if I need to stop writing due to disk space or file size
+    this.startCheckTimer();
   }
 
 
   /**
    * Initializes or rotates the log file stream.
    * Creates a new log file for each day, maintains the log directory, and handles file rotation.
-   * Only called by SERVER type loggers.
    */
   initLogFile()
   {
@@ -195,133 +327,6 @@ Node.Logger = class Logger
 
 
   /**
-   * Logs a message with the specified level and metadata.
-   * Handles routing between processes, console output for local mode, and file writing for server.
-   * Includes automatic filtering of deprecated warnings and resource limit checks.
-   * @param {String} level - Message severity level (DEBUG, INFO, WARN, ERROR)
-   * @param {String} message - The log message text
-   * @param {String} [sender] - Function or module that generated the message
-   * @param {Object} [data] - Additional structured data to log
-   */
-  log(level, message, sender, data)
-  {
-    // Force message as string
-    message += "";
-    // [DEP0005] DeprecationWarning: Buffer() is deprecated due to security and usability issues.
-    // Please use the Buffer.alloc(), Buffer.allocUnsafe(), or Buffer.from() methods instead.
-    //
-    // Unfortunately we depend on more than 50 modules... and several have "new Buffer()" somewhere... We need to skip this message
-    if (message.includes("Buffer() is deprecated due to security and usability issues"))
-      return;
-    //
-    // If log has stopped, do nothing
-    if (this.stopLogFileSize || this.stopLogDiskSize)
-      return;
-    //
-    // Protect for un-serializable data
-    if (data) {
-      try {
-        JSON.stringify(data);
-      }
-      catch {
-        data = undefined;
-        this.log("DEBUG", `Can't dump DATA for message ${message}`, sender);
-      }
-    }
-    //
-    // Add level-specific info
-    if (this.parentType === "CHILD") {  // For CHILD, add user and project
-      data = data || {};
-      data.prj = this.parent.project.name;
-      data.user = this.parent.project.user.userName;
-      data.sid = this.parent.sid;
-    }
-    //
-    // If I'm running in "local" mode
-    // - if level is DEBUG -> write to console.log (or console.error if IDE message)
-    // - if level is ERROR -> write to console.error
-    if (this.config && this.config.local && (level === "DEBUG" || level === "ERROR")) {
-      // Compute text message
-      let s = `${new Date().toISOString()} - ${level} - ${message}`;
-      if (sender || data) {
-        s += " - (";
-        if (sender)
-          s += `sender: ${sender}`;
-        if (data)
-          s += (sender ? ", " : "") + `data: ${JSON.stringify(data)}`;
-        s += ")";
-      }
-      //
-      if (level === "DEBUG") {
-        // For IDEAPP always use console.error (otherwise user sees this into "app-dtt-console")
-        if (this.parentType === "IDEAPP")
-          console.error(s);
-        else
-          console.log(s);
-      }
-      else if (level === "ERROR")
-        console.error(s);
-    }
-    //
-    // Don't write DEBUG messages to file
-    if (level === "DEBUG" && !this.debug2log)
-      return;
-    //
-    // If I'm not the SERVER, ask my owner if he can log this for me
-    if (this.parentType !== "SERVER") {
-      // Best-effort: during tab close the IPC channel may already be tearing down, and a
-      // throwing send here would re-enter the child's uncaughtException handler (which logs
-      // again) in a loop (issue #14680).
-      Node.Utils.safeSend({
-        type: Node.Logger.msgTypeMap.log,
-        level,
-        message,
-        sender,
-        data
-      });
-      return;
-    }
-    //
-    // I'm the SERVER -> init LOG file if needed
-    this.initLogFile();
-    //
-    // Log message to physical file
-    let l = {
-      dt: new Date().toISOString(),
-      lev: level,
-      msg: message.replace(/\n/g, ""),
-      snd: sender,
-      data
-    };
-    this.stream.write(JSON.stringify(l) + "\n");
-  }
-
-
-  /**
-   * Flushes the log stream to disk and closes it.
-   * Resolves once the underlying WriteStream has drained its buffer, so callers
-   * that exit immediately after (e.g. on a fatal disconnect) do not lose the last
-   * log entries. A safety timeout prevents a stalled stream from blocking the
-   * caller indefinitely. After flush() the logger no longer writes to file:
-   * intended for pre-exit cleanup, not regular use.
-   */
-  flush()
-  {
-    return new Promise(resolve => {
-      if (!this.stream)
-        return resolve();
-      //
-      let timer = setTimeout(resolve, 1000);
-      //
-      this.stream.end(() => {
-        clearTimeout(timer);
-        resolve();
-      });
-    });
-  }
-
-
-  /**
    * Starts a timer that monitors logging resource limits.
    * Checks every minute for file size exceeding 200MB and disk space below configured threshold.
    * Automatically stops logging when limits are exceeded and resumes when conditions improve.
@@ -379,8 +384,35 @@ Node.Logger = class Logger
       }
     }, 60 * 1000);    // Every minute
   }
+
+
+  /**
+   * Writes the message to the physical log file.
+   * @param {String} level - Message severity level (DEBUG, INFO, WARN, ERROR)
+   * @param {String} message - The log message text
+   * @param {String} [sender] - Function or module that generated the message
+   * @param {Object} [data] - Additional structured data to log
+   * @override
+   */
+  output(level, message, sender, data)
+  {
+    // Init LOG file if needed
+    this.initLogFile();
+    //
+    let l = {
+      dt: new Date().toISOString(),
+      lev: level,
+      msg: message.replace(/\n/g, ""),
+      snd: sender,
+      data
+    };
+    this.stream.write(JSON.stringify(l) + "\n");
+  }
 };
 
 
 // Export module
-module.exports = Node.Logger;
+module.exports = {
+  Logger: Node.Logger,
+  ServerLogger: Node.ServerLogger
+};

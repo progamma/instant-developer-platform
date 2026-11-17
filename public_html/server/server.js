@@ -9,7 +9,7 @@ var Node = Node || {};
 Node.Config = require("./config/config");
 Node.IDESession = require("./idesession");
 Node.AppSession = require("./master/appsession");
-Node.Logger = require("./logger");
+Node.ServerLogger = require("./logger").ServerLogger;
 Node.Request = require("./request");
 Node.Archiver = require("./archiver");
 Node.Utils = require("./utils");
@@ -58,7 +58,7 @@ Node.mime = require("mime-types");
  * @property {Date} startTime - Server start timestamp
  * @property {Node.McpServer} mcpServer - MCP server instance for DevAgent remote control
  * @property {Node.Config} config - Server configuration instance
- * @property {Node.Logger} logger - Logger instance for server events
+ * @property {Node.ServerLogger} logger - Logger instance for server events
  * @property {Node.Request} request - Request handler for inter-server communication
  * @property {ChildProcess} childer - Child process manager for spawning IDE processes
  * @property {Object} backupInfo - Disk backup information and state
@@ -103,6 +103,20 @@ Node.Server = class Server
     /** Design Time Testing message */
     dtt: "dtt",
   };
+
+
+  /**
+   * How long a read of the Cloud Connector releases is trusted before asking GitHub again
+   * @type {Number}
+   */
+  static cloudConnectorReleasesTTL = 6 * 60 * 60 * 1000;
+
+
+  /**
+   * How long to wait before asking again when a read did not produce a list
+   * @type {Number}
+   */
+  static cloudConnectorReleasesRetry = 5 * 60 * 1000;
 
 
   /**
@@ -231,6 +245,10 @@ Node.Server = class Server
       // Precompute the main SecureContext once: the ssl object is fixed after init,
       // so there's no need to rebuild it on every HTTPS connection.
       let mainContext = Node.tls.createSecureContext(ssl).context;
+      //
+      // Older servers carry a system-wide wildcard certificate for "*.instantdevelopercloud.com";
+      // a Let's Encrypt one (see Config.createAutoSSLCertificate) covers a single name instead.
+      let wildcardMainCert = !this.config.SSLCert.includes("/letsencrypt/");
       ssl.SNICallback = (domain, cb) => {
         // If it's the "main" domain, use the ssl object to reply.
         // Two main-domain shapes are accepted:
@@ -240,8 +258,9 @@ Node.Server = class Server
         if (domain === `${this.config.name}.${this.config.domain}` || domain === this.config.domain || !this.config.customSSLCerts)
           return cb(null, mainContext);
         //
-        // If the domain is a sub-domain of "instantdevelopercloud.com" use the "standard" certificate
-        if (domain.endsWith(".instantdevelopercloud.com"))
+        // The wildcard certificate covers every sub-domain of "instantdevelopercloud.com", so there
+        // is nothing to search for. A Let's Encrypt one does not: there each alias needs its own.
+        if (wildcardMainCert && domain.endsWith(".instantdevelopercloud.com"))
           return cb(null, mainContext);
         //
         // I need to search the right certificate
@@ -354,7 +373,11 @@ Node.Server = class Server
     }
     //
     // Create a new Logger
-    this.logger = new Node.Logger(this, "SERVER");
+    this.logger = new Node.ServerLogger(this);
+    //
+    // Check users and projects now that the childer exists. Awaited before serving: the check
+    // only fixes the ownership of the folders it creates, so it does not scan the existing trees
+    await this.config.checkUsers();
     //
     // First-boot migration to the multi-version layout (no-op on already-migrated or single-version
     // servers). Runs after the childer (npm/rm go through it as root) and before serving; on failure
@@ -454,19 +477,42 @@ Node.Server = class Server
     });
     //
     // Application/x-www-form-urlencoded post requests
-    Node.app.use(Node.BodyParser.urlencoded({extended: true, limit: "5mb"}));
+    // Keep parser-input bytes before decoding. Base64 survives both preview and production IPC.
+    let captureRawBody = (req, res, buffer) => {
+      req.rawBodyBase64 = buffer.toString("base64");
+    };
+    Node.app.use(Node.BodyParser.urlencoded({
+      extended: true,
+      limit: "5mb",
+      verify: captureRawBody
+    }));
     //
     // Parse various different custom JSON types as JSON
-    Node.app.use(Node.BodyParser.json({type: "application/json", limit: "5mb"}));
+    Node.app.use(Node.BodyParser.json({
+      type: "application/json",
+      limit: "5mb",
+      verify: captureRawBody
+    }));
     //
     // Parse the body as XML in case of appropriate content-type
-    Node.app.use(Node.BodyParser.xml({type: ["application/xml", "text/xml"], limit: "5mb"}));
+    Node.app.use(Node.BodyParser.xml({
+      type: ["application/xml", "text/xml"],
+      limit: "5mb",
+      verify: captureRawBody
+    }));
     //
     // Parse all text bodies
-    Node.app.use(Node.BodyParser.text({type: "text/*", limit: "5mb"}));
+    Node.app.use(Node.BodyParser.text({
+      type: "text/*",
+      limit: "5mb",
+      verify: captureRawBody
+    }));
     //
     // Parse raw binary bodies (default: application/octet-stream; can be widened to application/*)
-    Node.app.use(Node.BodyParser.raw({limit: "5mb"}));
+    Node.app.use(Node.BodyParser.raw({
+      limit: "5mb",
+      verify: captureRawBody
+    }));
     //
     // MCP endpoint for DevAgent remote control (Streamable HTTP transport)
     let mcpHandler = (req, res) => this.mcpServer.handleRequest(req, res);
@@ -649,19 +695,25 @@ Node.Server = class Server
         }
       }
       //
-      // Use, for every app, maxAge=1 year for uploaded and resources... if they change, their name will change
-      if (expOpts)
-        expOpts.setHeaders = (res, path) => {
-          path = path.replace(/\\/g, "/").toLowerCase();    // Win junk
-          if (path.includes("/uploaded/"))
-            res.setHeader("Cache-Control", "public, max-age=31536000");
-        };
+      // Use, for every app, maxAge=1 year for uploaded files, and sandbox the uploaded documents (local servers too)
+      let appsOpts = expOpts || {};
+      appsOpts.setHeaders = (res, path) => Node.Utils.setAppStaticHeaders(res, path, !!expOpts);
       //
       // Protect SERVER's directories (for every app) before EXPRESS-STATIC kicks in
       // Protect APP's private files directoriy (for every app) before EXPRESS-STATIC kicks in
       // Protect PROJECT's private files directoriy (for every user/project) before EXPRESS-STATIC kicks in
       Node.app.use("/", (req, res, next) => {
-        let pathParts = req.path.toLowerCase().replace(/\/{2,}/g, "/").split("/");
+        // Decide on the path express.static will look for: compared as it arrived, "files/%70rivate",
+        // "files%5cprivate" (a backslash, a separator on Windows) or "foo/../files/private" slipped past every
+        // check below (#17946)
+        let reqPath;
+        try {
+          reqPath = Node.path.posix.normalize(decodeURIComponent(req.path).replace(/\\/g, "/"));
+        }
+        catch {
+          return res.sendStatus(400);   // express.static could not serve it either
+        }
+        let pathParts = reqPath.toLowerCase().replace(/\/{2,}/g, "/").split("/");
         let app = (pathParts.length > 1 ? this.config.getUser("manager").getApp(pathParts[1]) : null);
         if (pathParts.length > 2 && pathParts[2] === "server" && (!app || !app.params || !app.params.allowOffline)) {
           this.logger.log("WARN", "Access to app's server folder denied", "Server.start", {url: req.path, app: (app ? app.name : "<NULL>")});
@@ -680,7 +732,7 @@ Node.Server = class Server
       });
       //
       // Serve APPS directory as static
-      Node.app.use(Node.express.static(Node.path.join(this.config.appDirectory, "apps"), expOpts));
+      Node.app.use(Node.express.static(Node.path.join(this.config.appDirectory, "apps"), appsOpts));
     }
     //
     // Handle letsencrypt challenge files (if it's a "standard" install (not for MyCloud))
@@ -701,7 +753,7 @@ Node.Server = class Server
     //
     // Main error-handler (this should come after all the routes)
     Node.app.use(Node.errorHandler({log: (err, str, req, res) => {
-      this.logger.log("ERROR", `Server error: ${err}`, "Server.start", {met: req.method, url: req.url, str});
+      this.logger.log("ERROR", `Server error: ${err}`, "Server.start", {met: req.method, url: Node.Config.redactUrl(req.url), str});
     }}));
     //
     // Start main listener
@@ -843,7 +895,8 @@ Node.Server = class Server
    * Executes a file or command with root privileges.
    * Handles special commands like ChownChmod, ChownDBFolder, and UpdNodePackages.
    * @param {String} cmd - Command to be executed
-   * @param {Array} params - Command parameters
+   * @param {Array} params - Command parameters. ChownChmod takes the OS user, the folder and
+   * optionally a path inside it to leave untouched
    * @param {Object} options - Node createChild options
    * @returns {Promise<String>} Command output
    * @throws {Error} Command execution error
@@ -855,10 +908,20 @@ Node.Server = class Server
       case "ChownChmod": {
         let OSUser = params[0];
         let path = params[1];
+        let excludePath = params[2];
+        let chown = (process.platform === "freebsd" ? "/usr/sbin/chown" : "/bin/chown");
+        //
+        // Optional subtree left out of all three passes, folder included. find matches -path
+        // as a glob, so the metacharacters of the path are escaped
+        let prune = excludePath ? ["-path", excludePath.replace(/[\\*?[\]]/g, "\\$&"), "-prune", "-o"] : [];
         //
         try {
-          await this.execFileAsRoot((process.platform === "freebsd" ? "/usr/sbin/chown" : "/bin/chown"),
-                  ["-R", `${OSUser}:${OSUser}`, path]);
+          // find does not follow the symbolic links, and -h changes the links themselves:
+          // like chown -R, nothing outside the tree is touched
+          if (excludePath)
+            await this.execFileAsRoot("/usr/bin/find", [path, ...prune, "-exec", chown, "-h", `${OSUser}:${OSUser}`, "{}", "+"]);
+          else
+            await this.execFileAsRoot(chown, ["-R", `${OSUser}:${OSUser}`, path]);
         }
         catch (err) {
           this.logger.log("ERROR", `Error while executing CHOWN: ${err}`, "Server.execFileAsRoot", params);
@@ -866,7 +929,7 @@ Node.Server = class Server
         }
         //
         try {
-          await this.execFileAsRoot("/usr/bin/find", [path, "-type", "d", "-exec", "/bin/chmod", "770", "{}", "+"]);
+          await this.execFileAsRoot("/usr/bin/find", [path, ...prune, "-type", "d", "-exec", "/bin/chmod", "770", "{}", "+"]);
         }
         catch (err) {
           this.logger.log("ERROR", `Error while executing CHMOD for DIR: ${err}`, "Server.execFileAsRoot", params);
@@ -874,7 +937,7 @@ Node.Server = class Server
         }
         //
         try {
-          return await this.execFileAsRoot("/usr/bin/find", [path, "-type", "f", "-exec", "/bin/chmod", "660", "{}", "+"]);
+          return await this.execFileAsRoot("/usr/bin/find", [path, ...prune, "-type", "f", "-exec", "/bin/chmod", "660", "{}", "+"]);
         }
         catch (err) {
           this.logger.log("ERROR", `Error while executing CHMOD for FILES: ${err}`, "Server.execFileAsRoot", params);
@@ -1041,10 +1104,6 @@ Node.Server = class Server
         text: txt,
         style: (params.req.query.style || "alert")
       };
-      if (message.type === "telecollaboration") {
-        message.acceptLink = params.req.query.acceptLink;
-        message.refuseLink = params.req.query.refuseLink;
-      }
       sess.sendToChild({
         type: Node.Server.msgTypeMap.notify,
         cnt: message
@@ -1065,12 +1124,27 @@ Node.Server = class Server
   {
     // Socket listener
     Node.io.on("connection", socket => {
-      socket.on(Node.Server.msgTypeMap.sessionid, m => this.handleSessionSID(socket, m));
-      socket.on(Node.Server.msgTypeMap.asid, m => this.handleSessionASID(socket, m));
-      socket.on(Node.Server.msgTypeMap.deviceMessage, m => this.handleDeviceMessage(socket, m));
-      socket.on(Node.Server.msgTypeMap.sync, m => this.handleSyncMessage(socket, m));
-      socket.on(Node.Server.msgTypeMap.cloudConnector, m => this.handleCloudConnectorMessage(socket, m));
-      socket.on(Node.Server.msgTypeMap.dtt, m => this.handleDttMessage(socket, m));
+      // These messages come before any authentication: an exception thrown out of a Socket.IO listener
+      // is an uncaughtException, and it terminates the server
+      let on = (type, handler) => socket.on(type, msg => {
+        if (!msg || typeof msg !== "object" || Array.isArray(msg))
+          return this.logger.log("WARN", "Malformed socket message discarded", "Server.socketListener",
+                  {type, clientip: socket.handshake.address});
+        //
+        try {
+          handler.call(this, socket, msg);
+        }
+        catch (err) {
+          this.logger.log("ERROR", `Error handling a socket message: ${err.stack}`, "Server.socketListener",
+                  {type, clientip: socket.handshake.address});
+        }
+      });
+      on(Node.Server.msgTypeMap.sessionid, this.handleSessionSID);
+      on(Node.Server.msgTypeMap.asid, this.handleSessionASID);
+      on(Node.Server.msgTypeMap.deviceMessage, this.handleDeviceMessage);
+      on(Node.Server.msgTypeMap.sync, this.handleSyncMessage);
+      on(Node.Server.msgTypeMap.cloudConnector, this.handleCloudConnectorMessage);
+      on(Node.Server.msgTypeMap.dtt, this.handleDttMessage);
     });
   }
 
@@ -1095,13 +1169,19 @@ Node.Server = class Server
         // If a user and project was provided, try to search for them
         let user = this.config.getUser(auth.user);
         let prj = user?.getProject(auth.project);
-        if (prj && auth.reconnectToken === prj.reconnectToken) {
+        if (prj && auth.reconnectToken && auth.reconnectToken === prj.reconnectToken) {
           // Found project... by-pass standard checks and let the user come in with a default token
           prj.token = prj.reconnectToken;
-          socket.emit(Node.Server.msgTypeMap.redirect, `${user.userName}/${prj.name}/edit?t=${prj.token}`);
+          //
+          // The path must be ABSOLUTE: the client navigates with `location = url` (IndeProxy.openChannel),
+          // so a relative "user/prj/edit" resolves against the page's folder. On a multi-version server the
+          // page is /ide_<version>/index2.html and the relative path lands on /ide_<version>/user/prj/edit,
+          // answered "Not found" by the version middleware (see Server.start). Seen on ide3-developer after
+          // a PC sleep: the session expired, the reconnect was authorized and the user got a blank 404
+          socket.emit(Node.Server.msgTypeMap.redirect, `/${user.userName}/${prj.name}/edit?t=${prj.token}`);
           //
           this.logger.log("INFO", "Offline client authorized for a new editing session", "Server.handleSessionSID",
-                  {sid: msg.sid, user: user.userName, project: prj.name, token: prj.token});
+                  {sid: msg.sid, user: user.userName, project: prj.name});
           return;
         }
       }
@@ -1126,15 +1206,19 @@ Node.Server = class Server
   {
     let session, appcli;
     //
+    // The message as it may reach the log: an invited client sends its ctoken as cid, and the
+    // invitation URL as appurl
+    let logged = () => ({...msg, cid: session ? session.cidForLog(msg.cid) : msg.cid, appurl: Node.Config.redactUrl(msg.appurl)});
+    //
     if (msg.acid) {   // IDE case
       session = this.IDESessions[msg.sid];
       if (!session)
-        return this.logger.log("WARN", "Session not found", "Server.handleSessionASID", msg);
+        return this.logger.log("WARN", "Session not found", "Server.handleSessionASID", logged());
       //
       // Get the app client for the received acid
       appcli = session.getAppClientById(msg.acid);
       if (!appcli)
-        return this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", msg);
+        return this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", logged());
       //
       // Connect this socket with the app client
       appcli.openConnection(socket);
@@ -1143,7 +1227,7 @@ Node.Server = class Server
       // If the session is not valid, redirect to app entry point (i.e. app main url)
       session = this.appSessions[msg.sid];
       if (!session) {
-        this.logger.log("WARN", "Session not found", "Server.handleSessionASID", msg);
+        this.logger.log("WARN", "Session not found", "Server.handleSessionASID", logged());
         socket.emit(Node.Server.msgTypeMap.redirect, Node.Utils.getAppRestartUrl(msg.appname, msg.appurl));
         return;
       }
@@ -1151,7 +1235,7 @@ Node.Server = class Server
       // Get the app client for the received cid
       appcli = session.getAppClientById(msg.cid);
       if (!appcli) {
-        this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", msg);
+        this.logger.log("WARN", "AppClient not found", "Server.handleSessionASID", logged());
         socket.emit(Node.Server.msgTypeMap.redirect, Node.Utils.getAppRestartUrl(msg.appname, msg.appurl));
         return;
       }
@@ -1178,7 +1262,7 @@ Node.Server = class Server
       if (appcli.socket) {
         // Check if it's the same session... on a new socket
         if (session.invalidSID(socket, appcli)) {
-          this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
+          this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", logged());
           socket.emit(Node.Server.msgTypeMap.redirect, Node.Utils.getAppRestartUrl(msg.appname, msg.appurl));
           return;
         }
@@ -1206,7 +1290,7 @@ Node.Server = class Server
           //
           // Redirect to a new session
           socket.emit(Node.Server.msgTypeMap.redirect, Node.Utils.getAppRestartUrl(msg.appname, msg.appurl));
-          this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", msg);
+          this.logger.log("WARN", "AppClient already in use by someone else", "Server.handleSessionASID", logged());
           //
           // Nothing else to do...
         };
@@ -1230,7 +1314,7 @@ Node.Server = class Server
           // Connect this new socket with the app client
           appcli.openConnection(socket, msg.lastMsg);
           //
-          this.logger.log("WARN", "AppClient's socket replaced with a new socket with same ASID (valid SID)", "Server.handleSessionASID", msg);
+          this.logger.log("WARN", "AppClient's socket replaced with a new socket with same ASID (valid SID)", "Server.handleSessionASID", logged());
         }, 500);
         //
         // Do nothing more.
@@ -1400,6 +1484,92 @@ Node.Server = class Server
 
 
   /**
+   * Returns the latest Cloud Connector release published for each major version, e.g.
+   * `{"26": "26.3", "25": "25.5"}`, asking GitHub again when the last read has aged out.
+   * The IDE needs it to tell an installation left behind from one that merely sits on a minor
+   * the environment has already passed: the connector publishes far fewer releases than the IDE,
+   * so comparing the two version numbers directly would report as outdated a connector that is
+   * on the last release of its own line.
+   * @returns {Object|undefined} Latest release by major version, `undefined` until a read succeeds
+   */
+  getCloudConnectorReleases()
+  {
+    if (!this.cloudConnectorReleasesNextRead || Date.now() > this.cloudConnectorReleasesNextRead)
+      this.updateCloudConnectorReleases();
+    //
+    return this.cloudConnectorReleases;
+  }
+
+
+  /**
+   * Reads the published Cloud Connector releases from GitHub, keeping the highest one for each
+   * major version, and tells the sessions when the answer changes what they already know.
+   * Never rejects, so the caller can fire it and forget: a server without internet access, or
+   * one whose calls are being refused, keeps the previous answer (or none at all) and the IDE
+   * falls back to comparing major versions only.
+   */
+  async updateCloudConnectorReleases()
+  {
+    // Move the next read before making this one, so a slow or failing GitHub is not asked again by
+    // every connector list that goes out in the meantime. Until the answer arrives the window is
+    // the short one: a server started without a network would otherwise stay blind for hours, and
+    // those are the hours in which the mark is missing
+    this.cloudConnectorReleasesNextRead = Date.now() + Node.Server.cloudConnectorReleasesRetry;
+    //
+    let options = {
+      protocol: "https:",
+      hostname: "api.github.com",
+      path: "/repos/progamma/cloud-connector/releases?per_page=100",
+      timeout: 15000,
+      headers: {
+        "Accept": "application/vnd.github+json",
+        // The API answers 403 to a request that does not name its caller
+        "User-Agent": "InstantDeveloperCloud"
+      }
+    };
+    //
+    try {
+      let {code, data} = await this.request.getRequest(options);
+      if (code !== 200)
+        return this.logger.log("WARN", `Can't read the Cloud Connector releases: ResponseCode: ${code}`, "Server.updateCloudConnectorReleases");
+      //
+      let releases = {};
+      for (let rel of JSON.parse(data)) {
+        // The connector tags a release with a plain "X.Y": anything else is not one of them
+        let major = parseInt(rel.tag_name, 10);
+        if (rel.draft || rel.prerelease || isNaN(major))
+          continue;
+        //
+        if (!releases[major] || Node.Utils.compareVersions(rel.tag_name, releases[major]) > 0)
+          releases[major] = rel.tag_name;
+      }
+      //
+      // The long window starts here and not on the answer: an answer that arrives with 200 and
+      // cannot be read -- a captive portal, a proxy that intercepts -- has produced nothing, and
+      // deserves the short window like the failures that never arrived
+      this.cloudConnectorReleasesNextRead = Date.now() + Node.Server.cloudConnectorReleasesTTL;
+      //
+      // Integer-like keys are enumerated in numeric order whatever the insertion order, so two
+      // equal answers always produce the same string
+      if (JSON.stringify(releases) === JSON.stringify(this.cloudConnectorReleases))
+        return;
+      //
+      this.cloudConnectorReleases = releases;
+      //
+      // A session asks for the connector list once, when it starts: the first one after a server
+      // restart asks before this read has completed, and without this it would never see them
+      for (let user of this.config.users) {
+        if (user.cloudConnectors?.length)
+          user.updateAvailableCloudConnectorsList();
+      }
+    }
+    catch (ex) {
+      this.logger.log("WARN", `Can't read the Cloud Connector releases: ${ex.message}`, "Server.updateCloudConnectorReleases");
+    }
+  }
+
+
+  /**
    * Handles Design Time Testing (DTT) messages from remote IDE clients.
    * Retrieves and sends DTT session data for live or saved sessions.
    * @param {Socket} socket - Socket that received the message
@@ -1487,6 +1657,7 @@ Node.Server = class Server
    */
   closeSession(session, force)
   {
+    session.diagnostics?.end({reason: force ? "forced-close" : "server-close"});
     delete this.IDESessions[session.id];
     //
     // Tell the childer that the session have been closed and he needs to forget about it
@@ -2121,6 +2292,8 @@ Node.Server = class Server
   async sendServiceWorker(req, res)
   {
     try {
+      if (req.params.app && !Node.Utils.isSafePathComponent(req.params.app))
+        return res.status(400).end();
       let basePath;
       let isAppIDE = (req.params.app === "app");
       let isAppMaster = (req.params.app && !isAppIDE);
@@ -2175,6 +2348,8 @@ Node.Server = class Server
   async sendAppManifest(req, res)
   {
     try {
+      if (req.params.app && !Node.Utils.isSafePathComponent(req.params.app))
+        return res.status(400).end();
       let basePath;
       // A /ide_<version>/app/client/*.webmanifest request is the app-preview manifest reached
       // through the injected <base>: serve it like the flat /app/client one, from that version
@@ -2355,15 +2530,15 @@ Node.Server = class Server
       if (!ideSess)
         return res.status(404).send(`Project not open: ${prjId}`);
       //
+      let data = await ideSess.sendApiCommand({
+        command: "idf-desktop",
+        objid: req.query.objid
+      });
+      //
       res.cookie("ideSessionId", ideSess.id, {
         httpOnly: true,
         sameSite: "strict",
         maxAge: 3600000 // 1 hour
-      });
-      //
-      let data = await ideSess.sendApiCommand({
-        command: "idf-desktop",
-        objid: req.query.objid
       });
       //
       res.header("Content-Type", "text/html");
@@ -2389,7 +2564,9 @@ Node.Server = class Server
    */
   async handleCustomFile(req, res, next)
   {
-    let file = req.url.split("/").slice(3).join("/");
+    let file = req.url.split("?")[0].split("/").slice(3).join("/");
+    if (!Node.Utils.isSafeRelativePath(file))
+      return res.status(400).end();
     //
     let ok = false;
     let sessionId = req.cookies?.ideSessionId;
@@ -2424,6 +2601,19 @@ Node.Server = class Server
           let data = result.content;
           if (result.path)
             data = await Node.fs.promises.readFile(result.path);
+          else if (result.parts) {
+            // I quattro file di personalizzazione arrivano a PEZZI e si concatenano qui, sui BYTE,
+            // come fa mergeCustomFiles al build. Il modello non li legge apposta: decodificarli
+            // rovinerebbe una custom che UTF-8 non e' - per esempio salvata in CP1252 (#15793)
+            let bytes = [];
+            for (let part of result.parts) {
+              if (bytes.length)
+                bytes.push(Buffer.from("\n"));
+              //
+              bytes.push(part.path ? await Node.fs.promises.readFile(part.path) : Buffer.from(part.code));
+            }
+            data = Buffer.concat(bytes);
+          }
           //
           res.status(200).send(data);
         }
@@ -2479,62 +2669,82 @@ Node.Server = class Server
     Node.app.use("/idf/wizards", Node.express.static(Node.path.resolve(__dirname, "..", "ide", "app", "idf", "Wizards")));
     //
     // Access template files in a static way. Browser IDE needs this to retrieve data from template files
-    Node.app.use("/idf/template", Node.express.static(Node.path.resolve(__dirname, "..", "ide", "app", "idf", "Template")));
+    let templateDir = Node.path.resolve(__dirname, "..", "ide", "app", "idf", "Template");
+    Node.app.use("/idf/template", Node.Utils.matchFolderCase(templateDir), Node.express.static(templateDir));
     //
     // When browser ask for viewedit.js, serve ../ide/app/client/viewedit.js
     Node.app.use("/idf/editor/viewedit.js", Node.express.static(Node.path.join(clientPath, "viewedit.js")));
     //
     // I want to access the RD3 client folders without referencing template within the URL (same thing as runtime)
-    try {
-      Node.app.get("/idf/:theme/*any", this.handleCustomFile.bind(this));
+    Node.app.get("/idf/:theme/*any", this.handleCustomFile.bind(this));
+    //
+    let templatePath = Node.path.resolve(__dirname, "..", "ide", "app", "idf", "Template");
+    //
+    // The theme is looked up at every request, not at start-up: a custom theme can be created while
+    // the server runs (FCliApp.createCustomTheme) or copied by hand. Built-in first, as resolveThemePath
+    let findTheme = async theme => {
+      // config.directory is missing until the first user is created (Config.createUser)
+      let themeBases = [Node.path.join(templatePath, "Theme")];
+      if (this.config.directory)
+        themeBases.push(Node.path.join(this.config.directory, "themes"));
       //
-      let templatePath = Node.path.resolve(__dirname, "..", "ide", "app", "idf", "Template");
-      let themePath = Node.path.join(templatePath, "Theme");
-      //
-      // Register routes for a theme directory
-      let registerTheme = (file, fullPath) => {
-        if (file === "bootstrap" || file === "bootstrapzen") {
-          Node.app.use(`/idf/${file}/RD3`, Node.express.static(Node.path.join(templatePath, "Theme", "bootstrap", "RD3")));
-          Node.app.use(`/idf/${file}/res`, Node.express.static(Node.path.join(templatePath, "Theme", "bootstrap", "res")));
+      for (let base of themeBases) {
+        let names;
+        try {
+          names = await Node.fs.promises.readdir(base);
         }
-        else if (file === "ionic")
-          Node.app.use(`/idf/${file}/RD3`, Node.express.static(Node.path.join(templatePath, "Theme", "ionic", "RD3")));
-        else
-          Node.app.use(`/idf/${file}/RD3`, Node.express.static(Node.path.join(templatePath, "RD3")));
-        Node.app.use(`/idf/${file}/Fluid`, Node.express.static(clientPath));
-        Node.app.use(`/idf/${file}`, Node.express.static(fullPath));
-        Node.app.use(`/idf/${file}`, Node.express.static(Node.path.join(templatePath, "Common")));
-      };
-      //
-      // Register built-in themes
-      let files = await Node.fs.promises.readdir(themePath);
-      await Promise.all(files.map(async file => {
-        let fullPath = Node.path.join(themePath, file);
-        let stats = await Node.fs.promises.stat(fullPath);
-        if (stats.isDirectory())
-          registerTheme(file, fullPath);
-      }));
-      //
-      // Register custom themes from the working directory
-      let customThemePath = Node.path.join(this.config.directory, "themes");
-      if (Node.fs.existsSync(customThemePath)) {
-        let customFiles = await Node.fs.promises.readdir(customThemePath);
-        await Promise.all(customFiles.map(async file => {
-          let fullPath = Node.path.join(customThemePath, file);
-          let stats = await Node.fs.promises.stat(fullPath);
-          if (stats.isDirectory())
-            registerTheme(file, fullPath);
-        }));
+        catch {
+          continue;
+        }
+        //
+        // The IDE asks for the theme in lower case, so a folder copied by hand with capital letters is
+        // matched ignoring case. Taking the name from the listing also keeps ".." and the like out
+        let name = names.find(n => n === theme) || names.find(n => n.toLowerCase() === theme.toLowerCase());
+        if (!name)
+          continue;
+        //
+        let fullPath = Node.path.join(base, name);
+        if ((await Node.fs.promises.stat(fullPath)).isDirectory())
+          return fullPath;
       }
-    }
-    catch (ex) {
-      this.logger.log("ERROR", `Error while reading IDF template directory: ${ex.message}`, "Server.registerIDFRoutes");
-    }
+    };
+    //
+    let themeRouters = {};
+    let getThemeRouter = fullPath => {
+      if (themeRouters[fullPath])
+        return themeRouters[fullPath];
+      //
+      let theme = Node.path.basename(fullPath).toLowerCase();
+      let router = Node.express.Router();
+      //
+      // The RD3 client is chosen by the theme name as the build does (FCliApp.isBootstrap, isIonic):
+      // a custom theme whose name contains "bootstrap" is compiled with the bootstrap client
+      if (theme.includes("bootstrap")) {
+        router.use("/RD3", Node.express.static(Node.path.join(templatePath, "Theme", "bootstrap", "RD3")));
+        router.use("/res", Node.express.static(Node.path.join(templatePath, "Theme", "bootstrap", "res")));
+      }
+      else if (theme.includes("ionic"))
+        router.use("/RD3", Node.express.static(Node.path.join(templatePath, "Theme", "ionic", "RD3")));
+      else
+        router.use("/RD3", Node.express.static(Node.path.join(templatePath, "RD3")));
+      router.use("/Fluid", Node.express.static(clientPath));
+      router.use(Node.express.static(fullPath));
+      router.use(Node.express.static(Node.path.join(templatePath, "Common")));
+      //
+      themeRouters[fullPath] = router;
+      return router;
+    };
+    //
+    Node.app.use("/idf/:theme", async (req, res, next) => {
+      let fullPath = await findTheme(req.params.theme);
+      if (!fullPath)
+        return next();
+      //
+      getThemeRouter(fullPath)(req, res, next);
+    });
   }
 };
 
 
 // Starts the server
 Node.Server.create();
-
-Node.theServer.version = "26.3.2.20261001";

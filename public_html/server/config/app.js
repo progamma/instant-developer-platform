@@ -16,6 +16,8 @@ Node.Archiver = require("../archiver");
 Node.Utils = require("../utils");
 Node.TestAuto = require("../master/testauto");
 Node.AppSession = require("../master/appsession");
+// config.js requires this file while it loads: Config is read when used, not here
+Object.defineProperty(Node, "Config", {get: () => require("./config")});
 
 
 /**
@@ -52,6 +54,14 @@ Node.AppSession = require("../master/appsession");
  */
 Node.App = class App
 {
+  /**
+   * Time (ms) a deleted worker's child is given to exit before being SIGKILLed.
+   * Must exceed App.Session.CLEANUPTIMEOUT of the app runtime, so that the child normally exits by itself
+   * @type {Number}
+   */
+  static killGracePeriod = 70000;
+
+
   /**
    * @param {Node.User} par - Parent user object
    */
@@ -520,7 +530,7 @@ Node.App = class App
   /**
    * Removes a worker from the workers array and terminates its child process.
    * Gracefully attempts to kill the worker's child process, with forced termination
-   * after 3 seconds if the process doesn't end normally.
+   * after Node.App.killGracePeriod if the process doesn't end normally.
    * @param {Node.Worker} worker - Worker instance to delete
    */
   deleteWorker(worker)
@@ -533,16 +543,23 @@ Node.App = class App
     //
     // If the worker has a child, kill him
     if (worker.child) {
-      // Kill the child
+      // Keep the process: the worker's "disconnect" handler clears worker.child as soon as the channel
+      // closes, while the child is still cleaning up, and worker.child may later be a new child
+      let child = worker.child;
       worker.killChild();
       //
-      // If the child does not end normally, I'll (forcedly) kill him in 3 seconds
+      // If the child does not end normally, I'll (forcedly) kill him
       setTimeout(() => {
-        if (worker.child && worker.child.connected) {
-          this.log("WARN", "Worker did not quit in 3 seconds -> killing him", "App.deleteWorker", {workerIdx: idx});
-          worker.killChild(true);
+        if (child.exitCode !== null || child.signalCode !== null)
+          return;
+        //
+        this.log("WARN", `Worker did not quit in ${Node.App.killGracePeriod / 1000} seconds -> killing him`, "App.deleteWorker",
+                {workerIdx: idx, pid: child.pid});
+        try {
+          child.kill("SIGKILL");
         }
-      }, 3000);
+        catch (e) { /* already dead */ }
+      }, Node.App.killGracePeriod);
       //
       // Log the operation
       this.log("DEBUG", "Worker deleted", "App.deleteWorker", {workerIdx: idx});
@@ -711,11 +728,174 @@ Node.App = class App
    * @param {Object} params - Delete parameters
    * @param {Object} params.req - Request object
    * @param {String} params.req.query.beforeDate - Delete sessions before this date
-   * @throws {Error} If beforeDate is missing or deletion fails
+   * @throws {Error} If beforeDate is missing or unreadable, or if deletion fails
    */
   async deleteDttSessions(params)
   {
     console.error("NOT SUPPORTED FOR SELF");
+  }
+
+
+  /**
+   * Reads the DTT index file of a worker slot, handing over every session it holds.
+   * The format is the one written by the app runtime: one 512 bytes block per session, JSON padded
+   * with NULs. An empty block is a hole in the index and is handed over as undefined, because what
+   * to do with it is not the same when reading and when purging; a last block shorter than 512
+   * bytes is a damaged index, and is reported and handed over as undefined too, so that whoever
+   * rewrites the file takes it away.
+   * @param {String} fname - Full path of the index file
+   * @param {Function} onSession - Called as function(session, pos) for every block of the file, and
+   *                               awaited by nobody: it has to do its work synchronously
+   * @returns {Boolean} False if the slot has no index file
+   */
+  async readDttIndexFile(fname, onSession)
+  {
+    let fd;
+    try {
+      fd = await Node.fs.promises.open(fname, "r");
+    }
+    catch (err) {
+      // If there is no index file -> nothing to read
+      if (err.code === "ENOENT")
+        return false;
+      //
+      // If there are other errors... log it
+      throw new Error(`Error while opening index file (read: ${fname}): ${err.message || err}`, {cause: err});
+    }
+    //
+    let error;
+    try {
+      let buff = Buffer.alloc(512);
+      let pos = 0;
+      //
+      while (true) {
+        let result = await fd.read(buff, 0, buff.length, pos);
+        //
+        // A read shorter than a block ends the reading: either nothing was left, or the file was
+        // cut in the middle of a session. Interpreting it would weld those bytes to the tail of the
+        // block before, still in the buffer because a read overwrites the bytes it reads and no more
+        if (result.bytesRead < buff.length) {
+          if (result.bytesRead) {
+            this.log("WARN", `Error while reading DTT index file (read: ${fname}): truncated block of ${result.bytesRead} bytes at pos ${pos}`, "Node.App.readDttIndexFile");
+            //
+            // Handed over like a hole, because leaving it there is not free: the next session is
+            // written at the size of the file, so it would go past the truncated bytes and every
+            // read from then on would find them welded to a block that is whole
+            onSession(undefined, pos);
+          }
+          //
+          break;
+        }
+        //
+        let buffData = buff.toString().replace(/\0/g, "");
+        if (!buffData)
+          this.log("WARN", `Error while reading DTT index file (read: ${fname}): empty block at pos ${pos}`, "Node.App.readDttIndexFile");
+        //
+        onSession(buffData ? JSON.parse(buffData) : undefined, pos);
+        //
+        // Read next block
+        pos += 512;
+      }
+    }
+    catch (err) {
+      error = err;
+    }
+    //
+    try {
+      await fd.close();
+    }
+    catch (err) {
+      // The reading error, if any, is the one worth reporting
+      error = error || new Error(`Error while closing DTT index file (read: ${fname}): ${err}`);
+    }
+    //
+    if (error)
+      throw error;
+    //
+    return true;
+  }
+
+
+  /**
+   * Deletes the DTT sessions of a worker slot older than the given date, rewriting the index file
+   * with the surviving ones and removing their trace files.
+   * Only for slots with no child process: the index of a live worker is held in memory by the child
+   * with its own offsets, so those are purged by the child itself (see App.DTT.deleteSessionsInfo).
+   * @param {Number} workerIdx - Index of the worker slot to purge
+   * @param {Date} beforeDate - Sessions started before this date are deleted
+   */
+  async purgeDttSessions(workerIdx, beforeDate)
+  {
+    let fpath = Node.path.join(this.config.appDirectory, "apps", this.name, "files", "private", "log");
+    let fname = Node.path.join(fpath, `index${workerIdx}.json`);
+    //
+    try {
+      let sessions = [];
+      let filesToDelete = [];
+      let updateFile;
+      //
+      let found = await this.readDttIndexFile(fname, sess => {
+        // A hole in the index is not a session: it goes away with the rewrite
+        if (!sess) {
+          updateFile = true;
+          return;
+        }
+        //
+        // Load the session and if after than the given date keep it
+        if (new Date(sess.start) >= beforeDate)
+          sessions.push(sess);
+        else {
+          // At least a session has been removed... File must be rewritten
+          updateFile = true;
+          //
+          // Session is outdated... delete session file if present
+          if (sess.dttFile)
+            filesToDelete.push(Node.path.join(fpath, `dtt_${sess.sessionID}.json`));
+        }
+      });
+      //
+      // If there is no index file -> nothing to purge
+      if (!found)
+        return;
+      //
+      // If there are no sessions... delete index file
+      if (sessions.length === 0)
+        filesToDelete.push(fname);
+      //
+      // Delete all useless files
+      for (let fn of filesToDelete) {
+        try {
+          await Node.fs.promises.unlink(fn);
+        }
+        catch (err) {
+          this.log("WARN", `Error while removing DTT file (${fn}): ${err}`, "Node.App.purgeDttSessions");
+        }
+      }
+      //
+      // If nothing has changed or there are no sessions to save -> done
+      if (!updateFile || sessions.length === 0)
+        return;
+      //
+      // Rewrite index!
+      let fdWrite = await Node.fs.promises.open(fname, "w");
+      try {
+        for (let idx = 0; idx < sessions.length; idx++) {
+          let buffWrite = Buffer.alloc(512);
+          buffWrite.write(JSON.stringify(sessions[idx]));
+          //
+          await fdWrite.write(buffWrite, 0, buffWrite.length, idx * 512);
+        }
+      }
+      finally {
+        // Close write file descriptor
+        await fdWrite.close();
+      }
+    }
+    catch (err) {
+      // A broken index must not stop the purge of the other slots, the same way the app runtime
+      // does not stop the ones it runs from the inside
+      this.log("WARN", err.message || err, "Node.App.purgeDttSessions");
+    }
   }
 
 
@@ -1187,7 +1367,7 @@ Node.App = class App
     // Compute the array of properties provided via url
     let query = params.req.query;
     //
-    this.log("INFO", "Update app settings", "App.configure", query);
+    this.log("INFO", "Update app settings", "App.configure", Node.Config.redactQuery(query));
     //
     let logData;
     let warning = false;
@@ -1449,7 +1629,7 @@ Node.App = class App
         return this.test(params);
 
       default:
-        this.log("WARN", "Invalid Command", "App.execCommand", {cmd: command, url: params.req.originalUrl});
+        this.log("WARN", "Invalid Command", "App.execCommand", {cmd: command, url: Node.Config.redactUrl(params.req.originalUrl)});
         throw new Error("Invalid Command");
     }
   }

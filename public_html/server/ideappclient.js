@@ -139,6 +139,11 @@ Node.IDEAppClient = class IDEAppClient
     if (req.query?.uitheme)
       qrys += `&uitheme=${encodeURIComponent(req.query.uitheme)}`;
     //
+    // The offline proxy reads on the page url whether the server code goes into a WebWorker: the
+    // redirect builds that url from scratch, so what the IDE asked for has to be copied over
+    if (req.query?.srvworker)
+      qrys += `&srvworker=${encodeURIComponent(req.query.srvworker)}`;
+    //
     res.redirect(`/app/${this.config.getAppMainFile(this.mode)}?${qrys}`);
     //
     // Create a timer. If an openConnection does not arrive within 20 seconds,

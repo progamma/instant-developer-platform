@@ -536,10 +536,10 @@ Node.McpServer = class McpServer
         user: z.string().optional().describe("With `project`: account owning the project to send to"),
         project: z.string().optional().describe("Send to this project's DevAgent instead of the latched session"),
         selection: z.string().optional().describe("IDE selection context (e.g. 'AppName > ViewName > $element')"),
-        model: z.enum(["claude-fable-5-1[1m]", "claude-opus-5[1m]", "claude-opus-4-8[1m]", "claude-sonnet-5[1m]"]).optional()
+        model: z.enum(["claude-fable-5-1[1m]", "claude-opus-5-5[1m]", "claude-sonnet-5-5[1m]"]).optional()
             .describe("Override the AI model for this message only (does not change persistent settings)"),
-        thinkingEffort: z.enum(["medium", "high", "xhigh", "max"]).optional()
-            .describe("Override the thinking effort for this message only (xhigh and max are only valid for Opus 5, Opus 4.8, Fable 5.1 and Sonnet 5)"),
+        thinkingEffort: z.enum(["none", "low", "medium", "high", "xhigh", "max"]).optional()
+            .describe("Override the thinking effort for this message only; validated against the selected model's supported levels"),
       },
       async ({message, user, project, selection, model, thinkingEffort}, extra) => {
         // Same resolver as save_project and close_project (#15429): what this tool starts is an
@@ -894,10 +894,10 @@ Node.McpServer = class McpServer
         project: z.string().describe("Project name (e.g., 'nwind-test')"),
         user: z.string().optional().describe("User name (default: the account this key authenticates)"),
         model: z.string().trim().min(1).max(200).optional()
-            .describe("Native model ID for all steps, e.g. gpt-5.6-sol or claude-opus-5[1m]. Selects its provider for this test only."),
-        provider: z.enum(["codex", "anthropic", "vertex", "deepseek", "mimo", "openrouter"]).optional()
+            .describe("Native model ID for all steps, e.g. gpt-5.6-sol or claude-opus-5-5[1m]. Selects its provider for this test only."),
+        provider: z.enum(["codex", "anthropic", "vertex", "deepseek", "deepseek-codex", "mistral-codex", "mimo", "openrouter"]).optional()
             .describe("Optional route override, e.g. vertex for Claude; otherwise inferred from model."),
-        thinkingEffort: z.enum(["low", "medium", "high", "xhigh", "max"]).optional()
+        thinkingEffort: z.enum(["none", "low", "medium", "high", "xhigh", "max"]).optional()
             .describe("Thinking effort for all steps; validated against the selected model's supported levels."),
         browser: z.enum(["headless", "chrome"]).optional()
             .describe("Browser driving the IDE tab for ALL steps of this test: 'headless' (default — invisible "
@@ -1091,12 +1091,14 @@ Node.McpServer = class McpServer
             // Refresh: close (without saving) → reopen (fresh agent context, keep code)
             let t0 = Date.now();
             let closed = false;
+            // Keep the worker identity even after it disappears from the master registry.
+            let closing = this._findSession(userName, projectName);
             //
             // Attempt 1 — graceful, browser-driven close. This only works while the
             // master socket is alive: _waitForSession latches a session that still has
             // a live socket, then _closeProject emits mcp_close_project to the tab.
             try {
-              let closing = await this._waitForSession(10000, projectName, userName);
+              closing ||= await this._waitForSession(10000, projectName, userName);
               console.log(`[MCP] refresh step ${step}: closing without saving (+${Date.now() - t0}ms)...`);
               this._closeProject(closing);
               closed = await this._waitForSessionEnd(projectName, userName, 15000);
@@ -1116,12 +1118,23 @@ Node.McpServer = class McpServer
             // rejected with `busySession` (idesession.js:490). Evict the lingering
             // session server-side so the reopened tab starts clean as the new master.
             if (!closed) {
-              let forced = this._forceCloseLingeringSession(projectName, userName);
+              let lingering = this._findSession(userName, projectName);
+              if (lingering && closing && lingering !== closing)
+                throw new Error("Project session changed during refresh");
+              closing ||= lingering;
+              let forced = this._forceCloseLingeringSession(projectName, userName, true);
               if (forced) {
-                console.log(`[MCP] refresh step ${step}: force-closed lingering session server-side (+${Date.now() - t0}ms)`);
-                await this._waitForSessionEnd(projectName, userName, 15000);
+                console.log(`[MCP] refresh step ${step}: requested lingering worker termination (+${Date.now() - t0}ms)`);
+                closed = await this._waitForSessionEnd(projectName, userName, 15000);
               }
             }
+            //
+            // Registry eviction alone is not worker completion: an expired worker may still
+            // be preserving its journal. Never delete it or reopen until that work has settled.
+            if (closing && (!closed || !closing.sessionCompletedReceived))
+              throw new Error("Project worker did not confirm completion before refresh");
+            if (this._findSession(userName, projectName))
+              throw new Error("Project session is still open before refresh");
             //
             // Refresh discards unsaved work and reopens from the saved model
             // (project.json + trans). The close above does NOT prune projected/,
@@ -1132,11 +1145,11 @@ Node.McpServer = class McpServer
             // never resolves at runtime (observed: nwind-shadow Shippers doc →
             // "OrderDetail.addDOFilter is not a function"). Wiping projected/ forces a
             // clean full re-projection from the model on the next chat message.
-            let homeDir = this.server.config?.directory;
-            if (homeDir) {
+            let projectsDir = this.server.config?.getUser(userName)?.getProjectsDir();
+            if (projectsDir) {
               let fs = require("fs");
               let path = require("path");
-              let projectedDir = path.join(homeDir, userName, projectName, "projected");
+              let projectedDir = path.join(projectsDir, projectName, "projected");
               try {
                 fs.rmSync(projectedDir, {
                   recursive: true,
@@ -1145,7 +1158,22 @@ Node.McpServer = class McpServer
                 console.log(`[MCP] refresh step ${step}: wiped projected/ to force clean re-projection (+${Date.now() - t0}ms)`);
               }
               catch (e) {
-                console.warn(`[MCP] refresh step ${step}: could not wipe projected/ (${e.message})`);
+                throw new Error(`Refresh could not wipe projected/: ${e.message}`);
+              }
+              //
+              // The MCP close does not discard the session, so its expiry preserved the unsaved
+              // journal and the reopen would restore the aborted attempt's work (T0798 s16)
+              try {
+                let LiveJournal = require("../ide/LiveSessionJournal");
+                let projectPath = path.join(projectsDir, projectName);
+                for (let name of fs.readdirSync(projectPath).filter(name => LiveJournal.isFile(name) && name.endsWith(".log")))
+                  fs.renameSync(path.join(projectPath, name), path.join(projectPath, `${name}.${require("crypto").randomUUID()}.bak`));
+                fs.unlinkSync(path.join(projectsDir, projectName, "session-recovery.json"));
+                console.log(`[MCP] refresh step ${step}: discarded session recovery (+${Date.now() - t0}ms)`);
+              }
+              catch (e) {
+                if (e.code !== "ENOENT")
+                  throw new Error(`Refresh could not discard session recovery: ${e.message}`);
               }
             }
             //
@@ -1186,7 +1214,8 @@ Node.McpServer = class McpServer
           // (TestHarness._handleTestStartStep): four archives fetched and copied into the model
           // do not fit the two minutes that a bare prepare needs
           attemptId = require("crypto").randomUUID();
-          let prep = await this._sendTestCommand("test_start_step", {testId, step, reset, devAgentOptions, attemptId}, session,
+          let prep = await this._sendTestCommand("test_start_step", {testId, step, reset, devAgentOptions, attemptId,
+            referenceAuditFooter: Node.McpServer.REFERENCE_AUDIT_FOOTER}, session,
             reset ? 600000 : 120000);
           if (prep.error)
             throw new Error(`Error preparing step: ${prep.error}`);
@@ -1201,7 +1230,7 @@ Node.McpServer = class McpServer
             overrides.thinkingEffort = prep.thinkingEffort;
           //
           stage = "agent";
-          let agentResult = await this._sendMessage(prep.prompt + Node.McpServer.REFERENCE_AUDIT_FOOTER, "none", overrides, session);
+          let agentResult = await this._sendMessage(prep.agentPrompt ?? (prep.prompt + Node.McpServer.REFERENCE_AUDIT_FOOTER), "none", overrides, session);
           //
           // Phase 3: end the step (save snapshot, build test, diff)
           stage = "end-step";
@@ -2450,10 +2479,11 @@ Node.McpServer = class McpServer
    * lingering session server-side so a fresh tab can take ownership as the new master.
    * @param {String} projectName - project whose lingering session must be evicted
    * @param {String} userName - user owning the session
-   * @returns {Boolean} true if a matching session was found and evicted, false otherwise
+   * @param {Boolean} [waitForCompletion] - Keep registration until the worker confirms completion
+   * @returns {Boolean} true if a matching session was found and closing requested, false otherwise
    * @private
    */
-  _forceCloseLingeringSession(projectName, userName)
+  _forceCloseLingeringSession(projectName, userName, waitForCompletion = false)
   {
     let sessions = this.server.getOnlineSessions() || [];
     let sess = sessions.find(s =>
@@ -2468,7 +2498,7 @@ Node.McpServer = class McpServer
       return false;
     }
     //
-    console.log(`[MCP] force-close: evicting lingering session project=${projectName}, id=${sess.id}`);
+    console.log(`[MCP] force-close: ${waitForCompletion ? "closing worker" : "evicting lingering session"} project=${projectName}, id=${sess.id}`);
     // closeAllConnections(): disconnect every socket (the disconnect handler clears
     // masterClientSod), stop the auto-kill timer, and ask the child to terminate so the
     // reopen gets a fresh agent context — matching graceful-close semantics.
@@ -2478,6 +2508,9 @@ Node.McpServer = class McpServer
     catch (e) {
       console.warn(`[MCP] force-close: closeAllConnections failed (${e.message})`);
     }
+    if (waitForCompletion)
+      return true;
+    //
     // closeSession(): remove it from the master registry immediately and tell the childer
     // to forget it, so getOnlineSessions() no longer returns it and _waitForSessionEnd
     // observes the session gone right away. It sends to the childer, which in the force-close
@@ -2651,14 +2684,18 @@ Node.McpServer = class McpServer
     wipeDir(path.join(projectDir, "projected"), "projected workspace");
     wipeDir(path.join(projectDir, "inde-agent", "projects"), "agent state");
     wipeDir(path.join(projectDir, "inde-agent", "codex-history"), "Codex conversation history");
-    // The live runtime was closed by test_prepare_new. Keep the authentication
-    // recovery cache: it may be the only copy of a refresh not yet persisted.
-    let codexDir = path.join(projectDir, "inde-agent", "codex");
-    let preservedCodexFiles = ["auth.json", "config.toml"];
-    if (fs.existsSync(codexDir)) {
-      for (let name of fs.readdirSync(codexDir)) {
-        if (!preservedCodexFiles.includes(name))
-          wipeDir(path.join(codexDir, name), "Codex runtime state");
+    wipeDir(path.join(projectDir, "inde-agent", "codex-deepseek-history"), "DeepSeek Codex conversation history");
+    wipeDir(path.join(projectDir, "inde-agent", "codex-mistral-history"), "Mistral Codex conversation history");
+    // The live runtime was closed by test_prepare_new. Keep the OpenAI authentication
+    // recovery cache, while API providers only retain their configuration and model catalog.
+    for (let namespace of ["codex", "codex-deepseek", "codex-mistral"]) {
+      let codexDir = path.join(projectDir, "inde-agent", namespace);
+      let preservedCodexFiles = namespace === "codex" ? ["auth.json", "config.toml"] : ["config.toml", "models.json"];
+      if (fs.existsSync(codexDir)) {
+        for (let name of fs.readdirSync(codexDir)) {
+          if (!preservedCodexFiles.includes(name))
+            wipeDir(path.join(codexDir, name), "Codex runtime state");
+        }
       }
     }
     wipeDir(path.join(projectDir, "flightlog"), "flight-log");
@@ -2935,7 +2972,11 @@ Node.McpServer = class McpServer
     // No user sits in front of a headless page: accept whatever dialog the IDE raises
     // (e.g. beforeunload on close), or it would block the tab forever
     page.on("dialog", dialog => dialog.accept().catch(() => {}));
-    page.on("pageerror", err => console.warn(`[MCP] Headless page error (${pageKey}): ${err.message}`));
+    page.on("pageerror", err => console.warn(`[MCP] Headless page error (${pageKey}): ${err.message || String(err)}`));
+    // A renderer can crash while the browser process remains connected (e.g. V8 OOM).
+    page.on("error", err => this._onHeadlessPageCrash(pageKey, page, err));
+    // The browser binding reaches the parent even if the IDE websocket rejects a reconnect.
+    await this._observeHeadlessConnection(page, pageKey);
     //
     console.log(`[MCP] Opening project headless: ${url}`);
     await page.goto(url, {
@@ -2945,6 +2986,86 @@ Node.McpServer = class McpServer
     //
     // The IDE client checks tab visibility in places; make this the active target
     await page.bringToFront();
+  }
+
+
+  /**
+   * Capture transport failures and renderer stalls independently of the IDE socket. No frames,
+   * request URLs, headers or application data are retained. This is evidence, not a retry policy.
+   * @param {Object} page - Owned Puppeteer IDE page
+   * @param {String} pageKey - Project owning the page
+   * @private
+   */
+  async _observeHeadlessConnection(page, pageKey)
+  {
+    try {
+      let windowStart = Date.now();
+      let count = 0;
+      let record = (event, details) => {
+        if (this._headless[pageKey]?.page !== page)
+          return;
+        let now = Date.now();
+        if (now - windowStart >= 60000) {
+          windowStart = now;
+          count = 0;
+        }
+        if (count >= 64)
+          return;
+        let sid = new URL(page.url()).searchParams.get("sessionid");
+        let session = this.server.IDESessions?.[sid];
+        if (!session || `${session.project?.user?.userName}/${session.project?.name}` !== pageKey)
+          return;
+        count++;
+        session.diagnostics?.record(event, details);
+      };
+      // A Puppeteer binding uses the control channel, not the IDE socket. Keep only the same
+      // bounded lifecycle facts accepted by IDESession, plus transport error/close codes.
+      let events = ["connect", "disconnect", "connect_error", "freeze", "resume", "visibilitychange", "pagehide", "pageshow", "online", "offline"];
+      await page.exposeFunction("__indeHeadlessConnectionDiagnostic", entry => {
+        if (!entry || !events.includes(entry.event))
+          return;
+        record("headless-connection", {
+          event: entry.event,
+          clientTime: Number.isFinite(entry.at) ? entry.at : undefined,
+          reason: typeof entry.reason === "string" ? entry.reason.substring(0, 120) : undefined,
+          transport: ["websocket", "polling"].includes(entry.transport) ? entry.transport : undefined,
+          transportErrorCode: typeof entry.transportErrorCode === "string" && /^[A-Z0-9_]{1,80}$/.test(entry.transportErrorCode) ? entry.transportErrorCode : undefined,
+          closeCode: Number.isInteger(entry.closeCode) && entry.closeCode >= 1000 && entry.closeCode < 5000 ? entry.closeCode : undefined,
+          visibility: ["visible", "hidden"].includes(entry.visibility) ? entry.visibility : "unknown",
+          online: entry.online === true,
+          wasDiscarded: entry.wasDiscarded === true
+        });
+      });
+      // A renderer can stop answering heartbeat packets while the browser process stays alive.
+      // Long-task entries arrive after the stall ends, and never contain the task's source/data.
+      await page.exposeFunction("__indeHeadlessLongTask", entries => {
+        for (let entry of (Array.isArray(entries) ? entries : []).slice(0, 8)) {
+          if (Number.isFinite(entry?.durationMs) && entry.durationMs >= 1000 && Number.isFinite(entry?.clientTime)) {
+            record("headless-renderer-long-task", {
+              durationMs: Math.min(Math.round(entry.durationMs), 3600000),
+              clientTime: entry.clientTime
+            });
+          }
+        }
+      });
+      await page.evaluateOnNewDocument(() => {
+        if (typeof PerformanceObserver === "undefined" || !PerformanceObserver.supportedEntryTypes.includes("longtask"))
+          return;
+        let observer = new PerformanceObserver(list => {
+          let entries = list.getEntries().filter(entry => entry.duration >= 1000).slice(-8).map(entry => ({
+            durationMs: entry.duration,
+            clientTime: performance.timeOrigin + entry.startTime
+          }));
+          if (entries.length)
+            window.__indeHeadlessLongTask(entries).catch(() => {});
+        });
+        observer.observe({type: "longtask"});
+      });
+    }
+    catch (err) {
+      // Best effort: an unavailable browser binding must not prevent project opening.
+      console.warn(`[MCP] Headless connection diagnostics unavailable (${pageKey})`);
+    }
   }
 
 
@@ -3434,6 +3555,25 @@ Node.McpServer = class McpServer
       sessionId: session.id,
       ...inFlight
     };
+  }
+
+
+  /**
+   * Fails only requests waiting on the crashed IDE renderer. The browser can still
+   * create a fresh page; child-process test commands are independent of the renderer.
+   * @param {String} pageKey - Project owning the page
+   * @param {Object} page - Page emitting the crash, checked against replacement pages
+   * @param {Error} err - Puppeteer's renderer crash error
+   * @private
+   */
+  _onHeadlessPageCrash(pageKey, page, err)
+  {
+    if (this._headless[pageKey]?.page !== page)
+      return;
+    //
+    console.warn(`[MCP] Headless IDE renderer crashed (${pageKey}): ${err.message || String(err)}`);
+    this._failPending(pending => pending.kind === "devagent" && pending.label === pageKey
+      ? `Headless IDE renderer of ${pageKey} crashed while waiting for the DevAgent response` : null);
   }
 
 

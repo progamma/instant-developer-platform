@@ -135,7 +135,7 @@ Node.AppClient = class AppClient
     // Add "local" info
     data = {
       ...data,
-      cid: this.id
+      cid: this.session.cidForLog(this.id)
     };
     //
     this.session.log(level, message, sender, data);
@@ -254,7 +254,7 @@ Node.AppClient = class AppClient
     if (ctoken) { // I've been invited...
       // I've been invited: if this session has not a master -> that's not allowed
       if (!this.session.masterAppClient) {
-        this.redirectToExit(socket, "Master, that invited me, is gone", {ctoken});
+        this.redirectToExit(socket, "Master, that invited me, is gone");
         return false;
       }
       //
@@ -297,13 +297,12 @@ Node.AppClient = class AppClient
    * session already busy).
    * @param {Socket} socket - Socket.IO socket to reject
    * @param {String} reason - Human-readable reason, logged at WARN level
-   * @param {Object} [logData] - Optional structured data attached to the log entry
    * @private
    */
-  redirectToExit(socket, reason, logData)
+  redirectToExit(socket, reason)
   {
     let exitUrl = this.config.saveProperties().exitUrl;
-    this.log("WARN", `${reason} -> redirect to ${exitUrl}`, "AppClient.redirectToExit", logData);
+    this.log("WARN", `${reason} -> redirect to ${exitUrl}`, "AppClient.redirectToExit");
     socket.emit(Node.AppClient.msgTypeMap.redirect, exitUrl);
   }
 

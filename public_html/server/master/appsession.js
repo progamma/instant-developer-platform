@@ -209,19 +209,14 @@ Node.AppSession = class AppSession extends Node.Session
 
 
   /**
-   * Starts the app in REST mode: stores the request/response via the base
-   * implementation, spawns the worker's child process if it wasn't started
-   * yet, dispatches the initial `appmsg` carrying request and cookies, and
-   * arms the REST auto-kill timer.
-   * @param {Request} req - HTTP request that triggered the REST call
-   * @param {Response} res - HTTP response used to return the reply
+   * Hands a REST request to the app: spawns the worker's child process if it
+   * wasn't started yet, dispatches the `appmsg` carrying request and cookies,
+   * and arms the REST auto-kill timer.
+   * @param {Object} restCall - REST request (see {@link Node.Session#startRest})
    * @override
    */
-  startRest(req, res)
+  sendRestToChild(restCall)
   {
-    // Call base implementation to store req/res
-    super.startRest(req, res);
-    //
     // If I haven't done it yet create the physical process for the worker
     if (!this.worker.child)
       this.worker.createChild();
@@ -229,12 +224,26 @@ Node.AppSession = class AppSession extends Node.Session
     this.sendToChild({
       type: Node.AppSession.msgTypeMap.appmsg,
       sid: this.id,
-      request: this.request,
-      cookies: this.cookies
+      request: restCall.request,
+      cookies: restCall.cookies
     });
     //
     // Schedule session death
     this.scheduleRESTDeath();
+  }
+
+
+  /**
+   * Only a "pure" REST session has the REST timer that frees a request the app never answers (see
+   * scheduleRESTDeath). On a session with a MASTER client nothing would: the queue would block every
+   * following REST call, framework uploads included, until the client disconnects.
+   * @type {Boolean}
+   * @readonly
+   * @override
+   */
+  get queuesRestCalls()
+  {
+    return !this.masterAppClient;
   }
 
 
@@ -272,7 +281,7 @@ Node.AppSession = class AppSession extends Node.Session
     //
     // If this session has no master client or the master client has been deleted -> ask the worker to delete the session
     if (!this.masterAppClient || this.masterAppClient === appClient) {
-      this.log("DEBUG", "Terminated MASTER client from session", "AppSession.deleteAppClient", {cid: appClient.id});
+      this.log("DEBUG", "Terminated MASTER client from session", "AppSession.deleteAppClient", {cid: this.cidForLog(appClient.id)});
       //
       this.sendToChild({
         type: Node.AppSession.msgTypeMap.deleteChildAppSession,
@@ -284,6 +293,9 @@ Node.AppSession = class AppSession extends Node.Session
       //
       for (let i = 0; i < this.appClients.length; i++)
         this.appClients[i].close();
+      //
+      // Nobody is going to answer the REST requests still pending
+      this.closeRestCalls(503, "Session terminated");
       //
       // Ask the worker to terminate this session
       this.worker.deleteSession(this);
@@ -328,6 +340,13 @@ Node.AppSession = class AppSession extends Node.Session
       }
       //
       this.log("DEBUG", "Session has no clients -> terminate", "AppSession.terminate");
+      //
+      // Nobody is going to answer the REST requests still pending. If the app was serving one,
+      // it is a queued request the child received after deleting the session for the previous
+      // reply: the child created a new session for it, that has to go as well
+      if (this.closeRestCalls(503, "Session terminated") && this.worker.child)
+        this.sendToChild({type: Node.AppSession.msgTypeMap.deleteChildAppSession, sid: this.id});
+      //
       this.worker.deleteSession(this);
       return;
     }
@@ -366,7 +385,7 @@ Node.AppSession = class AppSession extends Node.Session
   /**
    * Arms (or re-arms) the auto-kill timer for a "pure" REST session — one that
    * has no MASTER client and therefore would never be torn down by a client
-   * disconnect. When the timer fires, a pending REST request (if any) is closed
+   * disconnect. When the timer fires, the pending REST requests (if any) are closed
    * with a timeout reply via {@link Node.Session#sendRESTTimeout} and the child
    * process is told to delete the session. If the session has a master client it
    * is not a pure REST session and the method is a no-op. Calling the method

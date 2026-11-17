@@ -14,6 +14,7 @@ Node.cookie = require("cookie");
 Node.Utils = require("./utils");
 Node.IDEAppClient = require("./ideappclient");
 Node.Session = require("./session");
+Node.SessionDiagnostics = require("./sessionDiagnostics");
 
 
 /**
@@ -84,12 +85,12 @@ Node.IDESession = class IDESession extends Node.Session
     reconnectedClient: "recon",
     /** Copy project file request */
     copyPrjFile: "cpf",
+    /** Files that could not be copied, on their way back to the user */
+    copyPrjFileResult: "cpfres",
     /** Create database request */
     createDB: "cdb",
     /** Create database result */
     createDBresult: "cdbres",
-    /** Collaboration token operation */
-    cTokenOp: "ctop",
     /** Device message */
     deviceMsg: "dm",
     /** Cloud connector message */
@@ -114,6 +115,9 @@ Node.IDESession = class IDESession extends Node.Session
     apiCommand: "apic",
     /** API command result */
     apiCommandResult: "apir",
+    /** Account-wide onboarding budget request/result */
+    onboardingBudget: "onbb",
+    onboardingBudgetResult: "onbbres",
     /** Production logs request (child → server: server holds the current autk) */
     productionLogs: "prdl",
     /** Production logs result */
@@ -180,7 +184,18 @@ Node.IDESession = class IDESession extends Node.Session
     // Compute the "active" path
     this.path = Node.path.join(this.project.user.getProjectsDir(), this.project.name);
     //
-    // Map of sockets connected with this session (master and telecollaborators)
+    // Keep incident evidence outside the worker and outside the mutable projection.
+    if (options.type === "ide" && !options.readOnly && !options.openParams?.course && !options.openParams?.showDtt) {
+      this.diagnostics = new Node.SessionDiagnostics(this.path, this.id, {
+        source: "parent",
+        version: options.openParams?.version || this.config.version,
+        uid: Number(this.project.user.uid),
+        gid: Number(this.project.user.gid)
+      });
+      this.diagnostics.start();
+    }
+    //
+    // Map of sockets connected with this session
     this.sockets = {};
     //
     // Create a new child (remember: here (i.e. inside IDE) each session has one and only one child)
@@ -264,6 +279,18 @@ Node.IDESession = class IDESession extends Node.Session
   }
 
 
+  /** Keep this session's warnings/errors with its incident, without unrelated server data. */
+  log(level, message, sender, data)
+  {
+    if (["WARN", "ERROR"].includes(level))
+      this.diagnostics?.record("parent-log", {
+        level, sender,
+        message: String(message).substring(0, 8000)
+      });
+    super.log(level, message, sender, data);
+  }
+
+
   /**
    * Creates and initializes the child process associated with this session.
    * Sends messages to the childer to create a new child process with appropriate
@@ -280,6 +307,7 @@ Node.IDESession = class IDESession extends Node.Session
       uid: this.project.user.uid,
       gid: this.project.user.gid,
       local: this.config.local,
+      sessionDiagnostics: !!this.diagnostics,
       path: this.path,
       version: this.options.openParams?.version
     });
@@ -311,6 +339,7 @@ Node.IDESession = class IDESession extends Node.Session
       options: optionsToSend,
       project: this.project.saveProperties(),
       config,
+      sessionDiagnostics: !!this.diagnostics,
       devAgentOptions: this.project.user?.devAgentOptions
     });
     //
@@ -325,6 +354,11 @@ Node.IDESession = class IDESession extends Node.Session
    */
   sendToChild(msg)
   {
+    // The local prospect harness can force onboarding for this session without changing
+    // account settings. Remember only this master-issued command, never a worker assertion.
+    if (msg.type === "force_onboarding")
+      this.forcedOnboarding = !!msg.cnt?.onboarding;
+    //
     this.childer.send({
       id: this.id,
       type: Node.IDESession.msgTypeMap.forwardToChild,
@@ -345,10 +379,13 @@ Node.IDESession = class IDESession extends Node.Session
     if (this.killSessionTimer)
       clearTimeout(this.killSessionTimer.timerID);
     //
+    this.diagnostics?.record("expiry-scheduled", {timeout});
+    //
     // Create a new timer that will fire after the given timeout
     let timerID = setTimeout(() => {
       this.log("DEBUG", "Auto-kill fired -> delete session", "IDESession.startAutoKillTimer", {timeout});
-      this.closeAllConnections();
+      this.diagnostics?.record("expiry-timer-fired", {timeout});
+      this.closeAllConnections(true);
     }, timeout);
     //
     this.killSessionTimer = {timerID};
@@ -404,9 +441,23 @@ Node.IDESession = class IDESession extends Node.Session
     if (this.project.user?.devAgentOptions) {
       let opts = Node.IDESession.decryptDevAgentOptions(this.project.user.devAgentOptions);
       if (opts) {
+        profile.devAgentSessionStorageMB = require("./devAgentOptionsStore").sessionStorageMB(opts.sessionStorageMB);
         profile.devAgentProvider = opts.provider || "anthropic";
         profile.devAgentCodexModel = opts.codexModel || "gpt-6-astra";
-        profile.devAgentModel = opts.provider === "codex" ? profile.devAgentCodexModel : opts.model || null;
+        profile.devAgentClaudeModel = opts.model || null;
+        profile.devAgentAnthropicContextWindow = opts.anthropicContextWindow === 200000 ? 200000 : 1000000;
+        profile.devAgentDeepseekModel = opts.deepseekModel || null;
+        profile.devAgentMistralModel = opts.mistralModel || "mistral-large-4";
+        profile.devAgentMistralRegion = opts.mistralRegion === "global" ? "global" : "eu";
+        profile.hasDevAgentMistralKey = !!opts.mistralApiKey;
+        if (opts.provider === "mistral-codex")
+          profile.hasDevAgentKey = !!opts.mistralApiKey;
+        profile.devAgentModel = opts.provider === "codex" ? profile.devAgentCodexModel :
+          opts.provider === "mistral-codex" ? profile.devAgentMistralModel : opts.model || null;
+        if (["deepseek", "deepseek-codex"].includes(opts.provider) && profile.devAgentDeepseekModel)
+          profile.devAgentModel = profile.devAgentDeepseekModel;
+        if (["deepseek", "deepseek-codex"].includes(opts.provider))
+          profile.hasDevAgentKey = !!opts.deepseekApiKey;
         if (opts.provider === "codex") profile.hasDevAgentKey = !!opts.codexAuth;
         profile.devAgentEffort = opts.effort || null;
         profile.devAgentSupportConsent = !!opts.supportConsent;
@@ -425,7 +476,7 @@ Node.IDESession = class IDESession extends Node.Session
         // an `apiKey` — the blob also exists for model/effort/provider settings.
         if (opts.apiKey) {
           profile.hasPersonalDevAgentKey = true;
-          if (opts.provider !== "codex") profile.hasDevAgentKey = true;
+          if (!["codex", "deepseek", "deepseek-codex", "mistral-codex"].includes(opts.provider)) profile.hasDevAgentKey = true;
         }
       }
     }
@@ -449,84 +500,57 @@ Node.IDESession = class IDESession extends Node.Session
 
   /**
    * Opens a new WebSocket connection with this session.
-   * Handles authentication, reconnection, and multi-client support with collaboration tokens.
-   * Sets up event listeners for the socket and manages the session lifecycle.
+   * Handles authentication and reconnection, and manages the session lifecycle.
    * @param {Socket} socket - The Socket.io socket that initiated the connection
-   * @param {Object} msg - Initial message from the client containing session ID and optional tokens
+   * @param {Object} msg - Initial message from the client containing the session ID
    */
   openConnection(socket, msg)
   {
-    let ctoken = msg.ctoken;
     let reconnected;      // TRUE if this is a succesful reconnection
     //
-    // Check if I can accept this message. If the client sent a CTOKEN
-    if (ctoken) {
-      // If the session has NO master -> that's not allowed
-      // If the the session has a master but the CTOKEN is invalid -> that's not allowed
-      if (!this.masterClientSod || !this.cTokens.includes(ctoken)) {
-        this.log("WARN", "Session refuses to accept an invited client", "IDESession.openConnection",
-                {ctoken, masterSOD: this.masterClientSod});
+    // If the SID is invalid
+    if (this.invalidSID(socket)) {
+      let exitUrl = this.config.saveProperties().exitUrl;
+      this.log("WARN", `Invalid SID -> redirect to ${exitUrl}`, "IDESession.openConnection");
+      socket.emit(Node.IDESession.msgTypeMap.redirect, exitUrl);
+      return;
+    }
+    //
+    // If this is a reconnect attempt
+    if (socket.client.request._query.reconnect) {        // Reconnect attempt
+      this.log("DEBUG", "Reconnect attempt", "IDESession.openConnection", {masterSOD: this.masterClientSod});
+      //
+      // Validate reconnect credentials
+      let auth = socket.handshake.auth || {};
+      if (!auth.reconnectToken || auth.reconnectToken !== this.project.reconnectToken) {
+        this.log("WARN", "Reconnect attempt with invalid credentials", "IDESession.openConnection",
+                {hasToken: !!auth.reconnectToken});
         socket.emit(Node.IDESession.msgTypeMap.sessionError, {type: "noPermission"});
         return;
       }
       //
-      // The session is connected with a valid MASTER and the client sent a valid CTOKEN
-      this.log("DEBUG", "Session has a Master and a valid CTOKEN was received", "IDESession.openConnection",
-              {ctoken, masterSOD: this.masterClientSod});
-      //
-      // "Eat" the token from the list of valid tokens
-      let id = this.cTokens.indexOf(ctoken);
-      this.cTokens.splice(id, 1);
-      //
-      // Session has a master and a valid ctoken was received -> accept this connection
-    }
-    else {  // No ctoken received
-      // If the SID is invalid
-      if (this.invalidSID(socket)) {
-        let exitUrl = this.config.saveProperties().exitUrl;
-        this.log("WARN", `Invalid SID -> redirect to ${exitUrl}`, "IDESession.openConnection");
-        socket.emit(Node.IDESession.msgTypeMap.redirect, exitUrl);
-        return;
-      }
-      //
-      // If this is a reconnect attempt (only for main socket, not for ctokens)
-      if (socket.client.request._query.reconnect) {        // Reconnect attempt
-        this.log("DEBUG", "Reconnect attempt", "IDESession.openConnection", {masterSOD: this.masterClientSod});
-        //
-        // Validate reconnect credentials
-        let auth = socket.handshake.auth || {};
-        if (!auth.reconnectToken || auth.reconnectToken !== this.project.reconnectToken) {
-          this.log("WARN", "Reconnect attempt with invalid credentials", "IDESession.openConnection",
-                  {hasToken: !!auth.reconnectToken});
-          socket.emit(Node.IDESession.msgTypeMap.sessionError, {type: "noPermission"});
-          return;
-        }
-        //
-        // It's a reconnect attempt. If this session is already owned by someone else
-        if (this.masterClientSod) {
-          // Detach this session from the "old" master
-          let oldSocket = this.sockets[this.masterClientSod];
-          oldSocket.disconnect();
-          //
-          this.log("WARN", "This session was owned by another client -> take session ownership", "IDESession.openConnection",
-                  {oldSOD: this.masterClientSod, oldSocketStatus: (oldSocket ? "connected" : "disconnected")});
-          //
-          // Now this session has no master... the new incoming socket will be the new master
-          delete this.masterClientSod;
-        }
-        //
-        // This is an handled reconnection
-        reconnected = true;
-      }
-      //
-      // If this session has already a master -> that's not allowed
+      // It's a reconnect attempt. If this session is already owned by someone else
       if (this.masterClientSod) {
-        this.log("WARN", "Session is busy", "IDESession.openConnection", {type: this.options.type});
-        socket.emit(Node.IDESession.msgTypeMap.sessionError, {type: "busySession"});
-        return;
+        // Detach this session from the "old" master
+        let oldSocket = this.sockets[this.masterClientSod];
+        oldSocket.disconnect();
+        //
+        this.log("WARN", "This session was owned by another client -> take session ownership", "IDESession.openConnection",
+                {oldSOD: this.masterClientSod, oldSocketStatus: (oldSocket ? "connected" : "disconnected")});
+        //
+        // Now this session has no master... the new incoming socket will be the new master
+        delete this.masterClientSod;
       }
       //
-      // Session has no master -> accept this connection
+      // This is an handled reconnection
+      reconnected = true;
+    }
+    //
+    // If this session has already a master -> that's not allowed
+    if (this.masterClientSod) {
+      this.log("WARN", "Session is busy", "IDESession.openConnection", {type: this.options.type});
+      socket.emit(Node.IDESession.msgTypeMap.sessionError, {type: "busySession"});
+      return;
     }
     //
     // If a "kill-session" was scheduled, stop it
@@ -572,14 +596,6 @@ Node.IDESession = class IDESession extends Node.Session
     //
     // If not reconnected
     if (!reconnected) {
-      // Attach ephemeral TURN credentials for WebRTC calls (issue #12897) to a copy of the
-      // profile, so the cached profile stays clean and each connection gets fresh credentials
-      let iceServers = this.config.getIceServers();
-      if (iceServers) {
-        profile = Object.assign({}, profile);
-        profile.iceServers = iceServers;
-      }
-      //
       // Send profile info to the incoming client
       socket.emit(Node.IDESession.msgTypeMap.profile, profile);
       //
@@ -590,7 +606,6 @@ Node.IDESession = class IDESession extends Node.Session
         type: Node.IDESession.msgTypeMap.initNewClient,
         sod,
         cnt: {
-          master: sod === this.masterClientSod,
           prospectUuid: this.prospectUuid || null
         }
       });
@@ -600,6 +615,11 @@ Node.IDESession = class IDESession extends Node.Session
         type: Node.IDESession.msgTypeMap.reconnectedClient,
         sod
       });
+    //
+    this.diagnostics?.record("browser-connected", {reconnected: !!reconnected, master: this.masterClientSod === sod});
+    // Only this authenticated socket can submit small lifecycle observations. These are
+    // browser claims, not proof of a server timeout or process death.
+    socket.on("sessionDiagnostics", payload => this.recordBrowserDiagnostics(sod, payload));
     //
     // Listen to generalChannel messages
     socket.on(Node.IDESession.msgTypeMap.generalChannel, msg => {
@@ -620,14 +640,24 @@ Node.IDESession = class IDESession extends Node.Session
     });
     //
     // Listen to disconnect event
-    socket.on("disconnect", (reason) => {
+    socket.on("disconnect", (reason, description) => {
       // Capture socket.io's disconnect `reason` (e.g. "ping timeout", "transport close",
       // "server namespace disconnect"): when the MASTER socket drops, masterClientSod is
       // deleted below and the next save_project/close_project fails with "No browser client
       // connected". WARN for a master drop (it breaks the session), INFO otherwise. The old
       // DEBUG level was filtered out of the persisted log, so the reason was unrecoverable.
       let isMaster = this.masterClientSod === sod;
-      this.log(isMaster ? "WARN" : "INFO", "IDE socket disconnected", "IDESession.openConnection", {...msg, reason, master: isMaster});
+      // Keep the Engine.IO error code without logging its request, URL, headers or bearer token.
+      let code = description?.code || description?.description?.code;
+      let details = {
+        reason,
+        master: isMaster,
+        transport: socket.conn?.transport?.name,
+        protocol: socket.conn?.protocol,
+        transportErrorCode: typeof code === "string" && /^[A-Z0-9_]{1,80}$/.test(code) ? code : undefined
+      };
+      this.diagnostics?.record("browser-disconnected", details);
+      this.log(isMaster ? "WARN" : "INFO", "IDE socket disconnected", "IDESession.openConnection", {...msg, ...details});
       //
       // Close all apps started by this session
       // (do it backwards because the "close()" call will close the socket that will send
@@ -652,11 +682,35 @@ Node.IDESession = class IDESession extends Node.Session
         // Start the "kill-session" timer
         this.startAutoKillTimer(this.config.timerSession, true);
       }
-      else if (ctoken)  // The disconnected socket was not the MASTER
-        // Put the ctoken back in the list of "valid" tokens
-        // (the client can come back until the MASTER is alive)
-        this.cTokens.push(ctoken);
     });
+  }
+
+
+  /** Accept bounded lifecycle facts only from the authenticated master browser. */
+  recordBrowserDiagnostics(sod, payload)
+  {
+    if (!this.diagnostics || this.masterClientSod !== sod || !Array.isArray(payload?.events))
+      return;
+    // Limit disk writes even if a browser floods the diagnostic channel.
+    let now = Date.now();
+    if (!this.browserDiagnosticWindow || now - this.browserDiagnosticWindow.time >= 60000)
+      this.browserDiagnosticWindow = {time: now, count: 0};
+    let allowed = ["connect", "disconnect", "visibilitychange", "freeze", "resume", "pagehide", "pageshow", "online", "offline"];
+    for (let entry of payload.events.slice(0, 32)) {
+      if (this.browserDiagnosticWindow.count >= 64)
+        break;
+      if (!entry || !allowed.includes(entry.event))
+        continue;
+      this.browserDiagnosticWindow.count++;
+      this.diagnostics.record("browser-lifecycle", {
+        event: entry.event,
+        clientTime: typeof entry.at === "number" && Number.isFinite(entry.at) ? entry.at : null,
+        visibility: ["hidden", "visible"].includes(entry.visibility) ? entry.visibility : "unknown",
+        online: entry.online === true,
+        wasDiscarded: entry.wasDiscarded === true,
+        reason: typeof entry.reason === "string" ? entry.reason.substring(0, 120) : undefined
+      });
+    }
   }
 
 
@@ -676,9 +730,18 @@ Node.IDESession = class IDESession extends Node.Session
   /**
    * Closes all client connections and terminates the session.
    * Disconnects all sockets, clears timers, and requests child process termination.
+   * @param {Boolean} [expired] - Preserve unsaved changes only for an expired session
    */
-  closeAllConnections()
+  closeAllConnections(expired)
   {
+    this.diagnostics?.record("termination-requested", {expired: !!expired, completed: !!this.sessionCompletedReceived});
+    if (expired && !this.sessionCompletedReceived && !this.expiryCompletion) {
+      this.expiryCompletion = this.waitCompleted();
+      //
+      // An expiry with no waiting opener can still be rejected by the watchdog.
+      this.expiryCompletion.catch(() => {});
+    }
+    //
     // First, close all sockets
     let skey = Object.keys(this.sockets);
     for (let k = 0; k < skey.length; k++) {
@@ -702,7 +765,8 @@ Node.IDESession = class IDESession extends Node.Session
     //
     // Ask the child to gracefully terminate
     this.sendToChild({
-      type: Node.IDESession.msgTypeMap.terminateChild
+      type: Node.IDESession.msgTypeMap.terminateChild,
+      expired: !!expired
     });
     //
     // Termination watchdog (issue #14839): the closing handshake is entirely pull —
@@ -712,6 +776,7 @@ Node.IDESession = class IDESession extends Node.Session
     if (!this.terminationWatchdog && !this.sessionCompletedReceived) {
       this.terminationWatchdog = setTimeout(() => {
         delete this.terminationWatchdog;
+        this.diagnostics?.record("termination-watchdog", {timeout: Node.IDESession.terminationWatchdogTimeout});
         this.log("WARN", "Child did not confirm termination in time -> force close", "IDESession.closeAllConnections");
         //
         // Callers awaiting the session outcome must not hang forever with it
@@ -753,7 +818,7 @@ Node.IDESession = class IDESession extends Node.Session
         // server-side — stamping there would pin the project to the opening version just for having
         // looked at it. A real save is recognizable because the child's saveDocument invalidates the
         // keys first (lastSaveID null), so only the keys that follow an invalidation get the stamp
-        if (msg.info.lastSaveID === null)
+        if (msg.info.lastSaveID === null && !msg.resync)
           this.prjSaveStarted = true;
         else if (msg.info.lastSaveID && !msg.info.lastSaveVersion && this.prjSaveStarted) {
           let sessionVersion = this.options.openParams?.version || this.config.getHighestIdeVersion();
@@ -766,6 +831,11 @@ Node.IDESession = class IDESession extends Node.Session
         break;
 
       case Node.IDESession.msgTypeMap.sessionCompleted:      // I've done my job
+        this.diagnostics?.end({
+          reason: msg.workerExit ? "worker-exit" : "worker-completed",
+          workerExit: msg.workerExit,
+          error: msg.result?.err ? String(msg.result.err).substring(0, 2000) : undefined
+        });
         // The child confirmed its termination — disarm the force-close watchdog and
         // remember the confirmation, so the closeAllConnections below can't re-arm it
         this.sessionCompletedReceived = true;
@@ -787,8 +857,10 @@ Node.IDESession = class IDESession extends Node.Session
         if (this.sessionCompletedPromise) {
           let {resolve, reject} = this.sessionCompletedPromise;
           delete this.sessionCompletedPromise;
-          if (msg.result.err)
-            reject(msg.result.err);
+          // The child sends back only the message of its error: whoever waits gets a real Error,
+          // since the callers read error.message (see Config.processCommand)
+          if (msg.result?.err)
+            reject(new Error(msg.result.err));
           else
             resolve(msg.result);
         }
@@ -802,10 +874,6 @@ Node.IDESession = class IDESession extends Node.Session
           this.sockets[msg.sod].disconnect();
         else
           this.log("WARN", "Can't close client connection (socket not found)", "IDESession.processMessage", msg);
-        break;
-
-      case Node.IDESession.msgTypeMap.cTokenOp:
-        this.handleCTokenOpMsg(msg);
         break;
 
       case Node.IDESession.msgTypeMap.createDB:
@@ -841,6 +909,10 @@ Node.IDESession = class IDESession extends Node.Session
 
       case Node.IDESession.msgTypeMap.remoteQuery:
         this.handleRemoteQueryMessage(msg.options);
+        break;
+
+      case Node.IDESession.msgTypeMap.onboardingBudget:
+        this.handleOnboardingBudgetMessage(msg);
         break;
 
       case Node.IDESession.msgTypeMap.productionLogs:
@@ -914,7 +986,13 @@ Node.IDESession = class IDESession extends Node.Session
         // owns the live Node.Config, so the write + saveConfig happen here.
         if (typeof msg.cnt === "string" && msg.cnt.length < 4096) {
           try {
-            this.project.user.onboardingState = JSON.parse(msg.cnt);
+            let state = JSON.parse(msg.cnt);
+            // A stale project worker may save progress after another worker consumed a gift.
+            for (let flag of Object.values(require("./onboardingBudget").resetFlags)) {
+              if (this.project.user.onboardingState?.[flag])
+                state[flag] = true;
+            }
+            this.project.user.onboardingState = state;
             this.config.saveConfig().catch(err => console.log(`[IDESession] saveOnboardingState: saveConfig failed: ${err?.message}`));
           }
           catch (e) {
@@ -1081,25 +1159,34 @@ Node.IDESession = class IDESession extends Node.Session
 
 
   /**
-   * Starts a new REST session for handling HTTP requests.
-   * Overrides base class to handle IDE-specific app ID processing and routing.
-   * @param {Request} req - Express HTTP request object
-   * @param {Response} res - Express HTTP response object
+   * The IDE session serves every app of the project and has no REST timeout: a request the preview
+   * never answers (preview not started, stopped or relaunched) would block all the following ones.
+   * @type {Boolean}
+   * @readonly
    * @override
    */
-  startRest(req, res)
+  get queuesRestCalls()
   {
-    // Call base implementation to store req/res
-    super.startRest(req, res);
-    //
+    return false;
+  }
+
+
+  /**
+   * Hands a REST request to the app.
+   * Overrides base class to handle IDE-specific app ID processing and routing.
+   * @param {Object} restCall - REST request (see {@link Node.Session#startRest})
+   * @override
+   */
+  sendRestToChild(restCall)
+  {
     // IDE-specific: send message to child with appid
-    let appid = req.params?.appid.replace(/-/g, "/");
+    let appid = restCall.req.params?.appid.replace(/-/g, "/");
     this.sendToChild({
       type: Node.IDESession.msgTypeMap.appmsg2ide,
       appid,
       sid: this.id,
-      request: this.request,
-      cookies: this.cookies
+      request: restCall.request,
+      cookies: restCall.cookies
     });
   }
 
@@ -1284,6 +1371,30 @@ Node.IDESession = class IDESession extends Node.Session
   }
 
 
+  /** Read or reset the authenticated user's budget; worker payloads cannot select another user. */
+  async handleOnboardingBudgetMessage(msg)
+  {
+    let result;
+    let err;
+    try {
+      if (!this.getProfile().isOnboarding && !this.forcedOnboarding)
+        throw new Error("Onboarding budget unavailable outside onboarding");
+      result = await require("./onboardingBudget").request(this.project.user, this.project, msg.command);
+    }
+    catch (error) {
+      this.log("WARN", error.message, "IDESession.handleOnboardingBudgetMessage");
+      err = "Unable to update onboarding budget";
+    }
+    this.sendToChild({
+      type: Node.IDESession.msgTypeMap.onboardingBudgetResult,
+      sid: this.id,
+      reqid: msg.reqid,
+      result,
+      err
+    });
+  }
+
+
   /**
    * Performs the production-logs CCC call on behalf of the child process. The autk token lives
    * only on the server process and rotates ~hourly, so the child cannot perform the call itself
@@ -1454,26 +1565,164 @@ Node.IDESession = class IDESession extends Node.Session
   /**
    * Handles a file copy request between projects.
    * Validates paths to prevent traversal attacks before copying.
-   * @param {Object} msg - Message containing copy options in `cnt` (src and dst paths)
+   *
+   * A request carries ALL the files of one paste, not one at a time: it is the only way to tell
+   * the user in a single message what did not arrive (#12261).
+   * @param {Object} msg - Message containing copy options in `cnt`: `files` (an array of
+   * {name, src, dst}) and `srcPrj`, the project they come from
    */
   async handleCopyPrjFile(msg)
   {
-    let options = msg.cnt;
+    // `cnt` arriva dal browser e puo' mancare del tutto: senza questo, la riga qui sotto
+    // solleva prima di qualunque difesa, e il rigetto a terra spegne il processo (#12261)
+    let options = msg.cnt || {};
     this.log("DEBUG", "Copy project file", "IDESession.handleCopyPrjFile", options);
     //
-    let src = Node.path.resolve(this.config.directory, options.src);
-    let dst = Node.path.resolve(this.config.directory, options.dst);
+    let mancanti = [];
     //
-    // Path traversal validation
-    if (!src.startsWith(this.config.directory) || !dst.startsWith(this.config.directory))
-      return this.log("WARN", "Path traversal detected", "IDESession.handleCopyPrjFile", options);
+    // Confining a path takes more than comparing strings. The old guard compared the resolved
+    // path with `this.config.directory` as written - forward slashes against backslashes on
+    // Windows - so it was always false and rejected EVERY copy, legitimate ones included, leaving
+    // just a WARN nobody read (#12261).
     //
-    try {
-      await Node.fs.promises.copyFile(src, dst);
+    // Resolving both sides is still not enough: a symlink points wherever it wants and the file
+    // system follows it, on reads and on writes - and the mkdir below would create directories
+    // through it. realPath and isPathInside are the pair the repo already uses for exactly this
+    // (utils.js, issue #14062), and isPathInside carries the trailing separator of its own, so a
+    // sibling folder whose name starts the same way does not pass as inside.
+    //
+    // On v26.0r9-IDS those two utilities do not exist, and the same walk is written inline there
+    // rather than adding public utilities to a release branch: the two branches diverge here on
+    // purpose, and this note is in both places so neither looks like a mistake
+    // Con IdsPrjDir (#14585) i progetti NON stanno sotto <directory>/<utente>: stanno tutti
+    // dentro quella cartella, per nome di progetto (user.js, getProjectsListJson). Il client
+    // manda comunque <utente>/<progetto>/resources/<guid>, che e' la sola forma che conosce,
+    // quindi qui il segmento dell'utente non vuol dire niente e va tolto: senza, si cerca e si
+    // scrive dove i progetti non sono piu', l'incolla non porta niente e l'utente si prende
+    // l'avviso a ogni volta. La #15005 e' lo stesso inciampo su un'altra porta, e il commento
+    // di Config.openPrjFolder lo dice gia' (#12261)
+    let prjDir = this.config.idfoptions?.IdsPrjDir;
+    let intero = p => prjDir ? Node.path.resolve(prjDir, p.split(/[\\/]/).slice(1).join("/"))
+            : Node.path.resolve(this.config.directory, p);
+    //
+    // Il client compone sempre <utente>/<progetto>/resources/<guid>, sia quello di oggi sia
+    // quello di prima del rilascio. Pretendere la FORMA chiude una classe intera: senza, la sola
+    // guardia sul confine lascia leggere il project.json di chiunque e scrivere fuori da
+    // resources/ (#16461).
+    //
+    // Tre cose non ovvie, tutte misurate:
+    //  - le barre ROVESCE si rifiutano: su Windows path.resolve le tratta da separatore, quindi
+    //    un `..` nascosto fra loro esce dalla cartella senza comparire fra i pezzi;
+    //  - dopo `resources` ci vuole un pezzo VERO: una barra in coda ne produce uno vuoto, e la
+    //    copia finisce sulla cartella stessa - che pianta li' un FILE, e da allora ogni incolla
+    //    in quel progetto muore sulla mkdir con EEXIST;
+    //  - il confronto e' su `>= 4` perche' il guid oggi non contiene barre, ma non ci si appoggia.
+    let risorsa = p => {
+      let pezzi = p.split("/");
+      return pezzi.length >= 4 && pezzi[2] === "resources" && !p.includes("\\")
+              && pezzi.slice(0, 3).every(x => x && x !== ".")
+              && pezzi.slice(3).some(x => x && x !== ".")
+              && !pezzi.includes("..");
+    };
+    //
+    let radice = await Node.Utils.realPath(prjDir || this.config.directory);
+    //
+    // La DESTINAZIONE resta dentro il PROGETTO di questa sessione: si incolla nel proprio
+    // progetto, e chi compone il messaggio e' il browser. Confinare alla cartella dell'utente
+    // non basta - li' sotto ci sono anche index.json, il file IID della licenza e db/, cioe' il
+    // tablespace, e dietro la guardia c'e' una mkdir ricorsiva piu' una copyFile (#12261).
+    //
+    // getProjectsDir() e' l'accessore che il repo usa per ogni percorso di progetto, e tiene
+    // gia' dentro tutte e due le disposizioni: <directory>/<utente> di default, la cartella
+    // condivisa quando IdsPrjDir e' configurato. La stessa composizione sta a idesession.js:181,
+    // e Project.downloadFile confina cosi' la stessa cartella resources servita su HTTP.
+    //
+    // L'ORIGINE invece resta libera dentro la radice: incollare dal progetto di un collega e'
+    // permesso apposta, lo decide il client in canPasteFromOtherPrj
+    let mia = await Node.Utils.realPath(Node.path.join(this.project.user.getProjectsDir(), this.project.name));
+    //
+    // An IDE tab loaded before this change still sends one file as {src, dst}: the loop over
+    // `options.files` would throw on undefined, and processMessage calls this without await
+    // (idesession.js:805), so the rejection would reach the process-wide unhandledRejection
+    // handler - which kills the server, and with it every session on it (#12261)
+    // Il controllo e' su `typeof`, non su truthy: path.basename di un numero, di un oggetto o di
+    // un array solleva, e qui siamo ancora PRIMA della guardia dentro il ciclo - cioe' nel punto
+    // che la riga esiste apposta per proteggere
+    let files = Array.isArray(options.files) ? options.files : (typeof options.src === "string" ? [{
+      name: Node.path.basename(typeof options.dst === "string" ? options.dst : options.src),
+      src: options.src,
+      dst: options.dst
+    }] : []);
+    //
+    for (let f of files) {
+      // A file entry without src or dst reaches the same fatal path the line above exists to
+      // close: path.resolve throws on undefined, processMessage does not await, and the floating
+      // rejection kills the process. The cnt is composed in the browser and nobody checks it on
+      // the way here, so the shape is an assumption until it is verified (#12261)
+      if (typeof f?.src !== "string" || typeof f?.dst !== "string") {
+        this.log("WARN", "Malformed copy request", "IDESession.handleCopyPrjFile", f);
+        mancanti.push(f?.name || "?");
+        continue;
+      }
+      //
+      // Un percorso ASSOLUTO - lettera di volume, barra iniziale o UNC - sopravvive a
+      // path.resolve intatto, e la riga qui sotto ci va sopra PRIMA che la guardia possa dire di
+      // no. Su un UNC quella risoluzione esce in rete verso un indirizzo scelto dal browser e
+      // torna dopo una ventina di secondi: in fila nel ciclo, e in questo processo, che e' il
+      // server e non il figlio. Il client compone sempre percorsi relativi, quindi qui si
+      // rifiuta prima di toccare il filesystem (#12261).
+      //
+      // isAbsolute va chiesto nelle due forme: quella della piattaforma e quella di Windows,
+      // perche' un server Linux non riconoscerebbe ne' C: ne' l'UNC
+      if (Node.path.isAbsolute(f.src) || Node.path.isAbsolute(f.dst) ||
+              Node.path.win32.isAbsolute(f.src) || Node.path.win32.isAbsolute(f.dst)) {
+        this.log("WARN", "Absolute path refused", "IDESession.handleCopyPrjFile", f);
+        mancanti.push(f.name);
+        continue;
+      }
+      //
+      // Il controllo sulla forma sta PRIMA della traduzione: con IdsPrjDir `intero` butta via il
+      // primo segmento, e dopo non si saprebbe piu' se c'era
+      if (!risorsa(f.src) || !risorsa(f.dst)) {
+        this.log("WARN", "Not a resource path", "IDESession.handleCopyPrjFile", f);
+        mancanti.push(f.name);
+        continue;
+      }
+      //
+      let src = await Node.Utils.realPath(intero(f.src));
+      let dst = await Node.Utils.realPath(intero(f.dst));
+      //
+      // Path traversal validation
+      if (!Node.Utils.isPathInside(src, [radice], true) || !Node.Utils.isPathInside(dst, [mia], true)) {
+        this.log("WARN", "Path traversal detected", "IDESession.handleCopyPrjFile", f);
+        mancanti.push(f.name);
+        continue;
+      }
+      //
+      try {
+        // The resources folder of a project that never had one does not exist yet, and copyFile
+        // would fail with an ENOENT naming the file instead of the missing folder
+        await Node.fs.promises.mkdir(Node.path.dirname(dst), {recursive: true});
+        await Node.fs.promises.copyFile(src, dst);
+      }
+      catch (e) {
+        this.log("WARN", `Can't copy file: ${e}`, "IDESession.handleCopyPrjFile", f);
+        mancanti.push(f.name);
+      }
     }
-    catch (e) {
-      this.log("WARN", `Can't copy file: ${e}`, "IDESession.handleCopyPrjFile", options);
-    }
+    //
+    // A file that does not arrive leaves the project broken in a way that shows up only at build
+    // time, weeks later, with an error naming a file the user has never seen. While this was only
+    // a WARN in the log, nobody knew (#12261)
+    if (mancanti.length)
+      this.sendToChild({
+        type: Node.IDESession.msgTypeMap.copyPrjFileResult,
+        sid: this.id,
+        cnt: {
+          mancanti,
+          srcPrj: options.srcPrj
+        }
+      });
   }
 };
 

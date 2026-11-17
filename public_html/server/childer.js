@@ -11,8 +11,9 @@ Node.fs = require("fs");
 Node.path = require("path");
 
 // Import classes
-Node.Logger = require("./logger");
+Node.Logger = require("./logger").Logger;
 Node.Utils = require("./utils");
+Node.SessionDiagnostics = require("./sessionDiagnostics");
 
 
 /**
@@ -93,7 +94,7 @@ Node.Childer = class Childer
    */
   start()
   {
-    this.logger = new Node.Logger(this, "CHILDER");
+    this.logger = new Node.Logger(this);
     this.logger.log("INFO", "******* Childer started *******", "Childer.start", {pid: process.pid});
     //
     process.on("disconnect", async () => {
@@ -244,7 +245,40 @@ Node.Childer = class Childer
     // ide, so the cwd is the same the child would inherit today
     if (m.version)
       params.cwd = Node.path.join(Node.Utils.resolveIdeDir(m.version), "..", "server");
+    let diagnostics;
+    if (m.sessionDiagnostics) {
+      diagnostics = new Node.SessionDiagnostics(m.path, m.id, {
+        source: "childer", version: m.version,
+        uid: params.uid, gid: params.gid
+      });
+      diagnostics.start();
+      // Preserve stderr in the supervisor output, and keep a bounded fatal-error tail
+      // even when V8 exits before any JavaScript error handler can run.
+      params.stdio = ["inherit", "inherit", "pipe", "ipc"];
+    }
     let child = Node.child.fork(Node.path.join(Node.Utils.resolveIdeDir(m.version), "child.js"), Object.assign(params, Node.Utils.forkArgs()));
+    //
+    child.diagnostics = diagnostics;
+    let stderrTail = "";
+    let resumeStderr = () => child.stderr?.resume();
+    if (diagnostics && child.stderr) {
+      child.stderr.on("data", chunk => {
+        if (process.stderr.write(chunk) === false) {
+          child.stderr.pause();
+          process.stderr.once("drain", resumeStderr);
+        }
+        stderrTail = (stderrTail + chunk.toString()).slice(-8000);
+      });
+    }
+    diagnostics?.record("worker-forked", {workerPid: child.pid});
+    child.on("exit", (code, signal) => {
+      diagnostics?.record("worker-exit", {workerPid: child.pid, code, signal, stderrTail});
+      // The worker is no longer writing. This is disk evidence, not a claim that
+      // a transaction interrupted by process death had finished atomically.
+      if (!child.completedNormally)
+        diagnostics?.capture("worker-exited-disk-state-possibly-unsettled");
+      diagnostics?.end({workerPid: child.pid, code, signal});
+    });
     //
     // Store the child in the map
     this.children[m.id] = child;
@@ -254,9 +288,20 @@ Node.Childer = class Childer
     //
     // Handle child messages
     child.on("message", m => {
+      if (m.type === Node.Childer.msgTypeMap.sessionCompleted) {
+        child.completedNormally = !m.result?.err;
+        diagnostics?.record("worker-completion-received", {error: !!m.result?.err});
+      }
       // Route LOG messages to my owner's process
-      if (m.type === Node.Childer.msgTypeMap.log)
+      if (m.type === Node.Childer.msgTypeMap.log) {
+        if (["WARN", "ERROR"].includes(m.level))
+          diagnostics?.record("worker-log", {
+            level: m.level,
+            sender: String(m.sender || "").substring(0, 200),
+            message: String(m.message || "").substring(0, 8000)
+          });
         return process.send(m);
+      }
       //
       // Send any messge (coming from the child) to the server process
       process.send({
@@ -267,6 +312,7 @@ Node.Childer = class Childer
     //
     // Child disconnection
     child.on("disconnect", () => {
+      diagnostics?.record("worker-ipc-disconnected", {workerPid: child.pid});
       // Log the child disconnection
       this.logger.log("DEBUG", "Child terminated", "Childer.createChild", {id: ide_session});
       //
@@ -275,7 +321,9 @@ Node.Childer = class Childer
     });
     //
     // Child dies
-    child.on("close", () => {
+    child.on("close", (code, signal) => {
+      process.stderr.removeListener("drain", resumeStderr);
+      diagnostics?.record("worker-streams-closed", {workerPid: child.pid, code, signal, stderrTail});
       // Log the child death
       this.logger.log("WARN", "Child has been closed!", "Childer.createChild", {id: ide_session});
       //
@@ -283,7 +331,8 @@ Node.Childer = class Childer
       process.send({
         id: ide_session,
         cnt: {
-          type: Node.Childer.msgTypeMap.sessionCompleted
+          type: Node.Childer.msgTypeMap.sessionCompleted,
+          workerExit: {code, signal, pid: child.pid}
         }
       });
       //
@@ -293,6 +342,7 @@ Node.Childer = class Childer
     //
     // Child error
     child.on("error", err => {
+      diagnostics?.record("worker-error", {error: String(err).substring(0, 2000), workerPid: child.pid});
       // Log the child error
       this.logger.log("WARN", `Child error: ${err}`, "Childer.createChild", {id: ide_session});
     });
@@ -316,6 +366,7 @@ Node.Childer = class Childer
     if (!child)
       return;
     //
+    child.diagnostics?.record("force-termination-requested", {workerPid: child.pid});
     this.logger.log("WARN", "Force-killing child that did not terminate", "Childer.killChild", {id, pid: child.pid});
     //
     // Give the child one last chance to exit cleanly via its "disconnect" handler
@@ -334,6 +385,7 @@ Node.Childer = class Childer
       let descendants = this.getDescendantPids(child.pid);
       this.logger.log("WARN", "Child did not exit after disconnect -> SIGKILL", "Childer.killChild",
               {id, pid: child.pid, descendants});
+      child.diagnostics?.record("worker-sigkill", {workerPid: child.pid, descendantCount: descendants.length});
       try {
         child.kill("SIGKILL");
       }

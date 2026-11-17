@@ -695,6 +695,8 @@ Node.Request = class Request
     let form = new Node.FormData();
     form.append("branch", branchName);
     form.append("commits", options.commits);
+    if (options.sourceHistory)
+      form.append("sourceHistory", JSON.stringify(options.sourceHistory));
     form.append("user", options.user);          // User that will receive this branch
     form.append("project", options.project);    // Project that will receive this branch
     //
@@ -718,6 +720,11 @@ Node.Request = class Request
     catch (e) {
       err = e;
     }
+    //
+    // Old servers wrap the multipart size error as HTTP 500 before any backup session starts.
+    if (!err && options.sourceHistory && (code === 413 || code === 500 &&
+        typeof data === "string" && /^Error in form parsing: maxFieldsSize \d+ exceeded$/.test(data)))
+      return await this.backupBranch(branchName, parentPrjData, {...options, sourceHistory: undefined});
     //
     if (err || code !== 200) {
       this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.backupBranch", {err, code, data, options: postOpt});
@@ -785,53 +792,6 @@ Node.Request = class Request
 
 
   /**
-   * Invites users for telecollaboration.
-   * Sends a request to the console to invite multiple users for remote collaboration sessions.
-   * @param {Object} msg - Invitation message containing user information
-   * @param {String} msg.userName - Username of the inviter
-   * @param {Array} msg.users - Array of users to invite for telecollaboration
-   * @throws {Error} Throws error if invitation fails
-   */
-  async inviteUsers(msg)
-  {
-    // Create a form to be sent via post
-    let form = new Node.FormData();
-    form.append("user", msg.userName);
-    form.append("users", JSON.stringify(msg.users));
-    //
-    let err, code, data, options;
-    try {
-      if (!this.config.consoleURL)
-        throw new Error("Missing consoleURL configuration");
-      //
-      let consoleUrlParts = new URL(this.config.consoleURL);
-      options = {
-        protocol: consoleUrlParts.protocol,
-        hostname: consoleUrlParts.hostname,
-        port: consoleUrlParts.port,
-        path: `${consoleUrlParts.pathname}?mode=rest&cmd=inviteUsers&autk=${this.config.autk}`,
-        method: "POST",
-        headers: form.getHeaders()
-      };
-      //
-      ({code, data} = await this.postRequest(options, form));
-    }
-    catch (e) {
-      err = e;
-    }
-    //
-    if (err || code !== 200) {
-      this.logger.log(err ? "ERROR" : "WARN", "POST reply error", "Request.inviteUsers", {err, code, data, options});
-      if (!err)
-        err = new Error("Invalid response");
-    }
-    //
-    if (err)
-      throw err;
-  }
-
-
-  /**
    * Lists users from the console.
    * Retrieves a filtered list of users based on search criteria and organization settings.
    * @param {Object} msg - Search criteria for listing users
@@ -878,44 +838,6 @@ Node.Request = class Request
     }
     catch (err) {
       this.logger.log(warning ? "WARN" : "ERROR", "POST reply error", "Request.listUsers", {err, code, data, options});
-      throw err;
-    }
-  }
-
-
-  /**
-   * Checks if a user is online.
-   * Queries the console to determine if a user with the given email address is currently online.
-   * @param {String} address - Email address of the user to check
-   * @returns {Object} JSON object containing the user's online status
-   * @throws {Error} Throws error if the request fails
-   */
-  async isUserOnline(address)
-  {
-    let code, data, options, warning;
-    try {
-      if (!this.config.consoleURL)
-        throw new Error("Missing consoleURL configuration");
-      //
-      let consoleUrlParts = new URL(this.config.consoleURL);
-      options = {
-        protocol: consoleUrlParts.protocol,
-        hostname: consoleUrlParts.hostname,
-        port: consoleUrlParts.port,
-        path: `${consoleUrlParts.pathname}?mode=rest&cmd=isUserOnline&email=${address}&autk=${this.config.autk}`,
-        method: "GET"
-      };
-      //
-      ({code, data} = await this.getRequest(options));
-      //
-      if (code !== 200) {
-        warning = true;
-        throw new Error("Invalid response");
-      }
-      return JSON.parse(data);
-    }
-    catch (err) {
-      this.logger.log(warning ? "WARN": "ERROR", "POST reply error", "Request.isUserOnline", {err, code, data, options});
       throw err;
     }
   }

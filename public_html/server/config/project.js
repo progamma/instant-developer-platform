@@ -17,6 +17,8 @@ Node.path = require("path");
 // Import Classes
 Node.Archiver = require("../archiver");
 Node.Utils = require("../utils");
+// config.js requires this file while it loads: Config is read when used, not here
+Object.defineProperty(Node, "Config", {get: () => require("./config")});
 
 
 /**
@@ -120,6 +122,7 @@ Node.Project = class Project
   /**
    * Write a message to the shared logger enriching it with project and user metadata.
    * Note: the `data` object is deep-cloned so enriching it does not mutate the caller's reference.
+   * Note: before {@link Node.Server#start} creates the logger the entry is dropped rather than thrown.
    * @param {String} level - Severity level: "DEBUG", "INFO", "WARN" or "ERROR"
    * @param {String} message - Human readable message
    * @param {String} sender - Name of the function emitting the message
@@ -134,7 +137,7 @@ Node.Project = class Project
       user: this.user.userName
     };
     //
-    this.logger.log(level, message, sender, data);
+    this.logger?.log(level, message, sender, data);
   }
 
 
@@ -219,10 +222,11 @@ Node.Project = class Project
 
   /**
    * Verify the project layout on disk, creating the folder structure when missing.
+   * Only the folders created now get their ownership fixed: the existing tree is not scanned.
    */
   async check()
   {
-    await this.createProjectFolder();
+    await this.createProjectFolder(true);
   }
 
 
@@ -284,9 +288,10 @@ Node.Project = class Project
    * files/private, files/temp, files/uploaded, resources) if they do not exist.
    * Where the root helper is available ({@link Node.Server#canExecAsRoot}), ownership and
    * permissions are fixed via {@link Node.Server#execFileAsRoot} with the `ChownChmod` script.
+   * @param {Boolean} [onlyCreated=false] - Fix only the folders created now, without scanning the existing ones
    * @throws {Error} When a folder cannot be created or permissions cannot be fixed
    */
-  async createProjectFolder()
+  async createProjectFolder(onlyCreated = false)
   {
     let path = Node.path.join(this.user.getProjectsDir(), this.name);
     let foldersToCreate = [
@@ -301,6 +306,7 @@ Node.Project = class Project
       "resources"
     ];
     //
+    let created = [];
     let logData;
     try {
       // Create all folders
@@ -308,6 +314,10 @@ Node.Project = class Project
         let pathToCreate = Node.path.join(path, p);
         try {
           await Node.fs.promises.mkdir(pathToCreate);
+          //
+          // A folder inside one created now is fixed along with it
+          if (!created.some(c => c === "" || p.startsWith(`${c}/`)))
+            created.push(p);
         }
         catch (err) {
           if (err.code !== "EEXIST")
@@ -317,12 +327,15 @@ Node.Project = class Project
       //
       // Fix permissions where the root helper is available
       if (this.server.canExecAsRoot) {
-        try {
-          await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path]);
-        }
-        catch (err) {
-          logData = {OSUser: this.user.OSUser, path};
-          throw new Error(`Error changing project folder permissions: ${err.message || err}`, {cause: err});
+        let pathsToFix = onlyCreated ? created.map(p => Node.path.join(path, p)) : [path];
+        for (let pathToFix of pathsToFix) {
+          try {
+            await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, pathToFix]);
+          }
+          catch (err) {
+            logData = {OSUser: this.user.OSUser, path: pathToFix};
+            throw new Error(`Error changing project folder permissions: ${err.message || err}`, {cause: err});
+          }
         }
       }
     }
@@ -438,12 +451,9 @@ Node.Project = class Project
       throw err;
     }
     //
-    // Remember the token I've received for editing.
-    // It must be used by a client that has long-disconnected if the editing session is gone and
-    // the client asks to create a new session
-    this.reconnectToken = this.token;
-    //
-    // Invalidate the token (if it was there)
+    // Consume the console's single-use edit token before awaiting anything. Reconnect credentials
+    // belong to the editing session, not to each /edit request: a reused child already holds them.
+    let editToken = this.token;
     delete this.token;
     //
     // Update last-open timestamp so the recent projects list can be sorted
@@ -453,24 +463,36 @@ Node.Project = class Project
     //
     // First try to see if there is an open session for this project...
     let session = this.server.getOpenSession(this, {type: "ide", readOnly: undefined});
+    let replacingExpiredSession;
     //
     // If there is already a session
     if (session) {
       this.log("DEBUG", "Found old open session", "Project.editProject", {sid: session.id});
       //
       // If the session is dying
-      if (session.killSessionTimer) {
+      if (session.killSessionTimer || session.expiryCompletion) {
         // Note: I want to handle REFRESH (F5) but I don't want the user to use this dying session if it has been disconnected too long ago
         //
         // If this session has been killed more than 3 seconds ago
-        if ((new Date() - session.killSessionTimer.start) > 3000) {
+        if (session.expiryCompletion || (new Date() - session.killSessionTimer.start) > 3000) {
           this.log("WARN", "Previous session scheduled to die MORE than 3 seconds ago... replace it with a new one", "Project.editProject",
-                  {sid: session.id, deathDelta: (new Date() - session.killSessionTimer.start)});
+                  {
+                    sid: session.id,
+                    deathDelta: session.killSessionTimer ? new Date() - session.killSessionTimer.start : undefined
+                  });
           //
           // I can't leave this session alive and create a new one... there would be two sessions
           // and if the "old" (dying) session gets back I'll get in trouble!!!
           // Kill the dying session NOW so that I can replace it with a new one...
-          session.closeAllConnections();
+          if (!session.expiryCompletion)
+            session.closeAllConnections(true);
+          try {
+            await session.expiryCompletion;
+          }
+          catch (err) {
+            this.log("WARN", `Previous session completed with an error: ${err.message || err}`, "Project.editProject");
+          }
+          replacingExpiredSession = true;
           session = undefined;
         }
         else { // The session has been killed less than 3 seconds ago. Use it
@@ -538,8 +560,18 @@ Node.Project = class Project
       this.log("WARN", `No IDE version requested, defaulting to ${version}`, "Project.editProject", {version});
     }
     //
+    // Another opener may have replaced the expired session while disk checks were awaited.
+    if (replacingExpiredSession)
+      session = this.server.getOpenSession(this, {
+        type: "ide",
+        readOnly
+      });
+    //
     // If not found, create a new session for this project
     if (!session) {
+      // Mint a secret even when editPrjToken is off (including MCP headless openings). Rotate it
+      // only for a new session, before createChild snapshots the project for the browser handshake.
+      this.reconnectToken = editToken || Node.Utils.generateUID36();
       this.log("DEBUG", "Create a new IDE session", "Project.editProject");
       if (openParams?.maxViews === undefined && this.config.licdata?.maxtables && Node.Utils.isIDF()) {
         openParams = openParams || {};
@@ -750,8 +782,20 @@ Node.Project = class Project
         }
       }
       //
-      // Send the full file
-      params.res.writeHead(200, {"Content-Type": mimetype});
+      // Send the full file. A page opened as the main document of a tab - "Open file", a link of a
+      // preview opened in a new tab or dragged onto the tab bar - would run its scripts with the
+      // origin of the IDE: the sandbox stops them (#17041), as it does in a frame put there by a page
+      // of another origin. Frames and subresources asked by the IDE are left alone, because the preview has a
+      // sandbox of its own and the apps load their scripts from here. Not frame-ancestors: on a
+      // device the top of the frames is the launcher, of another origin, and would refuse them all.
+      // A request that does not tell its destination is sandboxed too; a PDF is not, because the
+      // viewer of the browser refuses to run in a sandbox
+      let headers = {"Content-Type": mimetype};
+      let dest = params.req.headers["sec-fetch-dest"];
+      let site = params.req.headers["sec-fetch-site"];
+      if ((!dest || dest === "document" || site !== "same-origin") && mimetype !== "application/pdf")
+        headers["Content-Security-Policy"] = "sandbox allow-same-origin";
+      params.res.writeHead(200, headers);
       try {
         let stream = Node.fs.createReadStream(path);
         await require("stream/promises").pipeline(stream, params.res);
@@ -994,7 +1038,7 @@ Node.Project = class Project
    * when the server is not local and not running on Windows.
    * @param {Object} params - Request context (unused, kept for signature consistency)
    * @returns {Promise<Object>} Status snapshot with fields `version`, `public`, `lastSave`,
-   *   `lastSaveVersion`, `diskSize` and the `pathSizes` sub-object (`twSize`, `prjSize`, `buildSize`, `filesSize`, `resSize`)
+   *   `lastSaveVersion`, `diskSize` and the `pathSizes` sub-object (`twSize`, `prjSize`, `buildSize`, `filesSize`, `resSize`, `otherSize`)
    * @throws {Error} When `du` fails while computing folder sizes
    */
   async getStatus(params)
@@ -1028,6 +1072,7 @@ Node.Project = class Project
         switch (dir) {
           case "branches":
           case "trans":
+          case "tw-source-history":
           case "TwConfig.json":
           case "TwConfig.json.bak":
             status.pathSizes.twSize = (status.pathSizes.twSize || 0) + size;
@@ -1054,6 +1099,9 @@ Node.Project = class Project
             break;
         }
       }
+      //
+      // Include unclassified paths and the directory itself, using the same du snapshot.
+      status.pathSizes.otherSize = status.diskSize - Object.values(status.pathSizes).reduce((total, size) => total + size, 0);
     }
     //
     return status;
@@ -1091,7 +1139,7 @@ Node.Project = class Project
     await this.config.saveConfig();
     //
     // Log the operation
-    this.log("DEBUG", "Updated project configuration", "Project.configure", {config: query});
+    this.log("DEBUG", "Updated project configuration", "Project.configure", {config: Node.Config.redactQuery(query)});
     //
     // If the user changed DESCRIPTION or ICONURL I need to send this information to a new IDE session that
     // have to "apply" that configuration change into the project. If everything is fine I can report to callee
@@ -1102,8 +1150,9 @@ Node.Project = class Project
         throw new Error("Can't configure the project: open IDE session");
       }
       //
-      // No session available. Use a "worker" session
-      let session = this.server.createSession(this, {type: "configProject", params: params.req.query, openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
+      // No session available. Use a "worker" session. Without the AUTK: the session does not need it, and
+      // writes these parameters to the log
+      let session = this.server.createSession(this, {type: "configProject", params: Node.Config.redactQuery(params.req.query), openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
       await session.waitCompleted();
     }
   }
@@ -1120,7 +1169,9 @@ Node.Project = class Project
   async teamworksCmd(params)
   {
     let command = params.tokens[0];
-    let session = this.server.createSession(this, {type: "teamworksCmd", twcommand: command, twparams: params.req.query, openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
+    //
+    // Without the AUTK: TwManager does not need it, and writes these parameters to the log
+    let session = this.server.createSession(this, {type: "teamworksCmd", twcommand: command, twparams: Node.Config.redactQuery(params.req.query), openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
     let result = await session.waitCompleted();
     return result.data;
   }
@@ -1182,7 +1233,7 @@ Node.Project = class Project
     else
       pathCloud = `users/${this.config.serverType}/${this.user.userName}/backups/projects/${this.name}/${this.name}.tar.gz`;
     //
-    this.log("DEBUG", "Project backup", "Project.backup", {pathCloud, params: (params.req ? params.req.query : undefined)});
+    this.log("DEBUG", "Project backup", "Project.backup", {pathCloud, params: (params.req ? Node.Config.redactQuery(params.req.query) : undefined)});
     //
     try {
       let err;
@@ -1315,7 +1366,7 @@ Node.Project = class Project
    * - Permissions are fixed via `ChownChmod` when running on the server.
    * - On `mode=clone` or `mode=fork` a `TWrestore` worker session is run to
    *   finalize the TeamWorks state; on `clone` the TeamWorks state is also wiped
-   *   (branches/, trans/, TwConfig.json).
+   *   (branches/, trans/, tw-source-history/, TwConfig.json).
    * - The temp folder is always removed in the `finally` block.
    *
    * @param {Object} params - Request context
@@ -1347,7 +1398,7 @@ Node.Project = class Project
     else
       pathCloud = `users/${this.config.serverType}/${this.user.userName}/backups/projects/${this.name}/${this.name}.tar.gz`;
     //
-    this.log("DEBUG", "Project restore", "Project.restore", {pathCloud, params: (params.req ? params.req.query : undefined)});
+    this.log("DEBUG", "Project restore", "Project.restore", {pathCloud, params: (params.req ? Node.Config.redactQuery(params.req.query) : undefined)});
     //
     try {
       let err;
@@ -1464,6 +1515,13 @@ Node.Project = class Project
             }
             catch (err) {
               throw new Error(`Error deleting the TRANS folder: ${err.message || err}`, {cause: err});
+            }
+            //
+            try {
+              await Node.fs.promises.rm(Node.path.join(path, "tw-source-history"), {recursive: true, force: true});
+            }
+            catch (err) {
+              throw new Error(`Error deleting the source history folder: ${err.message || err}`, {cause: err});
             }
             //
             try {
@@ -1610,11 +1668,13 @@ Node.Project = class Project
 
 
   /**
-   * Reset the TeamWorks state by removing `branches`, `trans`, `TwConfig.json`
+   * Reset the TeamWorks state by removing `branches`, `trans`, `tw-source-history`, `TwConfig.json`
    * and `TwConfig.json.bak`, then recreating an empty `branches` folder with
-   * correct ownership.
-   * @param {Object} params - Request context (unused, kept for signature consistency)
-   * @throws {Error} When permissions, removals or folder creation fail
+   * correct ownership. An IDS project on TeamWorks has a bucket and relatives to keep in step:
+   * its reset runs in a worker session, see {@link Node.Project#resetTWHistory}.
+   * @param {Object} params - Request context
+   * @returns {Promise<Object|undefined>} For an IDS project on TeamWorks, what the reset found and did
+   * @throws {Error} With code 409 when the project is open, or when permissions, removals or folder creation fail
    */
   async resetTW(params)
   {
@@ -1623,17 +1683,30 @@ Node.Project = class Project
     let logData;
     //
     try {
-      // First I need to "fix" permissions
-      try {
-        await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path]);
+      // A running child would rewrite TwConfig.json from memory at its next save
+      if (this.server.getOpenSession(this)) {
+        warning = true;
+        let err = new Error("Can't reset TeamWorks: open IDE session");
+        err.code = 409;
+        throw err;
       }
-      catch (err) {
-        logData = {OSUser: this.user.OSUser, path};
-        throw new Error(`Error changing project folder permissions: ${err.message || err}`, {cause: err});
+      //
+      if (this.twMaster || this.twFork)
+        return await this.resetTWHistory(params);
+      //
+      // First I need to "fix" permissions where the root helper is available
+      if (this.server.canExecAsRoot) {
+        try {
+          await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, path]);
+        }
+        catch (err) {
+          logData = {OSUser: this.user.OSUser, path};
+          throw new Error(`Error changing project folder permissions: ${err.message || err}`, {cause: err});
+        }
       }
       //
       // I've to delete all this objects
-      let objectsToRemove = ["branches", "trans", "TwConfig.json", "TwConfig.json.bak"];
+      let objectsToRemove = ["branches", "trans", "tw-source-history", "TwConfig.json", "TwConfig.json.bak"];
       for (let objPath of objectsToRemove) {
         let obj = Node.path.join(path, objPath);
         try {
@@ -1655,12 +1728,14 @@ Node.Project = class Project
       }
       //
       // Fix branches directory (it's created by me... I'm not the OSUser)
-      try {
-        await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, Node.path.join(path, "branches")]);
-      }
-      catch (err) {
-        logData = {OSUser: this.user.OSUser, path};
-        throw new Error(`Error changing branches folder permissions: ${err.message || err}`, {cause: err});
+      if (this.server.canExecAsRoot) {
+        try {
+          await this.server.execFileAsRoot("ChownChmod", [this.user.OSUser, Node.path.join(path, "branches")]);
+        }
+        catch (err) {
+          logData = {OSUser: this.user.OSUser, path};
+          throw new Error(`Error changing branches folder permissions: ${err.message || err}`, {cause: err});
+        }
       }
       //
       // Log the operation
@@ -1670,6 +1745,27 @@ Node.Project = class Project
       this.log(warning ? "WARN" : "ERROR", err.message || err, "Project.resetTW", logData);
       throw err;
     }
+  }
+
+
+  /**
+   * Resets the history of an IDS project on TeamWorks in a worker session, where the TwManager
+   * and the bucket driver know the roles of the project and its relatives
+   * ({@link Node.TwManager#resetHistory}).
+   * @param {Object} params - Request context
+   * @returns {Promise<Object>} What the reset found and did (see {@link Node.TwManager#historyResetInfo})
+   * @throws {Error} The reason the reset was refused, or the failure of one of its steps
+   */
+  async resetTWHistory(params)
+  {
+    let session = this.server.createSession(this, {
+      type: "resetTW",
+      openParams: {
+        version: this.resolveSessionVersion(params.req?.query.version)
+      }
+    });
+    let result = await session.waitCompleted();
+    return result.data;
   }
 
 
@@ -1684,7 +1780,10 @@ Node.Project = class Project
    */
   async backupBranch(params)
   {
-    let form = new Node.multiparty.Form();
+    // Hashes accompany the existing id list; retain the supported history size.
+    let form = new Node.multiparty.Form({
+      maxFieldsSize: 8 * 1024 * 1024
+    });
     //
     // Parse form data
     let fields;
@@ -1703,9 +1802,10 @@ Node.Project = class Project
     let commits = fields.commits[0];
     let user = fields.user[0];
     let project = fields.project[0];
+    let sourceHistory = fields.sourceHistory?.[0];
     //
     // Creates a new session that backes up the given branch
-    let session = this.server.createSession(this, {type: "backupBranch", branch, commits, user, project, openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
+    let session = this.server.createSession(this, {type: "backupBranch", branch, commits, user, project, sourceHistory, openParams: {version: this.resolveSessionVersion(params.req?.query.version)}});
     await session.waitCompleted();
   }
 
@@ -1918,7 +2018,7 @@ Node.Project = class Project
             return await this.handleFileSystem(params);
 
           default:
-            this.log("WARN", "Invalid Command", "Project.execCommand", {cmd: command, url: params.req.originalUrl});
+            this.log("WARN", "Invalid Command", "Project.execCommand", {cmd: command, url: Node.Config.redactUrl(params.req.originalUrl)});
             throw new Error("Invalid Command");
         }
     }

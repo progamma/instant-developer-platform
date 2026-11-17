@@ -12,6 +12,14 @@ var Node = Node || {};
  * @namespace Node.DevAgentOptionsStore
  */
 Node.DevAgentOptionsStore = {};
+Node.DevAgentOptionsStore.DEFAULT_SESSION_STORAGE_MB = 500;
+
+
+/** Normalizes the history quota in decimal MB; zero disables the space limit. */
+Node.DevAgentOptionsStore.sessionStorageMB = function (value)
+{
+  return Number.isSafeInteger(value) && value >= 0 ? value : Node.DevAgentOptionsStore.DEFAULT_SESSION_STORAGE_MB;
+};
 
 // The existing DevAgent cipher and config.json remain the only persistent settings store.
 let crypto = require("node:crypto");

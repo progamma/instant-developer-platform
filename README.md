@@ -25,6 +25,7 @@ La versione di riferimento è [node.js](https://nodejs.org) v22.23. Per installa
 curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash
 sudo apt-get install -y nodejs
 ```
+Questi comandi installano l'ultima versione 22.x disponibile, che può essere più recente di quella di riferimento.
 
 **Nota**:
 Per versioni precedenti di Instant Developer Cloud si consiglia di utilizzare la tabella sottostante
@@ -44,6 +45,12 @@ Per installare pm2 si usa la versione di npm inclusa in Node.js, senza aggiornar
 ```
 sudo npm install pm2@6.0.14 -g
 ```
+Se npm propone di aggiornarsi a una nuova versione maggiore (ad esempio la 12), il suggerimento va ignorato.
+
+Il server cerca npm in */usr/local/bin*. Con Node.js installato da NodeSource npm si trova invece in */usr/bin*, quindi va creato il collegamento (vedi [Problemi noti](#problemi-noti)):
+```
+sudo ln -s /usr/bin/npm /usr/local/bin/npm
+```
 
 ### Installazione di Postgres 13
 1. installazione di Postgres
@@ -53,11 +60,16 @@ sudo sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ $(lsb_release -sc
 sudo apt-get -y update
 sudo apt-get install postgresql-13 postgresql-13-pgvector
 ```
+apt installa l'ultima versione 13.x disponibile, che può essere più recente di quella di riferimento.
+
 Il pacchetto *postgresql-13-pgvector* è necessario dalla versione 25.5 del framework: il server crea l'estensione *vector* in ogni nuovo database e, se il pacchetto manca, l'installazione delle applicazioni con database fallisce.
 
 Su Ubuntu 26.04 il comando *apt-key* non esiste più: vedi [Problemi noti](#problemi-noti).
 
-È necessario configurare le credenziali per l'utente che accederà al database, che dovranno essere riportate nel file di configurazione config.json (dbUser e dbPassword).
+È necessario configurare le credenziali per l'utente che accederà al database, che dovranno essere riportate nel file di configurazione config.json (dbUser e dbPassword). Ad esempio, per impostare la password dell'utente *postgres*:
+```
+sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'password'"
+```
 
 ### Download del pacchetto da github e configurazione
 Per il download del pacchetto su linux da riga di comando è possibile usare 
@@ -215,6 +227,12 @@ Per evitarlo va usata la versione di npm inclusa in Node.js 22 (vedi [Versioni d
 
 #### Estensione vector non disponibile
 Se l'installazione di un'applicazione con database fallisce e nel log del server compare *extension "vector" is not available*, manca il pacchetto *postgresql-13-pgvector* (vedi [Installazione di Postgres 13](#installazione-di-postgres-13)).
+
+#### Pacchetti npm personalizzati non installati
+Se l'installazione di un pacchetto npm personalizzato dalla console fallisce e nel log compare *Error while executing NPM UPDATE: [object Object]*, il server non trova npm in */usr/local/bin*. Con Node.js installato da NodeSource npm si trova in */usr/bin*. Creare il collegamento:
+```
+sudo ln -s /usr/bin/npm /usr/local/bin/npm
+```
 
 ### Nota Bene
 L’accesso al Servizio di Supporto Tecnico non è consentito per richieste di supporto relative a problematiche riguardanti la pubblicazione su server manuale.

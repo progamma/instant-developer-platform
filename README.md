@@ -108,14 +108,11 @@ sudo npm install
 ```
 
 #### In caso di errori nell'aggiornamento
-In caso di errori nell'aggiornamento tramite il comando *npm install* è necessario procedere con l'installazione manuale dei pacchetti che falliscono l'aggiornamento, cercando di risolvere i problemi uno per uno. 
-
-Di seguito alcuni problemi noti all'installazione di pacchetti specifici:
-1. puppeteer@2.1.1 - alcune distribuzioni di linux dànno errore con l'installazione di puppeteer@2.1.1, dando errore *Error: EACCES: permission denied, mkdir '/idcloud/idserver/node_modules/puppeteer/.local-chromium'*. In questo caso una possibile soluzione è installarlo tramite il comando *sudo npm install puppeteer#2.1.1 --unsafe-perm=true*.
+In caso di errori nell'aggiornamento tramite il comando *npm install* è necessario procedere con l'installazione manuale dei pacchetti che falliscono l'aggiornamento, cercando di risolvere i problemi uno per uno. Vedi anche [Problemi noti](#problemi-noti).
 
 #### Aggiungere utente e gruppo indert
 ```
-sudo adduser indert
+sudo useradd -m -s /bin/bash indert
 sudo chown -R indert:indert /idcloud
 sudo chmod -R 755 /idcloud
 ```
